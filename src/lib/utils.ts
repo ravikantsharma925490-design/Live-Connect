@@ -18,22 +18,44 @@ export function generateUUID(): string {
   });
 }
 
+export function parseDate(dateInput: string | Date | number | null | undefined): Date | null {
+  if (!dateInput) return null;
+  if (dateInput instanceof Date) return isNaN(dateInput.getTime()) ? null : dateInput;
+  if (typeof dateInput === 'number') {
+    const d = new Date(dateInput);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  let str = String(dateInput).trim();
+  // If string is sqlite timestamp like "2026-09-17 10:20:30" without offset, ensure parsed as UTC
+  if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d+)?$/.test(str)) {
+    str = str.replace(' ', 'T');
+    if (!str.endsWith('Z')) {
+      str += 'Z';
+    }
+  }
+  const date = new Date(str);
+  if (!isNaN(date.getTime())) return date;
+
+  const fallback = new Date(dateInput);
+  return isNaN(fallback.getTime()) ? null : fallback;
+}
+
 export function formatJoinedYear(dateString: string | Date | null | undefined): string {
-  if (!dateString) return new Date().getFullYear().toString();
-  const date = typeof dateString === 'string' ? new Date(dateString) : dateString;
-  if (isNaN(date.getTime())) return new Date().getFullYear().toString();
+  const date = parseDate(dateString);
+  if (!date) return new Date().getFullYear().toString();
   return date.getFullYear().toString();
 }
 
-export function formatTime(dateString: string | Date): string {
-  const date = typeof dateString === 'string' ? new Date(dateString) : dateString;
-  if (isNaN(date.getTime())) return '';
-  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+export function formatTime(dateString: string | Date | number | null | undefined): string {
+  const date = parseDate(dateString);
+  if (!date) return '';
+  // Formats in user's phone / device local timezone
+  return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true });
 }
 
-export function formatDate(dateString: string | Date): string {
-  const date = typeof dateString === 'string' ? new Date(dateString) : dateString;
-  if (isNaN(date.getTime())) return '';
+export function formatDate(dateString: string | Date | number | null | undefined): string {
+  const date = parseDate(dateString);
+  if (!date) return '';
   
   const now = new Date();
   const isToday = date.toDateString() === now.toDateString();
@@ -57,10 +79,9 @@ export function formatDate(dateString: string | Date): string {
   return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 
-export function formatTimestamp(dateString: string | Date | null | undefined): string {
-  if (!dateString) return '';
-  const date = typeof dateString === 'string' ? new Date(dateString) : dateString;
-  if (isNaN(date.getTime())) return '';
+export function formatTimestamp(dateString: string | Date | number | null | undefined): string {
+  const date = parseDate(dateString);
+  if (!date) return '';
 
   const now = new Date();
   const isToday = date.toDateString() === now.toDateString();
@@ -69,7 +90,7 @@ export function formatTimestamp(dateString: string | Date | null | undefined): s
   yesterday.setDate(now.getDate() - 1);
   const isYesterday = date.toDateString() === yesterday.toDateString();
 
-  const timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const timeStr = formatTime(date);
 
   if (isToday) {
     return `Today at ${timeStr}`;
@@ -81,24 +102,23 @@ export function formatTimestamp(dateString: string | Date | null | undefined): s
   return `${date.toLocaleDateString([], { month: 'short', day: 'numeric' })} at ${timeStr}`;
 }
 
-export function formatChatDateHeader(dateInput: string | Date | null | undefined): string {
-  if (!dateInput) return '';
-  const date = typeof dateInput === 'string' ? new Date(dateInput) : dateInput;
-  if (isNaN(date.getTime())) return '';
+export function formatChatDateHeader(dateInput: string | Date | number | null | undefined): string {
+  const date = parseDate(dateInput);
+  if (!date) return '';
 
-  const dayOfWeek = date.toLocaleDateString('en-US', { weekday: 'long' });
+  const dayOfWeek = date.toLocaleDateString([], { weekday: 'long' });
   const dayNum = date.getDate();
-  const monthName = date.toLocaleDateString('en-US', { month: 'long' });
+  const monthName = date.toLocaleDateString([], { month: 'long' });
   const year = date.getFullYear();
 
   return `${dayOfWeek}, ${dayNum} ${monthName} ${year}`;
 }
 
-export function isDifferentDay(date1?: string | Date | null, date2?: string | Date | null): boolean {
+export function isDifferentDay(date1?: string | Date | number | null, date2?: string | Date | number | null): boolean {
   if (!date1 || !date2) return true;
-  const d1 = typeof date1 === 'string' ? new Date(date1) : date1;
-  const d2 = typeof date2 === 'string' ? new Date(date2) : date2;
-  if (isNaN(d1.getTime()) || isNaN(d2.getTime())) return true;
+  const d1 = parseDate(date1);
+  const d2 = parseDate(date2);
+  if (!d1 || !d2) return true;
   return d1.toDateString() !== d2.toDateString();
 }
 
@@ -106,8 +126,8 @@ export function formatLastSeen(dateString: string | null | undefined, isOnline: 
   if (isOnline) return 'Online';
   if (!dateString) return 'Offline';
   
-  const date = new Date(dateString);
-  if (isNaN(date.getTime())) return 'Offline';
+  const date = parseDate(dateString);
+  if (!date) return 'Offline';
   
   const now = new Date();
   const diffMinutes = Math.floor((now.getTime() - date.getTime()) / (1000 * 60));
