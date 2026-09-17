@@ -219,6 +219,7 @@ export const MessagesTab: React.FC<MessagesTabProps> = ({
           onBack={() => onSelectConversation(null)}
           onStartCall={onStartCall}
           onOpenProfileView={onOpenProfileView}
+          onOpenGroupProfile={onOpenGroupProfile}
           onDeleteConversation={onDeleteConversation}
           relationStatus={activeRelationStatus}
           onFollow={onFollow}

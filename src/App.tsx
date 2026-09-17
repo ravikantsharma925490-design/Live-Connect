@@ -747,9 +747,11 @@ export default function App() {
       <CreateGroupModal
         isOpen={isCreateGroupOpen}
         onClose={() => setIsCreateGroupOpen(false)}
-        currentUserId={user?.id || ''}
-        currentUserProfile={activeUserProfile || undefined}
+        currentUser={profile}
+        currentUserProfile={activeUserProfile || profile || undefined}
+        currentUserId={user?.id || profile?.id || ''}
         onGroupCreated={(groupConvId) => {
+          setActiveTab('messages');
           fetchConversations();
           setActiveConversationId(groupConvId);
         }}

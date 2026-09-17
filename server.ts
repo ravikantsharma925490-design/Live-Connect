@@ -2640,14 +2640,17 @@ app.post('/api/conversations/list', (req, res) => {
 app.post('/api/groups/create', async (req, res) => {
   try {
     const { name, description, avatarUrl, memberIds, creatorId, creatorProfile } = req.body;
-    if (!name || !name.trim() || !creatorId || !Array.isArray(memberIds)) {
-      return res.status(400).json({ error: 'Name, creatorId, and memberIds are required' });
+    if (!name || !name.trim() || !creatorId) {
+      return res.status(400).json({ error: 'Group name and creatorId are required' });
     }
 
+    const safeMemberIds = Array.isArray(memberIds) ? memberIds : [];
     const groupId = generateUUID();
     const nowIso = new Date().toISOString();
 
-    const allMemberIds = Array.from(new Set([creatorId, ...memberIds].filter(Boolean)));
+    deletedConversationsServerStore.delete(groupId);
+
+    const allMemberIds = Array.from(new Set([creatorId, ...safeMemberIds].filter(Boolean)));
     const membersMeta: Record<string, any> = {};
     if (creatorProfile?.id) {
       membersMeta[creatorProfile.id] = creatorProfile;

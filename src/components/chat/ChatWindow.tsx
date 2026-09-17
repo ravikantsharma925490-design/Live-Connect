@@ -39,6 +39,7 @@ interface ChatWindowProps {
   onBack: () => void;
   onStartCall: (peer: Profile, type: CallType) => void;
   onOpenProfileView?: (profile: Profile) => void;
+  onOpenGroupProfile?: (conversation: Conversation) => void;
   onDeleteConversation?: (conversationId: string) => void;
   relationStatus?: UserRelationStatus;
   onFollow?: (peer: Profile) => Promise<boolean>;
@@ -53,6 +54,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   onBack,
   onStartCall,
   onOpenProfileView,
+  onOpenGroupProfile,
   onDeleteConversation,
   relationStatus,
   onFollow,
@@ -174,18 +176,25 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     }
   }, [conversation?.id, currentUser?.id, messages.length, markMessagesAsRead]);
 
-  const otherUser = conversation?.other_member;
-  const isSelf = Boolean(currentUser && otherUser && otherUser.id === currentUser.id);
-  const rawDisplayName = otherUser?.display_name || otherUser?.username || 'Chat';
+  const isGroup = conversation?.type === 'group';
+  const otherUser = isGroup ? null : conversation?.other_member;
+  const isSelf = Boolean(!isGroup && currentUser && otherUser && otherUser.id === currentUser.id);
+  const rawDisplayName = isGroup
+    ? (conversation?.name || 'Group Chat')
+    : (otherUser?.display_name || otherUser?.username || 'Chat');
   const displayName = isSelf ? `${rawDisplayName} (You)` : rawDisplayName;
-  const username = otherUser?.username || '';
-  const avatarUrl = otherUser?.avatar_url;
+  const username = isGroup ? '' : (otherUser?.username || '');
+  const avatarUrl = isGroup ? (conversation?.avatar_url || null) : otherUser?.avatar_url;
+  const memberCount =
+    conversation?.member_ids?.length ||
+    (conversation?.members_meta ? Object.keys(conversation.members_meta).length : 0) ||
+    1;
 
   const currentConvIdRef = useRef<string | null>(null);
 
-  // Direct Live Relation Check from backend
+  // Direct Live Relation Check from backend (only for direct 1-on-1 chats)
   const checkLiveRelation = useCallback(async () => {
-    if (!currentUser?.id || !otherUser?.id || isSelf) return;
+    if (isGroup || !currentUser?.id || !otherUser?.id || isSelf) return;
     setIsRefreshingStatus(true);
     try {
       const res = await fetch('/api/relations/status', {
@@ -207,7 +216,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     } finally {
       setIsRefreshingStatus(false);
     }
-  }, [currentUser?.id, currentUser?.username, otherUser?.id, otherUser?.username, isSelf]);
+  }, [isGroup, currentUser?.id, currentUser?.username, otherUser?.id, otherUser?.username, isSelf]);
 
   useEffect(() => {
     const convId = conversation?.id || null;
@@ -223,12 +232,12 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
   // Polling check relation while chat window is open
   useEffect(() => {
-    if (!otherUser?.id || isSelf) return;
+    if (isGroup || !otherUser?.id || isSelf) return;
     const interval = setInterval(() => {
       checkLiveRelation();
     }, 2000);
     return () => clearInterval(interval);
-  }, [otherUser?.id, isSelf, checkLiveRelation]);
+  }, [isGroup, otherUser?.id, isSelf, checkLiveRelation]);
 
   if (!conversation) {
     return (
@@ -238,7 +247,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     );
   }
 
-  const isBlocked = Boolean(liveRelation ? liveRelation.isBlocked : relationStatus?.isBlocked);
+  const isBlocked = Boolean(!isGroup && (liveRelation ? liveRelation.isBlocked : relationStatus?.isBlocked));
   const isFollowingUser = Boolean(
     localFollowed ||
     (liveRelation !== null ? liveRelation.isFollowing : relationStatus?.isFollowing)
@@ -247,6 +256,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     liveRelation !== null ? liveRelation.isFollowedBy : relationStatus?.isFollowedBy
   );
   const isMutual =
+    isGroup ||
     isSelf ||
     Boolean(
       (liveRelation && (liveRelation.isMutual || (liveRelation.isFollowing && liveRelation.isFollowedBy))) ||
@@ -254,9 +264,9 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
       (isFollowingUser && isFollowedByUser)
     );
 
-  // canChat & canCall: Can communicate ONLY when mutual follow (or isSelf) and not blocked
-  const canChat = !isBlocked && (isSelf || isMutual);
-  const canCall = !isBlocked && (isSelf || isMutual);
+  // canChat: Always enabled for groups, or 1-on-1 when mutual follow and not blocked
+  const canChat = isGroup || (!isBlocked && (isSelf || isMutual));
+  const canCall = !isGroup && (!isBlocked && (isSelf || isMutual));
 
   const handleSendMessage = async (content: string) => {
     if (!content.trim() || sending) return;
@@ -377,38 +387,59 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             <ArrowLeft className="w-5 h-5" />
           </button>
 
-          {/* User Avatar */}
+          {/* Avatar */}
           <div
-            onClick={() => otherUser && onOpenProfileView?.(otherUser)}
+            onClick={() => {
+              if (isGroup) {
+                onOpenGroupProfile?.(conversation);
+              } else if (otherUser) {
+                onOpenProfileView?.(otherUser);
+              }
+            }}
             className="cursor-pointer shrink-0"
           >
             <UserAvatar
               src={avatarUrl}
               name={displayName}
-              id={otherUser?.id || conversation.id}
+              id={isGroup ? conversation.id : (otherUser?.id || conversation.id)}
               className="w-10 h-10 border border-neutral-200 dark:border-neutral-700"
-              showStatus
+              showStatus={!isGroup}
               isOnline={isOnline}
             />
           </div>
 
-          {/* User Details & Relation Pill */}
+          {/* Details */}
           <div
-            onClick={() => otherUser && onOpenProfileView?.(otherUser)}
+            onClick={() => {
+              if (isGroup) {
+                onOpenGroupProfile?.(conversation);
+              } else if (otherUser) {
+                onOpenProfileView?.(otherUser);
+              }
+            }}
             className="min-w-0 cursor-pointer"
           >
             <div className="flex items-center gap-2">
               <h3 className="font-bold text-sm text-neutral-900 dark:text-neutral-100 truncate hover:text-blue-600 transition-colors">
                 {displayName}
               </h3>
-              {!isSelf && isMutual && !isBlocked && (
+              {isGroup ? (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20">
+                  <Users className="w-3 h-3" /> Group
+                </span>
+              ) : !isSelf && isMutual && !isBlocked ? (
                 <span className="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
                   <UserCheck className="w-3 h-3" /> Mutual Follow
                 </span>
-              )}
+              ) : null}
             </div>
             <p className="text-xs text-neutral-500 dark:text-neutral-400 truncate flex items-center gap-1.5">
-              {isSelf ? (
+              {isGroup ? (
+                <span>
+                  {memberCount} member{memberCount === 1 ? '' : 's'}
+                  {conversation.description ? ` • ${conversation.description}` : ''}
+                </span>
+              ) : isSelf ? (
                 <span className="text-blue-600 dark:text-blue-400 font-medium">Message yourself (Personal notes)</span>
               ) : isOnline ? (
                 <span className="text-emerald-600 dark:text-emerald-400 font-medium">Online</span>
@@ -422,7 +453,15 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
         {/* Call Controls & Actions Dropdown */}
         <div className="flex items-center gap-1.5 shrink-0 relative">
-          {isSelf ? (
+          {isGroup ? (
+            <button
+              onClick={() => onOpenGroupProfile?.(conversation)}
+              className="px-3 py-2 rounded-xl bg-neutral-100 dark:bg-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-700 text-neutral-700 dark:text-neutral-200 text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer"
+            >
+              <Users className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Group Info</span>
+            </button>
+          ) : isSelf ? (
             <button
               onClick={() => {
                 if (!currentUser) return;
@@ -493,6 +532,19 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                   onClick={() => setShowOptionsDropdown(false)}
                 />
                 <div className="absolute right-0 top-full mt-1.5 w-48 bg-white dark:bg-neutral-900 rounded-2xl border border-neutral-200 dark:border-neutral-800 shadow-xl py-1.5 z-30 animate-in fade-in slide-in-from-top-2 duration-150">
+                  {isGroup && (
+                    <button
+                      onClick={() => {
+                        setShowOptionsDropdown(false);
+                        onOpenGroupProfile?.(conversation);
+                      }}
+                      className="w-full px-3.5 py-2 text-left text-xs font-semibold text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 flex items-center gap-2 transition-colors"
+                    >
+                      <Users className="w-3.5 h-3.5 text-neutral-400" />
+                      <span>Group Details</span>
+                    </button>
+                  )}
+
                   <button
                     onClick={() => {
                       setShowOptionsDropdown(false);
@@ -512,7 +564,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                     className="w-full px-3.5 py-2 text-left text-xs font-semibold text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 flex items-center gap-2 transition-colors border-t border-neutral-100 dark:border-neutral-800"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
-                    <span>Delete Conversation</span>
+                    <span>{isGroup ? 'Delete / Leave Group' : 'Delete Conversation'}</span>
                   </button>
                 </div>
               </>

@@ -7,7 +7,9 @@ import { uploadMediaToServer } from '@/src/lib/mediaUpload';
 interface CreateGroupModalProps {
   isOpen: boolean;
   onClose: () => void;
-  currentUser: Profile | null;
+  currentUser?: Profile | null;
+  currentUserProfile?: Profile | null;
+  currentUserId?: string;
   onGroupCreated: (conversationId: string) => void;
 }
 
@@ -15,8 +17,13 @@ export const CreateGroupModal: React.FC<CreateGroupModalProps> = ({
   isOpen,
   onClose,
   currentUser,
+  currentUserProfile,
+  currentUserId,
   onGroupCreated,
 }) => {
+  const effectiveUser = currentUser || currentUserProfile;
+  const effectiveUserId = effectiveUser?.id || currentUserId || '';
+
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
@@ -30,7 +37,7 @@ export const CreateGroupModal: React.FC<CreateGroupModalProps> = ({
 
   // Fetch available users to add to group
   useEffect(() => {
-    if (!isOpen || !currentUser) return;
+    if (!isOpen || !effectiveUserId) return;
 
     let isMounted = true;
     setLoadingUsers(true);
@@ -38,13 +45,13 @@ export const CreateGroupModal: React.FC<CreateGroupModalProps> = ({
     fetch('/api/users/search', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: '', userId: currentUser.id }),
+      body: JSON.stringify({ query: '', userId: effectiveUserId }),
     })
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (!isMounted) return;
         if (data?.users && Array.isArray(data.users)) {
-          const filtered = data.users.filter((u: Profile) => u.id !== currentUser.id);
+          const filtered = data.users.filter((u: Profile) => u.id !== effectiveUserId);
           setUsers(filtered);
         }
       })
@@ -56,7 +63,7 @@ export const CreateGroupModal: React.FC<CreateGroupModalProps> = ({
     return () => {
       isMounted = false;
     };
-  }, [isOpen, currentUser]);
+  }, [isOpen, effectiveUserId]);
 
   if (!isOpen) return null;
 
@@ -107,7 +114,10 @@ export const CreateGroupModal: React.FC<CreateGroupModalProps> = ({
       setError('Group name is required');
       return;
     }
-    if (!currentUser) return;
+    if (!effectiveUserId) {
+      setError('User session not found');
+      return;
+    }
 
     setSubmitting(true);
     setError(null);
@@ -121,8 +131,8 @@ export const CreateGroupModal: React.FC<CreateGroupModalProps> = ({
           description: description.trim(),
           avatarUrl,
           memberIds: selectedUserIds,
-          creatorId: currentUser.id,
-          creatorProfile: currentUser,
+          creatorId: effectiveUserId,
+          creatorProfile: effectiveUser || { id: effectiveUserId, display_name: 'Admin', username: 'admin' },
         }),
       });
 
