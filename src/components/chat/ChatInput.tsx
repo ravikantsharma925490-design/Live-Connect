@@ -181,12 +181,18 @@ export const STICKER_PACKS = [
   },
 ];
 
+import { Conversation, Message, Profile } from '@/src/types';
+
 interface ChatInputProps {
   onSendMessage: (content: string) => Promise<boolean> | void;
   displayName: string;
   disabled?: boolean;
   sending?: boolean;
   onTyping?: () => void;
+  conversation?: Conversation | null;
+  replyingToMessage?: Message | null;
+  onCancelReply?: () => void;
+  groupMembers?: Profile[];
 }
 
 export const ChatInput: React.FC<ChatInputProps> = ({
@@ -195,10 +201,16 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   disabled = false,
   sending = false,
   onTyping,
+  conversation,
+  replyingToMessage,
+  onCancelReply,
+  groupMembers = [],
 }) => {
   const [inputText, setInputText] = useState('');
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showStickerPicker, setShowStickerPicker] = useState(false);
+  const [showMentionsPopover, setShowMentionsPopover] = useState(false);
+  const [mentionQuery, setMentionQuery] = useState('');
   const [activeCategory, setActiveCategory] = useState(0);
 
   // Staged Image Attachment State
@@ -269,8 +281,9 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   const processSelectedImage = (file: File) => {
     if (!file.type.startsWith('image/')) return;
 
-    if (file.size > 5 * 1024 * 1024) {
-      alert('Photo size must be 5 MB or less.');
+    const maxBytes = conversation?.type === 'group' ? 2 * 1024 * 1024 : 5 * 1024 * 1024;
+    if (file.size > maxBytes) {
+      alert(`Photo size must be ${conversation?.type === 'group' ? '2 MB' : '5 MB'} or less.`);
       return;
     }
 
@@ -359,8 +372,13 @@ export const ChatInput: React.FC<ChatInputProps> = ({
       }
 
       // Case 3: Standard Text Message
-      const text = inputText.trim();
+      let text = inputText.trim();
       if (!text) return;
+
+      if (replyingToMessage) {
+        text = `[REPLY:${replyingToMessage.id}] ${text}`;
+        onCancelReply?.();
+      }
 
       setInputText('');
       await onSendMessage(text);
@@ -505,6 +523,17 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         return;
       }
 
+      if (conversation?.type === 'group' && audioBlob.size > 10 * 1024 * 1024) {
+        alert('Group voice note must be 10 MB or less.');
+        setIsRecording(false);
+        setRecordingSeconds(0);
+        audioChunksRef.current = [];
+        try {
+          mediaRecorder.stream.getTracks().forEach((t) => t.stop());
+        } catch {}
+        return;
+      }
+
       setIsUploadingMedia(true);
 
       try {
@@ -581,6 +610,34 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         onChange={handleFileChange}
         className="hidden"
       />
+
+      {/* Reply Preview Banner */}
+      <AnimatePresence>
+        {replyingToMessage && (
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 10 }}
+            className="mb-2 p-2.5 rounded-2xl bg-blue-50 dark:bg-blue-950/40 border-l-4 border-blue-600 flex items-center justify-between gap-3 shadow-xs"
+          >
+            <div className="min-w-0 flex-1 text-xs">
+              <span className="font-bold text-blue-600 dark:text-blue-400 block">
+                Replying to {replyingToMessage.sender?.display_name || replyingToMessage.sender?.username || 'User'}
+              </span>
+              <p className="text-neutral-600 dark:text-neutral-300 truncate">
+                {replyingToMessage.content}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={onCancelReply}
+              className="p-1 rounded-lg text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Staged Image Thumbnail Preview Strip */}
       <AnimatePresence>

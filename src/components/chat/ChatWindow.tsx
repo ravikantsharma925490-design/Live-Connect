@@ -18,8 +18,10 @@ import {
   CheckCircle2,
   RefreshCw,
   Users,
+  Pin,
+  X,
 } from 'lucide-react';
-import { Conversation, Profile, CallType, UserRelationStatus } from '@/src/types';
+import { Conversation, Profile, CallType, UserRelationStatus, Message } from '@/src/types';
 import { MessageBubble } from './MessageBubble';
 import { ChatInput } from './ChatInput';
 import { ImageViewerModal } from './ImageViewerModal';
@@ -63,6 +65,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   const [liveRelation, setLiveRelation] = useState<UserRelationStatus | null>(null);
   const [isRefreshingStatus, setIsRefreshingStatus] = useState(false);
   const [viewingImage, setViewingImage] = useState<{ url: string; caption?: string } | null>(null);
+  const [pinnedMessage, setPinnedMessage] = useState<Message | null>(conversation?.pinned_message || null);
+  const [replyingToMessage, setReplyingToMessage] = useState<Message | null>(null);
   const chatContainerRef = useRef<HTMLDivElement | null>(null);
   const isNearBottomRef = useRef(true);
 
@@ -82,6 +86,22 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     typingUserId,
     sendTypingSignal,
   } = useMessages(conversation?.id || null, currentUser?.id, isChatVisible, conversation);
+
+  // Sync pinnedMessage on conversation change
+  useEffect(() => {
+    setPinnedMessage(conversation?.pinned_message || null);
+    setReplyingToMessage(null);
+  }, [conversation?.id]);
+
+  // Sync pinnedMessage when messages arrive if pinned_message_id is present
+  useEffect(() => {
+    if (conversation?.pinned_message_id && messages.length > 0) {
+      const found = messages.find((m) => m.id === conversation?.pinned_message_id);
+      if (found) {
+        setPinnedMessage(found);
+      }
+    }
+  }, [conversation?.pinned_message_id, messages]);
 
   // Scroll helpers
   const checkIsNearBottom = useCallback(() => {
@@ -501,6 +521,50 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
         </div>
       </header>
 
+      {/* Pinned Message Banner */}
+      {pinnedMessage && (
+        <div className="bg-amber-50 dark:bg-amber-950/40 border-b border-amber-200 dark:border-amber-800/60 px-4 py-2 flex items-center justify-between gap-2 text-xs shadow-xs z-10 animate-in fade-in slide-in-from-top duration-200">
+          <div
+            onClick={() => {
+              const el = document.getElementById(`msg-${pinnedMessage.id}`);
+              if (el) {
+                el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                el.classList.add('ring-2', 'ring-amber-400', 'bg-amber-100/50', 'dark:bg-amber-900/40');
+                setTimeout(() => {
+                  el.classList.remove('ring-2', 'ring-amber-400', 'bg-amber-100/50', 'dark:bg-amber-900/40');
+                }, 2000);
+              }
+            }}
+            className="flex items-center gap-2 min-w-0 cursor-pointer hover:opacity-80 transition-opacity flex-1"
+          >
+            <div className="p-1 rounded-md bg-amber-100 dark:bg-amber-900/80 text-amber-600 dark:text-amber-400 shrink-0">
+              <Pin className="w-3.5 h-3.5 fill-amber-500" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <span className="font-bold text-amber-800 dark:text-amber-300 block text-[11px]">
+                Pinned Message
+              </span>
+              <p className="text-amber-900 dark:text-amber-200/90 truncate text-xs font-medium">
+                {pinnedMessage.content?.startsWith('[VOICE:')
+                  ? '🎙️ Voice Note'
+                  : pinnedMessage.content?.startsWith('[IMAGE:')
+                  ? '📷 Photo Attachment'
+                  : pinnedMessage.content?.startsWith('[STICKER:')
+                  ? '🎨 Expressive Sticker'
+                  : pinnedMessage.content}
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => setPinnedMessage(null)}
+            className="p-1 rounded-lg text-amber-600 dark:text-amber-400 hover:bg-amber-200/50 dark:hover:bg-amber-900/50 transition-colors cursor-pointer"
+            title="Unpin banner"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
       {/* Messages Feed */}
       <div
         ref={chatContainerRef}
@@ -536,6 +600,11 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                       onStartCall={onStartCall}
                       onViewImage={(url, caption) => setViewingImage({ url, caption })}
                       otherUser={otherUser}
+                      onReplyMessage={(msgToReply) => setReplyingToMessage(msgToReply)}
+                      onPinMessage={(msgToPin) =>
+                        setPinnedMessage((prev) => (prev?.id === msgToPin.id ? null : msgToPin))
+                      }
+                      isPinned={pinnedMessage?.id === msg.id}
                     />
                   </React.Fragment>
                 );
@@ -652,6 +721,10 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
               disabled={!canChat || isBlocked}
               sending={sending}
               onTyping={sendTypingSignal}
+              conversation={conversation}
+              replyingToMessage={replyingToMessage}
+              onCancelReply={() => setReplyingToMessage(null)}
+              groupMembers={conversation?.group_members?.map((m) => m.user).filter(Boolean) as Profile[]}
             />
           </div>
         )}

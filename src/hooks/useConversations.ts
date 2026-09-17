@@ -97,7 +97,7 @@ export function cleanAndDeduplicateConversations(convs: Conversation[], userId?:
       if (other) otherMemberId = other;
     }
 
-    const isDirect = c.type === 'direct' || (!c.type && Boolean(otherMemberId)) || Boolean(otherMemberId);
+    const isDirect = c.type === 'group' ? false : (c.type === 'direct' || (!c.type && Boolean(otherMemberId)));
 
     if (isDirect && otherMemberId) {
       const canonicalId = userId ? getDeterministicDirectConvId(userId, otherMemberId) : c.id;
@@ -993,6 +993,45 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
 
   const activeConversation = conversations.find((c) => c.id === activeConversationId) || null;
 
+  const createGroup = async (
+    name: string,
+    description: string,
+    avatarUrl: string | null,
+    memberIds: string[],
+    currentUserProfile: Profile
+  ): Promise<string | null> => {
+    try {
+      const res = await fetch('/api/groups/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name,
+          description,
+          avatarUrl,
+          memberIds,
+          creatorId: currentUserProfile.id,
+          creatorProfile: currentUserProfile,
+        }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || 'Failed to create group');
+      }
+
+      const data = await res.json();
+      if (data.conversation) {
+        updateConversationsState((prev) => cleanAndDeduplicateConversations([data.conversation, ...prev], currentUserId));
+        setActiveConversationId(data.conversationId);
+        return data.conversationId;
+      }
+      return null;
+    } catch (err: any) {
+      console.error('Error creating group:', err);
+      return null;
+    }
+  };
+
   return {
     conversations,
     loading,
@@ -1002,6 +1041,7 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
     fetchConversations,
     searchUsers,
     startConversation,
+    createGroup,
     deleteConversation,
     markConversationAsRead,
   };

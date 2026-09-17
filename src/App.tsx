@@ -16,6 +16,9 @@ import { SearchTab } from '@/src/components/tabs/SearchTab';
 import { CallsTab } from '@/src/components/tabs/CallsTab';
 import { ProfileTab } from '@/src/components/tabs/ProfileTab';
 import { UserSearchModal } from '@/src/components/chat/UserSearchModal';
+import { CreateGroupModal } from '@/src/components/chat/CreateGroupModal';
+import { GroupProfileModal } from '@/src/components/chat/GroupProfileModal';
+import { ForwardMessageModal } from '@/src/components/chat/ForwardMessageModal';
 import { IncomingCallModal } from '@/src/components/calls/IncomingCallModal';
 import { AudioCallScreen } from '@/src/components/calls/AudioCallScreen';
 import { VideoCallScreen } from '@/src/components/calls/VideoCallScreen';
@@ -31,7 +34,7 @@ import { PrivacyPolicy } from '@/src/components/legal/PrivacyPolicy';
 import { DeleteAccountPage } from '@/src/components/legal/DeleteAccountPage';
 import { OnboardingScreen } from '@/src/components/auth/OnboardingScreen';
 import { BannedScreen } from '@/src/components/auth/BannedScreen';
-import { Profile } from '@/src/types';
+import { Profile, Conversation, Message } from '@/src/types';
 
 export default function App() {
   const {
@@ -105,6 +108,7 @@ export default function App() {
     fetchConversations,
     searchUsers,
     startConversation,
+    createGroup,
     deleteConversation,
     markConversationAsRead,
   } = useConversations(user?.id, activeTab);
@@ -140,6 +144,9 @@ export default function App() {
 
   // Modals state
   const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [isCreateGroupOpen, setIsCreateGroupOpen] = useState(false);
+  const [viewingGroup, setViewingGroup] = useState<Conversation | null>(null);
+  const [forwardingMessage, setForwardingMessage] = useState<any>(null);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isConfigOpen, setIsConfigOpen] = useState(false);
@@ -475,6 +482,9 @@ export default function App() {
             currentUser={profile}
             onSelectConversation={(id) => setActiveConversationId(id)}
             onOpenSearch={() => setIsSearchOpen(true)}
+            onOpenCreateGroup={() => setIsCreateGroupOpen(true)}
+            onOpenGroupProfile={(c) => setViewingGroup(c)}
+            onOpenForwardModal={(m) => setForwardingMessage(m)}
             onStartCall={startCall}
             onOpenProfileView={(p) => {
               setViewingProfile(p);
@@ -732,6 +742,40 @@ export default function App() {
         onBlock={socialRelations.blockUser}
         onUnblock={socialRelations.unblockUser}
       />
+
+      {/* Group Chat System Modals */}
+      <CreateGroupModal
+        isOpen={isCreateGroupOpen}
+        onClose={() => setIsCreateGroupOpen(false)}
+        currentUserId={user?.id || ''}
+        currentUserProfile={activeUserProfile || undefined}
+        onGroupCreated={(groupConvId) => {
+          fetchConversations();
+          setActiveConversationId(groupConvId);
+        }}
+      />
+
+      {viewingGroup && (
+        <GroupProfileModal
+          isOpen={Boolean(viewingGroup)}
+          onClose={() => setViewingGroup(null)}
+          conversation={viewingGroup}
+          currentUser={activeUserProfile}
+          onGroupUpdated={() => {
+            fetchConversations();
+          }}
+        />
+      )}
+
+      {forwardingMessage && (
+        <ForwardMessageModal
+          isOpen={Boolean(forwardingMessage)}
+          onClose={() => setForwardingMessage(null)}
+          message={forwardingMessage}
+          conversations={conversations}
+          currentUserId={user?.id || ''}
+        />
+      )}
 
       <SettingsModal
         isOpen={isSettingsOpen}

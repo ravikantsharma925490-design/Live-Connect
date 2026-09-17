@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Message, Profile, CallType } from '@/src/types';
+import { Message, Profile, CallType, Conversation } from '@/src/types';
 import { cn, formatTime, getAvatarColor, getInitials } from '@/src/lib/utils';
 import { UserAvatar } from '../ui/UserAvatar';
 import {
@@ -21,6 +21,10 @@ import {
   RotateCcw,
   AlertCircle,
   Loader2,
+  Pin,
+  PinOff,
+  Reply,
+  Share2,
 } from 'lucide-react';
 
 // WhatsApp-style accurate SVG call icons
@@ -538,6 +542,12 @@ interface MessageBubbleProps {
   onStartCall?: (peer: Profile, type: CallType) => void;
   onViewImage?: (imageUrl: string, caption?: string) => void;
   otherUser?: Profile;
+  conversation?: Conversation | null;
+  onReplyMessage?: (message: Message) => void;
+  onForwardMessage?: (message: Message) => void;
+  onReactMessage?: (messageId: string, emoji: string) => void;
+  onPinMessage?: (message: Message) => void;
+  isPinned?: boolean;
 }
 
 export const MessageBubble: React.FC<MessageBubbleProps> = ({
@@ -548,6 +558,12 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
   onStartCall,
   onViewImage,
   otherUser,
+  conversation,
+  onReplyMessage,
+  onForwardMessage,
+  onReactMessage,
+  onPinMessage,
+  isPinned = false,
 }) => {
   const [showConfirm, setShowConfirm] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
@@ -911,8 +927,9 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
 
   return (
     <div
+      id={`msg-${message.id}`}
       className={cn(
-        'flex items-end gap-1.5 my-1.5 animate-in fade-in duration-150 group relative',
+        'flex items-end gap-1.5 my-1.5 animate-in fade-in duration-150 group relative transition-all rounded-2xl p-0.5',
         isMine ? 'justify-end' : 'justify-start'
       )}
     >
@@ -928,7 +945,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
 
       {/* Options Menu for Sender */}
       {isMine && (
-        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+        <div className="flex items-center gap-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
           {showConfirm ? (
             <button
               onClick={handleDelete}
@@ -942,7 +959,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
             <div className="relative" ref={menuRef}>
               <button
                 onClick={() => setShowMenu(!showMenu)}
-                className="p-1.5 rounded-lg text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 hover:bg-neutral-200/80 dark:hover:bg-neutral-800 transition-colors"
+                className="p-1.5 rounded-lg text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 hover:bg-neutral-200/80 dark:hover:bg-neutral-800 transition-colors cursor-pointer"
                 title="Message options"
               >
                 <MoreHorizontal className="w-4 h-4" />
@@ -951,14 +968,62 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
               {showMenu && (
                 <div
                   className={cn(
-                    'absolute bottom-full mb-1 z-30 min-w-[130px] p-1 rounded-xl bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 shadow-xl space-y-0.5 animate-in fade-in zoom-in-95 duration-100',
+                    'absolute bottom-full mb-1 z-30 min-w-[140px] p-1 rounded-xl bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 shadow-xl space-y-0.5 animate-in fade-in zoom-in-95 duration-100',
                     isMine ? 'right-0' : 'left-0'
                   )}
                 >
+                  {onReplyMessage && (
+                    <button
+                      onClick={() => {
+                        setShowMenu(false);
+                        onReplyMessage(message);
+                      }}
+                      className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs font-medium text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-lg transition-colors cursor-pointer"
+                    >
+                      <Reply className="w-3.5 h-3.5 text-blue-500" />
+                      <span>Reply</span>
+                    </button>
+                  )}
+
+                  {onPinMessage && (
+                    <button
+                      onClick={() => {
+                        setShowMenu(false);
+                        onPinMessage(message);
+                      }}
+                      className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs font-medium text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-lg transition-colors cursor-pointer"
+                    >
+                      {isPinned ? (
+                        <>
+                          <PinOff className="w-3.5 h-3.5 text-amber-500" />
+                          <span>Unpin</span>
+                        </>
+                      ) : (
+                        <>
+                          <Pin className="w-3.5 h-3.5 text-amber-500" />
+                          <span>Pin Message</span>
+                        </>
+                      )}
+                    </button>
+                  )}
+
+                  {onForwardMessage && (
+                    <button
+                      onClick={() => {
+                        setShowMenu(false);
+                        onForwardMessage(message);
+                      }}
+                      className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs font-medium text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-lg transition-colors cursor-pointer"
+                    >
+                      <Share2 className="w-3.5 h-3.5 text-purple-500" />
+                      <span>Forward</span>
+                    </button>
+                  )}
+
                   {!isVoice && !isImage && (
                     <button
                       onClick={handleCopy}
-                      className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs font-medium text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-lg transition-colors"
+                      className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs font-medium text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-lg transition-colors cursor-pointer"
                     >
                       {copied ? (
                         <>
@@ -977,7 +1042,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
                   {onDeleteMessage && (
                     <button
                       onClick={handleDelete}
-                      className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs font-medium text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-lg transition-colors"
+                      className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs font-medium text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-lg transition-colors cursor-pointer"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                       <span>Delete</span>
@@ -1147,39 +1212,95 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
         </div>
       ) : (
         /* Render Standard Text Message */
-        <div
-          className={cn(
-            'max-w-[82%] md:max-w-[65%] px-4 py-2.5 rounded-2xl shadow-xs relative text-sm leading-relaxed break-words select-text transition-all',
-            isMine
-              ? 'bg-blue-600 text-white rounded-br-xs'
-              : 'bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 border border-neutral-200/90 dark:border-neutral-700/60 rounded-bl-xs'
-          )}
-        >
-          <p className="whitespace-pre-wrap">{message.content}</p>
+        (() => {
+          let replyId = message.reply_to_message_id || null;
+          let replySender = message.reply_to_message?.sender?.display_name || 'Message';
+          let replySnippet = message.reply_to_message?.content || '';
+          let textBody = message.content || '';
 
-          <div
-            className={cn(
-              'flex items-center justify-end gap-1 mt-1 text-[10px] select-none',
-              isMine ? 'text-blue-100/90' : 'text-neutral-400'
-            )}
-          >
-            <span>{formatTime(message.created_at)}</span>
-            {isMine && (
-              <span className="inline-flex items-center ml-0.5">
-                {message.is_read ? (
-                  <CheckCheck className="w-4 h-4 text-cyan-300" strokeWidth={2.5} title="Read (Seen)" />
-                ) : (
-                  <Check className="w-3.5 h-3.5 text-blue-200/70" strokeWidth={2} title="Sent / Delivered" />
+          if (textBody.startsWith('[REPLY:')) {
+            const closing = textBody.indexOf(']');
+            if (closing !== -1) {
+              replyId = replyId || textBody.substring(7, closing);
+              textBody = textBody.substring(closing + 1).trim();
+            }
+          }
+
+          return (
+            <div
+              className={cn(
+                'max-w-[82%] md:max-w-[65%] px-4 py-2.5 rounded-2xl shadow-xs relative text-sm leading-relaxed break-words select-text transition-all',
+                isMine
+                  ? 'bg-blue-600 text-white rounded-br-xs'
+                  : 'bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 border border-neutral-200/90 dark:border-neutral-700/60 rounded-bl-xs'
+              )}
+            >
+              {/* Quoted Reply Preview */}
+              {replyId && (
+                <div
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const el = document.getElementById(`msg-${replyId}`);
+                    if (el) {
+                      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                      el.classList.add('ring-2', 'ring-amber-400', 'bg-amber-100/50', 'dark:bg-amber-900/40');
+                      setTimeout(() => {
+                        el.classList.remove('ring-2', 'ring-amber-400', 'bg-amber-100/50', 'dark:bg-amber-900/40');
+                      }, 2000);
+                    }
+                  }}
+                  className={cn(
+                    'mb-2 p-2 rounded-xl border-l-3 text-xs cursor-pointer select-none transition-all hover:opacity-90',
+                    isMine
+                      ? 'bg-black/15 dark:bg-white/10 border-blue-200 text-white'
+                      : 'bg-neutral-100 dark:bg-neutral-700/80 border-blue-500 text-neutral-800 dark:text-neutral-200'
+                  )}
+                >
+                  <div className="font-bold text-[11px] flex items-center gap-1 opacity-90">
+                    <Reply className="w-3 h-3 text-blue-400" />
+                    <span>{replySender}</span>
+                  </div>
+                  {replySnippet && (
+                    <div className="line-clamp-2 text-[11.5px] opacity-80 mt-0.5">
+                      {replySnippet}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <p className="whitespace-pre-wrap">{textBody}</p>
+
+              <div
+                className={cn(
+                  'flex items-center justify-end gap-1 mt-1 text-[10px] select-none',
+                  isMine ? 'text-blue-100/90' : 'text-neutral-400'
                 )}
-              </span>
-            )}
-          </div>
-        </div>
+              >
+                {isPinned && (
+                  <span className="inline-flex items-center gap-0.5 text-amber-300 font-medium mr-1">
+                    <Pin className="w-3 h-3 fill-amber-300" />
+                    <span>Pinned</span>
+                  </span>
+                )}
+                <span>{formatTime(message.created_at)}</span>
+                {isMine && (
+                  <span className="inline-flex items-center ml-0.5">
+                    {message.is_read ? (
+                      <CheckCheck className="w-4 h-4 text-cyan-300" strokeWidth={2.5} title="Read (Seen)" />
+                    ) : (
+                      <Check className="w-3.5 h-3.5 text-blue-200/70" strokeWidth={2} title="Sent / Delivered" />
+                    )}
+                  </span>
+                )}
+              </div>
+            </div>
+          );
+        })()
       )}
 
       {/* Options Menu for Receiver */}
       {!isMine && (
-        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+        <div className="flex items-center gap-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
           {showConfirm ? (
             <button
               onClick={handleDelete}
@@ -1200,11 +1321,59 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
               </button>
 
               {showMenu && (
-                <div className="absolute bottom-full left-0 mb-1 z-30 min-w-[130px] p-1 rounded-xl bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 shadow-xl space-y-0.5 animate-in fade-in zoom-in-95 duration-100">
+                <div className="absolute bottom-full left-0 mb-1 z-30 min-w-[140px] p-1 rounded-xl bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 shadow-xl space-y-0.5 animate-in fade-in zoom-in-95 duration-100">
+                  {onReplyMessage && (
+                    <button
+                      onClick={() => {
+                        setShowMenu(false);
+                        onReplyMessage(message);
+                      }}
+                      className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs font-medium text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-lg transition-colors cursor-pointer"
+                    >
+                      <Reply className="w-3.5 h-3.5 text-blue-500" />
+                      <span>Reply</span>
+                    </button>
+                  )}
+
+                  {onPinMessage && (
+                    <button
+                      onClick={() => {
+                        setShowMenu(false);
+                        onPinMessage(message);
+                      }}
+                      className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs font-medium text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-lg transition-colors cursor-pointer"
+                    >
+                      {isPinned ? (
+                        <>
+                          <PinOff className="w-3.5 h-3.5 text-amber-500" />
+                          <span>Unpin</span>
+                        </>
+                      ) : (
+                        <>
+                          <Pin className="w-3.5 h-3.5 text-amber-500" />
+                          <span>Pin Message</span>
+                        </>
+                      )}
+                    </button>
+                  )}
+
+                  {onForwardMessage && (
+                    <button
+                      onClick={() => {
+                        setShowMenu(false);
+                        onForwardMessage(message);
+                      }}
+                      className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs font-medium text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-lg transition-colors cursor-pointer"
+                    >
+                      <Share2 className="w-3.5 h-3.5 text-purple-500" />
+                      <span>Forward</span>
+                    </button>
+                  )}
+
                   {!isVoice && !isImage && (
                     <button
                       onClick={handleCopy}
-                      className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs font-medium text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-lg transition-colors"
+                      className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs font-medium text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-lg transition-colors cursor-pointer"
                     >
                       {copied ? (
                         <>

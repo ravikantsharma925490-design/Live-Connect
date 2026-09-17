@@ -21,14 +21,17 @@ export const ConversationItem: React.FC<ConversationItemProps> = ({
   onSelect,
   onDelete,
 }) => {
+  const isGroup = conversation.type === 'group';
   const otherUser = conversation.other_member;
   const lastMsg = conversation.last_message;
   const isLastMsgFromMe = lastMsg?.sender_id === currentUserId;
 
-  const isSelf = otherUser?.id === currentUserId;
-  const rawDisplayName = otherUser?.display_name || otherUser?.username || 'Unknown User';
+  const isSelf = !isGroup && otherUser?.id === currentUserId;
+  const rawDisplayName = isGroup
+    ? conversation.name || 'Group Chat'
+    : otherUser?.display_name || otherUser?.username || 'Unknown User';
   const displayName = isSelf ? `${rawDisplayName} (You)` : rawDisplayName;
-  const avatarUrl = otherUser?.avatar_url;
+  const avatarUrl = isGroup ? conversation.avatar_url : otherUser?.avatar_url;
 
   // Render call log label if last message is a call log
   const renderMessagePreview = () => {
@@ -205,7 +208,7 @@ export const ConversationItem: React.FC<ConversationItemProps> = ({
             <span className="truncate">{renderMessagePreview()}</span>
           </p>
 
-          {/* Delete Quick Action on hover / right side */}
+          {/* Delete Quick Action on mobile & hover on desktop */}
           {onDelete && (
             <button
               onClick={(e) => {
@@ -214,13 +217,13 @@ export const ConversationItem: React.FC<ConversationItemProps> = ({
               }}
               title="Delete conversation"
               className={cn(
-                'opacity-0 group-hover:opacity-100 p-1.5 rounded-lg transition-all',
+                'opacity-100 sm:opacity-0 sm:group-hover:opacity-100 p-2 sm:p-1.5 rounded-xl transition-all shrink-0 cursor-pointer',
                 isSelected
-                  ? 'hover:bg-blue-700 text-white'
-                  : 'hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/50 dark:hover:text-red-400 text-neutral-400'
+                  ? 'hover:bg-blue-700 text-white bg-blue-700/60 sm:bg-transparent'
+                  : 'hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/50 dark:hover:text-red-400 text-red-500 dark:text-red-400 sm:text-neutral-400 bg-red-50/80 dark:bg-red-950/40 sm:bg-transparent'
               )}
             >
-              <Trash2 className="w-3.5 h-3.5" />
+              <Trash2 className="w-4 h-4 sm:w-3.5 sm:h-3.5" />
             </button>
           )}
 

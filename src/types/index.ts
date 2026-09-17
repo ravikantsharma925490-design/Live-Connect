@@ -35,11 +35,20 @@ export interface Profile {
 export interface Conversation {
   id: string;
   type: 'direct' | 'group';
+  name?: string | null;
+  description?: string | null;
+  avatar_url?: string | null;
+  owner_id?: string | null;
+  pinned_message_id?: string | null;
+  pinned_message?: Message | null;
   created_at: string;
   updated_at: string;
   other_member?: Profile;
   last_message?: Message;
   unread_count?: number;
+  members?: ConversationMember[];
+  member_ids?: string[];
+  members_meta?: Record<string, Profile>;
 }
 
 export interface ConversationMember {
@@ -47,6 +56,7 @@ export interface ConversationMember {
   conversation_id: string;
   user_id: string;
   joined_at: string;
+  role?: 'admin' | 'member';
   profile?: Profile;
 }
 
@@ -60,6 +70,11 @@ export interface Message {
   sender?: Profile;
   reads?: MessageRead[];
   is_read?: boolean;
+  reply_to_message_id?: string | null;
+  reply_to_message?: Message | null;
+  reactions?: Record<string, string[]>;
+  mentions?: string[];
+  is_pinned?: boolean;
 }
 
 export interface MessageRead {
@@ -163,4 +178,3 @@ export interface ActiveCallState {
   networkQuality?: 'excellent' | 'good' | 'poor';
 }
 
-export * from './live';

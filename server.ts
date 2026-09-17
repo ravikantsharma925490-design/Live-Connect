@@ -1,7 +1,6 @@
 import express from 'express';
 import dotenv from 'dotenv';
 import path from 'path';
-import { AccessToken } from 'livekit-server-sdk';
 import { createClient } from '@supabase/supabase-js';
 import { createServer as createViteServer } from 'vite';
 import fs from 'fs';
@@ -19,6 +18,17 @@ if (fs.existsSync(path.join(process.cwd(), '.env.example'))) {
   dotenv.config({ path: path.join(process.cwd(), '.env.example') });
 }
 dotenv.config();
+
+function generateUUID(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
 
 // Helper: Create Render-Safe SMTP Transporter (Forces IPv4 to prevent ENETUNREACH)
 function createStandardTransporter(host?: string, port?: number, user?: string, pass?: string) {
@@ -340,13 +350,21 @@ interface ServerMessage {
   updated_at: string;
   sender?: any;
   is_read?: boolean;
+  reply_to_message_id?: string;
+  reactions?: Record<string, string[]>;
+  mentions?: string[];
 }
 
 interface ServerConversation {
   id: string;
   type: 'direct' | 'group';
+  name?: string;
+  description?: string;
+  avatar_url?: string;
+  owner_id?: string;
   member_ids: string[];
   members_meta?: Record<string, any>;
+  member_roles?: Record<string, 'admin' | 'member'>;
   created_at: string;
   updated_at: string;
   last_message?: ServerMessage | null;
@@ -2568,6 +2586,13 @@ app.post('/api/conversations/list', (req, res) => {
         const convObj = {
           id: conv.id,
           type: conv.type,
+          name: conv.name,
+          description: conv.description,
+          avatar_url: conv.avatar_url,
+          owner_id: conv.owner_id,
+          member_ids: conv.member_ids,
+          members_meta: conv.members_meta,
+          member_roles: conv.member_roles,
           created_at: conv.created_at,
           updated_at: effectiveUpdatedAt,
           other_member: otherProfile,
@@ -2607,6 +2632,404 @@ app.post('/api/conversations/list', (req, res) => {
   }
 });
 
+// ----------------------------------------------------
+// GROUP CHAT SYSTEM ENDPOINTS
+// ----------------------------------------------------
+
+// Create Group
+app.post('/api/groups/create', async (req, res) => {
+  try {
+    const { name, description, avatarUrl, memberIds, creatorId, creatorProfile } = req.body;
+    if (!name || !name.trim() || !creatorId || !Array.isArray(memberIds)) {
+      return res.status(400).json({ error: 'Name, creatorId, and memberIds are required' });
+    }
+
+    const groupId = generateUUID();
+    const nowIso = new Date().toISOString();
+
+    const allMemberIds = Array.from(new Set([creatorId, ...memberIds].filter(Boolean)));
+    const membersMeta: Record<string, any> = {};
+    if (creatorProfile?.id) {
+      membersMeta[creatorProfile.id] = creatorProfile;
+      serverProfilesStore.set(creatorProfile.id, creatorProfile);
+    }
+
+    allMemberIds.forEach((mId) => {
+      if (!membersMeta[mId]) {
+        membersMeta[mId] = serverProfilesStore.get(mId) || { id: mId, username: 'Member', display_name: 'Member' };
+      }
+    });
+
+    const memberRoles: Record<string, 'admin' | 'member'> = {
+      [creatorId]: 'admin',
+    };
+    allMemberIds.forEach((mId) => {
+      if (mId !== creatorId) memberRoles[mId] = 'member';
+    });
+
+    const groupConv: ServerConversation = {
+      id: groupId,
+      type: 'group',
+      name: name.trim(),
+      description: (description || '').trim(),
+      avatar_url: avatarUrl || null,
+      owner_id: creatorId,
+      member_ids: allMemberIds,
+      members_meta: membersMeta,
+      member_roles: memberRoles,
+      created_at: nowIso,
+      updated_at: nowIso,
+      last_message: null,
+      unread_count: 0,
+    };
+
+    serverConversationsStore.set(groupId, groupConv);
+
+    const sysMsg: ServerMessage = {
+      id: generateUUID(),
+      conversation_id: groupId,
+      sender_id: creatorId,
+      content: `[SYSTEM:${creatorProfile?.display_name || 'Admin'} created the group "${name.trim()}"]`,
+      created_at: nowIso,
+      updated_at: nowIso,
+      sender: creatorProfile,
+      is_read: true,
+    };
+    messagesServerStore.set(groupId, [sysMsg]);
+    groupConv.last_message = sysMsg;
+
+    allMemberIds.forEach((mId) => {
+      if (mId !== creatorId) {
+        addNotification(
+          mId,
+          creatorId,
+          'message',
+          'Added to Group',
+          `You were added to group "${name.trim()}"`,
+          groupId,
+          creatorProfile || serverProfilesStore.get(creatorId)
+        );
+      }
+    });
+
+    if (serverSupabase) {
+      (async () => {
+        try {
+          await serverSupabase.from('conversations').upsert({
+            id: groupId,
+            type: 'group',
+            name: name.trim(),
+            description: (description || '').trim(),
+            avatar_url: avatarUrl || null,
+            owner_id: creatorId,
+            created_at: nowIso,
+            updated_at: nowIso,
+          }, { onConflict: 'id' });
+
+          for (const mId of allMemberIds) {
+            await serverSupabase.from('conversation_members').upsert({
+              conversation_id: groupId,
+              user_id: mId,
+              role: memberRoles[mId] || 'member',
+              joined_at: nowIso,
+            }, { onConflict: 'conversation_id,user_id' });
+          }
+
+          await serverSupabase.from('messages').upsert({
+            id: sysMsg.id,
+            conversation_id: groupId,
+            sender_id: creatorId,
+            content: sysMsg.content,
+            created_at: nowIso,
+            updated_at: nowIso,
+          }, { onConflict: 'id' });
+        } catch (e) {
+          console.warn('Group sync notice:', e);
+        }
+      })();
+    }
+
+    return res.json({
+      success: true,
+      conversationId: groupId,
+      conversation: groupConv,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to create group' });
+  }
+});
+
+// Update Group Details
+app.post('/api/groups/update', async (req, res) => {
+  try {
+    const { conversationId, userId, name, description, avatarUrl } = req.body;
+    if (!conversationId || !userId) {
+      return res.status(400).json({ error: 'conversationId and userId required' });
+    }
+
+    const group = serverConversationsStore.get(conversationId);
+    if (!group || group.type !== 'group') {
+      return res.status(404).json({ error: 'Group not found' });
+    }
+
+    const role = group.member_roles?.[userId];
+    const isOwner = group.owner_id === userId;
+    if (role !== 'admin' && !isOwner) {
+      return res.status(403).json({ error: 'Only admins can update group details' });
+    }
+
+    if (name) group.name = name.trim();
+    if (description !== undefined) group.description = description.trim();
+    if (avatarUrl !== undefined) group.avatar_url = avatarUrl;
+    group.updated_at = new Date().toISOString();
+
+    if (serverSupabase) {
+      serverSupabase
+        .from('conversations')
+        .update({
+          name: group.name,
+          description: group.description,
+          avatar_url: group.avatar_url,
+          updated_at: group.updated_at,
+        })
+        .eq('id', conversationId)
+        .then(() => {})
+        .catch(() => {});
+    }
+
+    return res.json({ success: true, conversation: group });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to update group' });
+  }
+});
+
+// Add Members to Group
+app.post('/api/groups/members/add', async (req, res) => {
+  try {
+    const { conversationId, userId, memberIds, profilesMap } = req.body;
+    if (!conversationId || !userId || !Array.isArray(memberIds)) {
+      return res.status(400).json({ error: 'conversationId, userId, and memberIds required' });
+    }
+
+    const group = serverConversationsStore.get(conversationId);
+    if (!group || group.type !== 'group') {
+      return res.status(404).json({ error: 'Group not found' });
+    }
+
+    const role = group.member_roles?.[userId];
+    const isOwner = group.owner_id === userId;
+    if (role !== 'admin' && !isOwner) {
+      return res.status(403).json({ error: 'Only admins can add members' });
+    }
+
+    const nowIso = new Date().toISOString();
+    const newAdded: string[] = [];
+
+    memberIds.forEach((mId) => {
+      if (!group.member_ids.includes(mId)) {
+        group.member_ids.push(mId);
+        group.member_roles = group.member_roles || {};
+        group.member_roles[mId] = 'member';
+        if (profilesMap?.[mId]) {
+          group.members_meta = group.members_meta || {};
+          group.members_meta[mId] = profilesMap[mId];
+          serverProfilesStore.set(mId, profilesMap[mId]);
+        }
+        newAdded.push(mId);
+      }
+    });
+
+    group.updated_at = nowIso;
+
+    if (newAdded.length > 0 && serverSupabase) {
+      (async () => {
+        for (const mId of newAdded) {
+          await serverSupabase.from('conversation_members').upsert({
+            conversation_id: conversationId,
+            user_id: mId,
+            role: 'member',
+            joined_at: nowIso,
+          }, { onConflict: 'conversation_id,user_id' });
+        }
+      })();
+    }
+
+    return res.json({ success: true, conversation: group });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to add members' });
+  }
+});
+
+// Remove Member or Leave Group
+app.post('/api/groups/members/remove', async (req, res) => {
+  try {
+    const { conversationId, actorId, memberId } = req.body;
+    if (!conversationId || !actorId || !memberId) {
+      return res.status(400).json({ error: 'conversationId, actorId, and memberId required' });
+    }
+
+    const group = serverConversationsStore.get(conversationId);
+    if (!group || group.type !== 'group') {
+      return res.status(404).json({ error: 'Group not found' });
+    }
+
+    const isSelfLeaving = actorId === memberId;
+    const actorRole = group.member_roles?.[actorId];
+    const isOwner = group.owner_id === actorId;
+
+    if (!isSelfLeaving && actorRole !== 'admin' && !isOwner) {
+      return res.status(403).json({ error: 'Only admins can remove members' });
+    }
+
+    group.member_ids = group.member_ids.filter((id) => id !== memberId);
+    if (group.member_roles) {
+      delete group.member_roles[memberId];
+    }
+    if (group.members_meta) {
+      delete group.members_meta[memberId];
+    }
+    group.updated_at = new Date().toISOString();
+
+    if (isOwner || actorRole === 'admin') {
+      const remainingAdmins = Object.values(group.member_roles || {}).filter((r) => r === 'admin');
+      if (remainingAdmins.length === 0 && group.member_ids.length > 0) {
+        const nextAdmin = group.member_ids[0];
+        group.member_roles = group.member_roles || {};
+        group.member_roles[nextAdmin] = 'admin';
+        group.owner_id = nextAdmin;
+      }
+    }
+
+    if (serverSupabase) {
+      serverSupabase
+        .from('conversation_members')
+        .delete()
+        .eq('conversation_id', conversationId)
+        .eq('user_id', memberId)
+        .then(() => {})
+        .catch(() => {});
+    }
+
+    return res.json({ success: true, conversation: group });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to remove member' });
+  }
+});
+
+// Update Member Role (Promote/Demote Admin)
+app.post('/api/groups/members/role', async (req, res) => {
+  try {
+    const { conversationId, actorId, memberId, role } = req.body;
+    if (!conversationId || !actorId || !memberId || !['admin', 'member'].includes(role)) {
+      return res.status(400).json({ error: 'Valid arguments required' });
+    }
+
+    const group = serverConversationsStore.get(conversationId);
+    if (!group || group.type !== 'group') {
+      return res.status(404).json({ error: 'Group not found' });
+    }
+
+    const actorRole = group.member_roles?.[actorId];
+    const isOwner = group.owner_id === actorId;
+    if (actorRole !== 'admin' && !isOwner) {
+      return res.status(403).json({ error: 'Only admins can manage roles' });
+    }
+
+    group.member_roles = group.member_roles || {};
+    group.member_roles[memberId] = role;
+    group.updated_at = new Date().toISOString();
+
+    if (serverSupabase) {
+      serverSupabase
+        .from('conversation_members')
+        .update({ role })
+        .eq('conversation_id', conversationId)
+        .eq('user_id', memberId)
+        .then(() => {})
+        .catch(() => {});
+    }
+
+    return res.json({ success: true, conversation: group });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to change role' });
+  }
+});
+
+// Delete Group
+app.post('/api/groups/delete', async (req, res) => {
+  try {
+    const { conversationId, actorId } = req.body;
+    if (!conversationId || !actorId) {
+      return res.status(400).json({ error: 'conversationId and actorId required' });
+    }
+
+    const group = serverConversationsStore.get(conversationId);
+    if (!group) {
+      return res.status(404).json({ error: 'Group not found' });
+    }
+
+    const actorRole = group.member_roles?.[actorId];
+    const isOwner = group.owner_id === actorId;
+    if (actorRole !== 'admin' && !isOwner) {
+      return res.status(403).json({ error: 'Only group admins can delete the group' });
+    }
+
+    deletedConversationsServerStore.add(conversationId);
+    serverConversationsStore.delete(conversationId);
+    messagesServerStore.delete(conversationId);
+
+    if (serverSupabase) {
+      serverSupabase.from('conversations').delete().eq('id', conversationId).then(() => {}).catch(() => {});
+      serverSupabase.from('messages').delete().eq('conversation_id', conversationId).then(() => {}).catch(() => {});
+      serverSupabase.from('conversation_members').delete().eq('conversation_id', conversationId).then(() => {}).catch(() => {});
+    }
+
+    return res.json({ success: true });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to delete group' });
+  }
+});
+
+// React to Message
+app.post('/api/messages/react', async (req, res) => {
+  try {
+    const { conversationId, messageId, userId, emoji } = req.body;
+    if (!conversationId || !messageId || !userId || !emoji) {
+      return res.status(400).json({ error: 'conversationId, messageId, userId, and emoji required' });
+    }
+
+    const msgs = messagesServerStore.get(conversationId) || [];
+    const msg = msgs.find((m) => m.id === messageId);
+    if (msg) {
+      msg.reactions = msg.reactions || {};
+      const userList = msg.reactions[emoji] || [];
+      if (userList.includes(userId)) {
+        msg.reactions[emoji] = userList.filter((id) => id !== userId);
+        if (msg.reactions[emoji].length === 0) {
+          delete msg.reactions[emoji];
+        }
+      } else {
+        msg.reactions[emoji] = [...userList, userId];
+      }
+
+      if (serverSupabase) {
+        serverSupabase
+          .from('messages')
+          .update({ reactions: msg.reactions })
+          .eq('id', messageId)
+          .then(() => {})
+          .catch(() => {});
+      }
+
+      return res.json({ success: true, reactions: msg.reactions });
+    }
+
+    return res.json({ success: true });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to react to message' });
+  }
+});
+
 // 3. Send / Sync a Message
 app.post('/api/messages/send', async (req, res) => {
   try {
@@ -2622,22 +3045,28 @@ app.post('/api/messages/send', async (req, res) => {
     // Revive conversation from deleted set if a new message is sent
     deletedConversationsServerStore.delete(convId);
 
+    const existingConv = serverConversationsStore.get(convId);
+    const isGroupChat = existingConv?.type === 'group';
+
     let targetRecipient = recipientId || receiverId;
-    if (!targetRecipient) {
-      const existingConv = serverConversationsStore.get(convId);
-      if (existingConv) {
-        targetRecipient = existingConv.member_ids.find((id) => id !== senderId);
-      }
+    if (!targetRecipient && existingConv) {
+      targetRecipient = existingConv.member_ids.find((id) => id !== senderId);
     }
 
-    // Communication check: Mutual follow required for 1-to-1 messaging unless self-messaging
-    if (targetRecipient && targetRecipient !== senderId) {
-      if (isBlocked(senderId, targetRecipient)) {
-        return res.status(403).json({ error: 'Cannot message blocked user' });
+    if (isGroupChat) {
+      if (existingConv && !existingConv.member_ids.includes(senderId)) {
+        return res.status(403).json({ error: 'You are not a member of this group' });
       }
+    } else {
+      // Direct 1-to-1 messaging check: Mutual follow required unless self-messaging
+      if (targetRecipient && targetRecipient !== senderId) {
+        if (isBlocked(senderId, targetRecipient)) {
+          return res.status(403).json({ error: 'Cannot message blocked user' });
+        }
 
-      if (!isMutualFollow(senderId, targetRecipient)) {
-        return res.status(403).json({ error: 'Mutual follow is required to send messages' });
+        if (!isMutualFollow(senderId, targetRecipient)) {
+          return res.status(403).json({ error: 'Mutual follow is required to send direct messages' });
+        }
       }
     }
 
@@ -3611,104 +4040,7 @@ app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
-    livekitConfigured: Boolean(process.env.LIVEKIT_API_KEY && process.env.LIVEKIT_API_SECRET),
   });
-});
-
-// Secure LiveKit Token Generation Endpoint
-// POST /api/livekit/token
-app.post('/api/livekit/token', async (req, res) => {
-  try {
-    const {
-      roomName,
-      participantName,
-      participantIdentity,
-      targetIdentity,
-      customLiveKitUrl,
-      customApiKey,
-      customApiSecret,
-    } = req.body;
-
-    if (!roomName || !participantIdentity) {
-      return res.status(400).json({ error: 'roomName and participantIdentity are required' });
-    }
-
-    // Check block status if target user is provided
-    if (targetIdentity && targetIdentity !== participantIdentity) {
-      if (isBlocked(participantIdentity, targetIdentity)) {
-        return res.status(403).json({
-          error: 'blocked_user',
-          message: 'Communication is blocked between these users.',
-        });
-      }
-    }
-
-    const maxCallDurationSeconds = 7200; // 2 hours free calling session
-    const accessType = 'unlimited';
-
-    const apiKey = (process.env.LIVEKIT_API_KEY || customApiKey || '').trim();
-    const apiSecret = (process.env.LIVEKIT_API_SECRET || customApiSecret || '').trim();
-    const livekitUrl = (
-      process.env.NEXT_PUBLIC_LIVEKIT_URL ||
-      process.env.VITE_LIVEKIT_URL ||
-      customLiveKitUrl ||
-      ''
-    ).trim();
-
-    const hasValidLiveKit = Boolean(
-      apiKey &&
-      apiSecret &&
-      livekitUrl &&
-      !apiKey.includes('APIhmJHPfYK3EKb') &&
-      (livekitUrl.startsWith('wss://') || livekitUrl.startsWith('ws://'))
-    );
-
-    if (!hasValidLiveKit) {
-      return res.json({
-        useWebRTC: true,
-        token: null,
-        serverUrl: null,
-        roomName,
-        participantIdentity,
-        participantName: participantName || participantIdentity,
-        accessType,
-        maxCallDurationSeconds,
-      });
-    }
-
-    // Create secure LiveKit access token with authorized duration
-    const at = new AccessToken(apiKey, apiSecret, {
-      identity: participantIdentity,
-      name: participantName || participantIdentity,
-      ttl: `${Math.max(60, maxCallDurationSeconds + 60)}s`,
-    });
-
-    at.addGrant({
-      roomJoin: true,
-      room: roomName,
-      canPublish: true,
-      canSubscribe: true,
-      canPublishData: true,
-    });
-
-    const token = await at.toJwt();
-
-    return res.json({
-      token,
-      serverUrl: livekitUrl,
-      roomName,
-      participantIdentity,
-      participantName: participantName || participantIdentity,
-      accessType,
-      maxCallDurationSeconds,
-    });
-  } catch (error: any) {
-    console.error('Error generating LiveKit token:', error);
-    return res.status(500).json({
-      error: 'Failed to generate LiveKit access token',
-      details: error.message || String(error),
-    });
-  }
 });
 
 async function startServer() {

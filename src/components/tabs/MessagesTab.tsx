@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Search, MessageSquarePlus, Radio, Trash2 } from 'lucide-react';
+import { Search, MessageSquarePlus, Radio, Trash2, Users } from 'lucide-react';
 import { Conversation, Profile, CallType, UserRelationStatus } from '@/src/types';
 import { ConversationItem } from '../chat/ConversationItem';
 import { ChatWindow } from '../chat/ChatWindow';
@@ -13,6 +13,9 @@ interface MessagesTabProps {
   currentUser: Profile | null;
   onSelectConversation: (id: string | null) => void;
   onOpenSearch: () => void;
+  onOpenCreateGroup?: () => void;
+  onOpenGroupProfile?: (conversation: Conversation) => void;
+  onOpenForwardModal?: (message: any) => void;
   onStartCall: (peer: Profile, type: CallType) => void;
   onOpenProfileView: (profile: Profile) => void;
   onDeleteConversation?: (conversationId: string) => void;
@@ -30,6 +33,9 @@ export const MessagesTab: React.FC<MessagesTabProps> = ({
   currentUser,
   onSelectConversation,
   onOpenSearch,
+  onOpenCreateGroup,
+  onOpenGroupProfile,
+  onOpenForwardModal,
   onStartCall,
   onOpenProfileView,
   onDeleteConversation,
@@ -132,14 +138,26 @@ export const MessagesTab: React.FC<MessagesTabProps> = ({
             </p>
           </div>
 
-          <button
-            onClick={onOpenSearch}
-            title="Start new chat"
-            className="p-2.5 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white shadow-md shadow-blue-500/20 transition-all hover:scale-105 active:scale-95 flex items-center gap-1.5 text-xs font-semibold"
-          >
-            <MessageSquarePlus className="w-4 h-4" />
-            <span>New Chat</span>
-          </button>
+          <div className="flex items-center gap-1.5">
+            {onOpenCreateGroup && (
+              <button
+                onClick={onOpenCreateGroup}
+                title="Create Family / Group Chat"
+                className="p-2.5 rounded-2xl bg-blue-50 hover:bg-blue-100 dark:bg-neutral-800 dark:hover:bg-neutral-700 text-blue-600 dark:text-blue-400 shadow-xs transition-all hover:scale-105 active:scale-95 flex items-center gap-1.5 text-xs font-semibold"
+              >
+                <Users className="w-4 h-4" />
+                <span className="hidden sm:inline">Group</span>
+              </button>
+            )}
+            <button
+              onClick={onOpenSearch}
+              title="Start new chat"
+              className="p-2.5 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white shadow-md shadow-blue-500/20 transition-all hover:scale-105 active:scale-95 flex items-center gap-1.5 text-xs font-semibold"
+            >
+              <MessageSquarePlus className="w-4 h-4" />
+              <span>New Chat</span>
+            </button>
+          </div>
         </div>
 
         {/* Search Filter Input */}
