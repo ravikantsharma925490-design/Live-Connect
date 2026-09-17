@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta name="theme-color" content="#171717" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="format-detection" content="telephone=no" />
+    <title>LiveConnect - Real-Time Chat & Video Calls</title>
+    <meta name="description" content="One-to-one real-time messaging, audio, and video calling powered by Supabase and LiveKit." />
+    <style>
+      iframe.goog-te-banner-frame,
+      .goog-te-banner-frame,
+      .goog-te-balloon-frame,
+      #goog-gt-tt,
+      .goog-te-spinner-pos {
+        display: none !important;
+      }
+      body {
+        top: 0px !important;
+        position: static !important;
+      }
+      .goog-text-highlight {
+        background-color: transparent !important;
+        box-shadow: none !important;
+      }
+      font[style] {
+        background-color: transparent !important;
+        box-shadow: none !important;
+      }
+    </style>
+    <script>
+      (function() {
+        if (typeof window !== 'undefined') {
+          try {
+            var nativeFetch = window.fetch ? window.fetch.bind(window) : undefined;
+            var currentFetch = nativeFetch;
+            var defineOn = function(obj) {
+              try {
+                Object.defineProperty(obj, 'fetch', {
+                  get: function() { return currentFetch || nativeFetch; },
+                  set: function(fn) { currentFetch = fn || nativeFetch; },
+                  configurable: true,
+                  enumerable: true
+                });
+                return true;
+              } catch (e) {
+                return false;
+              }
+            };
+            if (!defineOn(window) && Object.getPrototypeOf(window)) {
+              defineOn(Object.getPrototypeOf(window));
+            }
+          } catch (err) {
+            console.warn('Fetch setter setup error:', err);
+          }
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script>
+      (function() {
+        try {
+          document.cookie = "googtrans=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
+          document.cookie = "googtrans=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/; domain=" + window.location.hostname + ";";
+        } catch(e) {}
+      })();
+    </script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+

@@ -1,0 +1,38 @@
+@import "tailwindcss";
+
+@layer base {
+  html, body, #root {
+    height: 100%;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    overscroll-behavior-y: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+}
+
+/* Safe area padding utilities for notched iPhones and edge-to-edge Androids */
+.safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.safe-top {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
+:root {
+  --app-vh: 100vh;
+}
+
+.h-screen-safe {
+  height: 100vh;
+  height: var(--app-vh);
+  height: 100dvh;
+}
+
+.min-h-screen-safe {
+  min-height: 100vh;
+  min-height: var(--app-vh);
+  min-height: 100dvh;
+}
+
