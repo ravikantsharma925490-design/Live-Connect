@@ -176,7 +176,12 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     }
   }, [conversation?.id, currentUser?.id, messages.length, markMessagesAsRead]);
 
-  const isGroup = conversation?.type === 'group';
+  const isGroup =
+    conversation?.type === 'group' ||
+    Boolean(conversation?.name) ||
+    Boolean(conversation?.owner_id) ||
+    Boolean((conversation as any)?.member_roles) ||
+    (Array.isArray((conversation as any)?.member_ids) && (conversation as any).member_ids.length > 2);
   const otherUser = isGroup ? null : conversation?.other_member;
   const isSelf = Boolean(!isGroup && currentUser && otherUser && otherUser.id === currentUser.id);
   const rawDisplayName = isGroup
@@ -276,8 +281,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     sendMessage(
       content,
       currentUser || undefined,
-      otherUser?.id,
-      otherUser || undefined
+      isGroup ? undefined : otherUser?.id,
+      isGroup ? undefined : (otherUser || undefined)
     );
     snapToBottom();
   };

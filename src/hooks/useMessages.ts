@@ -166,44 +166,68 @@ export function useMessages(
     const ids = new Set<string>();
     if (conversationId) ids.add(conversationId);
     if (conversationObj?.id) ids.add(conversationObj.id);
-    if ((conversationObj as any)?.original_id) ids.add((conversationObj as any).original_id);
-    if ((conversationObj as any)?.canonical_id) ids.add((conversationObj as any).canonical_id);
-    if (Array.isArray((conversationObj as any)?.alias_ids)) {
-      (conversationObj as any).alias_ids.forEach((id: string) => {
-        if (id) ids.add(id);
-      });
-    }
-    if (currentUserId && conversationObj?.other_member?.id) {
-      ids.add(getDeterministicDirectConvId(currentUserId, conversationObj.other_member.id));
+
+    const isGroup =
+      conversationObj?.type === 'group' ||
+      Boolean(conversationObj?.name) ||
+      Boolean(conversationObj?.owner_id) ||
+      Boolean((conversationObj as any)?.member_roles);
+
+    // CRITICAL: If this is a group chat, NEVER alias or merge with any direct 1-to-1 chat IDs!
+    if (!isGroup) {
+      if ((conversationObj as any)?.original_id) ids.add((conversationObj as any).original_id);
+      if ((conversationObj as any)?.canonical_id) ids.add((conversationObj as any).canonical_id);
+      if (Array.isArray((conversationObj as any)?.alias_ids)) {
+        (conversationObj as any).alias_ids.forEach((id: string) => {
+          if (id) ids.add(id);
+        });
+      }
+      if (currentUserId && conversationObj?.other_member?.id) {
+        ids.add(getDeterministicDirectConvId(currentUserId, conversationObj.other_member.id));
+      }
     }
     return Array.from(ids).filter(Boolean);
   }, [conversationId, conversationObj, currentUserId]);
 
   const [messages, setMessages] = useState<Message[]>(() => {
+    const isGroup =
+      conversationObj?.type === 'group' ||
+      Boolean(conversationObj?.name) ||
+      Boolean(conversationObj?.owner_id);
+
     const candidateIds = conversationId
       ? Array.from(
           new Set(
-            [
-              conversationId,
-              conversationObj?.id,
-              (conversationObj as any)?.original_id,
-              (conversationObj as any)?.canonical_id,
-            ].filter(Boolean) as string[]
+            isGroup
+              ? [conversationId, conversationObj?.id].filter(Boolean) as string[]
+              : [
+                  conversationId,
+                  conversationObj?.id,
+                  (conversationObj as any)?.original_id,
+                  (conversationObj as any)?.canonical_id,
+                ].filter(Boolean) as string[]
           )
         )
       : [];
     return loadCombinedLocalMessages(candidateIds);
   });
   const [loading, setLoading] = useState<boolean>(() => {
+    const isGroup =
+      conversationObj?.type === 'group' ||
+      Boolean(conversationObj?.name) ||
+      Boolean(conversationObj?.owner_id);
+
     const candidateIds = conversationId
       ? Array.from(
           new Set(
-            [
-              conversationId,
-              conversationObj?.id,
-              (conversationObj as any)?.original_id,
-              (conversationObj as any)?.canonical_id,
-            ].filter(Boolean) as string[]
+            isGroup
+              ? [conversationId, conversationObj?.id].filter(Boolean) as string[]
+              : [
+                  conversationId,
+                  conversationObj?.id,
+                  (conversationObj as any)?.original_id,
+                  (conversationObj as any)?.canonical_id,
+                ].filter(Boolean) as string[]
           )
         )
       : [];
@@ -896,6 +920,13 @@ export function useMessages(
     try {
       const supabase = getSupabase();
 
+      const isGroup =
+        conversationObj?.type === 'group' ||
+        Boolean(conversationObj?.name) ||
+        Boolean(conversationObj?.owner_id) ||
+        Boolean((conversationObj as any)?.member_roles) ||
+        !receiverId;
+
       // 2. Broadcast via backend relay & enforce server-side mutual follow
       const relayRes = await fetch('/api/messages/send', {
         method: 'POST',
@@ -903,10 +934,13 @@ export function useMessages(
         body: JSON.stringify({
           message: optimisticMessage,
           conversationId,
-          receiverId,
-          recipientId: receiverId,
+          isGroup,
+          conversationType: isGroup ? 'group' : 'direct',
+          groupName: conversationObj?.name,
+          receiverId: isGroup ? undefined : receiverId,
+          recipientId: isGroup ? undefined : receiverId,
           senderProfile,
-          receiverProfile,
+          receiverProfile: isGroup ? undefined : receiverProfile,
         }),
       }).catch(() => null);
 
@@ -921,12 +955,26 @@ export function useMessages(
       // 3. Ensure conversation row exists to satisfy foreign key constraint & persist to Supabase Database
       if (conversationId) {
         try {
-          await supabase
-            .from('conversations')
-            .upsert(
-              { id: conversationId, type: 'direct', updated_at: nowIso },
-              { onConflict: 'id' }
-            );
+          if (isGroup) {
+            await supabase
+              .from('conversations')
+              .upsert(
+                {
+                  id: conversationId,
+                  type: 'group',
+                  name: conversationObj?.name || 'Group Chat',
+                  updated_at: nowIso,
+                },
+                { onConflict: 'id' }
+              );
+          } else {
+            await supabase
+              .from('conversations')
+              .upsert(
+                { id: conversationId, type: 'direct', updated_at: nowIso },
+                { onConflict: 'id' }
+              );
+          }
         } catch (e) {
           // ignore
         }

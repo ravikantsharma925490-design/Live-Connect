@@ -27,8 +27,12 @@ export const ConversationItem: React.FC<ConversationItemProps> = ({
   const longPressTriggeredRef = useRef(false);
   const touchStartPosRef = useRef<{ x: number; y: number } | null>(null);
 
-  const isGroup = conversation.type === 'group';
-  const otherUser = conversation.other_member;
+  const isGroup =
+    conversation.type === 'group' ||
+    Boolean(conversation.name) ||
+    Boolean(conversation.owner_id) ||
+    Boolean((conversation as any).member_roles);
+  const otherUser = isGroup ? null : conversation.other_member;
   const lastMsg = conversation.last_message;
   const isLastMsgFromMe = lastMsg?.sender_id === currentUserId;
 

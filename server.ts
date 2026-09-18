@@ -2560,6 +2560,17 @@ app.post('/api/conversations/list', (req, res) => {
         continue;
       }
       if (conv.member_ids.includes(userId)) {
+        const isGroupConv =
+          conv.type === 'group' ||
+          Boolean(conv.name) ||
+          Boolean(conv.owner_id) ||
+          Boolean(conv.member_roles) ||
+          (Array.isArray(conv.member_ids) && conv.member_ids.length > 2);
+
+        if (isGroupConv) {
+          conv.type = 'group';
+        }
+
         const otherId = conv.member_ids.find((id) => id !== userId) || userId;
         const otherProfile =
           conv.members_meta?.[otherId] || serverProfilesStore.get(otherId) || {
@@ -2585,7 +2596,7 @@ app.post('/api/conversations/list', (req, res) => {
 
         const convObj = {
           id: conv.id,
-          type: conv.type,
+          type: isGroupConv ? 'group' : 'direct',
           name: conv.name,
           description: conv.description,
           avatar_url: conv.avatar_url,
@@ -2595,12 +2606,14 @@ app.post('/api/conversations/list', (req, res) => {
           member_roles: conv.member_roles,
           created_at: conv.created_at,
           updated_at: effectiveUpdatedAt,
-          other_member: otherProfile,
+          other_member: isGroupConv ? undefined : otherProfile,
           last_message: lastMsg,
           unread_count: unreadCount,
         };
 
-        if (conv.type === 'direct' || !conv.type) {
+        if (isGroupConv) {
+          groupList.push(convObj);
+        } else {
           const existing = directMap.get(otherId);
           if (!existing) {
             directMap.set(otherId, convObj);
@@ -2615,8 +2628,6 @@ app.post('/api/conversations/list', (req, res) => {
               });
             }
           }
-        } else {
-          groupList.push(convObj);
         }
       }
     }
@@ -2632,7 +2643,135 @@ app.post('/api/conversations/list', (req, res) => {
   }
 });
 
+// Search users for groups and contacts
+app.post('/api/users/search', async (req, res) => {
+  try {
+    const { query = '', userId } = req.body;
+    const cleanQuery = (query || '').trim().toLowerCase().replace(/^@/, '');
 
+    const usersMap = new Map<string, any>();
+
+    // 1. From in-memory profiles store
+    for (const [pId, p] of serverProfilesStore.entries()) {
+      if (userId && pId === userId) continue;
+      if (!cleanQuery) {
+        usersMap.set(pId, p);
+      } else {
+        const uName = (p.username || '').toLowerCase();
+        const dName = (p.display_name || '').toLowerCase();
+        if (pId.toLowerCase() === cleanQuery || uName.includes(cleanQuery) || dName.includes(cleanQuery)) {
+          usersMap.set(pId, p);
+        }
+      }
+    }
+
+    // 2. From Supabase profiles table
+    if (serverSupabase) {
+      try {
+        let queryBuilder = serverSupabase.from('profiles').select('*').limit(50);
+        if (userId) {
+          queryBuilder = queryBuilder.neq('id', userId);
+        }
+        if (cleanQuery) {
+          queryBuilder = queryBuilder.or(`username.ilike.%${cleanQuery}%,display_name.ilike.%${cleanQuery}%,id.eq.${cleanQuery}`);
+        }
+        const { data: profiles } = await queryBuilder;
+        if (profiles) {
+          for (const p of profiles) {
+            usersMap.set(p.id, { ...(usersMap.get(p.id) || {}), ...p });
+            serverProfilesStore.set(p.id, p);
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    return res.json({ users: Array.from(usersMap.values()) });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to search users' });
+  }
+});
+
+// 3. Create Group Conversation
+app.post('/api/groups/create', async (req, res) => {
+  try {
+    const { name, description, avatarUrl, memberIds, creatorId, creatorProfile } = req.body;
+    if (!name || !creatorId) {
+      return res.status(400).json({ error: 'Group name and creatorId are required' });
+    }
+
+    const groupId = generateUUID();
+    const nowIso = new Date().toISOString();
+
+    const membersMeta: Record<string, any> = {};
+    const memberRoles: Record<string, 'admin' | 'member'> = {};
+    const allMembers = Array.from(new Set([creatorId, ...(Array.isArray(memberIds) ? memberIds : [])]));
+
+    allMembers.forEach((mId) => {
+      memberRoles[mId] = mId === creatorId ? 'admin' : 'member';
+      if (mId === creatorId && creatorProfile) {
+        membersMeta[mId] = creatorProfile;
+        serverProfilesStore.set(mId, creatorProfile);
+      } else {
+        const cached = serverProfilesStore.get(mId);
+        if (cached) {
+          membersMeta[mId] = cached;
+        }
+      }
+    });
+
+    const sysMsg: ServerMessage = {
+      id: generateUUID(),
+      conversation_id: groupId,
+      sender_id: creatorId,
+      content: `Group "${name}" was created`,
+      created_at: nowIso,
+      updated_at: nowIso,
+      is_read: true,
+    };
+
+    const groupConv: ServerConversation = {
+      id: groupId,
+      type: 'group',
+      name: name.trim(),
+      description: (description || '').trim(),
+      avatar_url: avatarUrl || undefined,
+      owner_id: creatorId,
+      member_ids: allMembers,
+      members_meta: membersMeta,
+      member_roles: memberRoles,
+      created_at: nowIso,
+      updated_at: nowIso,
+      last_message: sysMsg,
+      unread_count: 0,
+    };
+
+    serverConversationsStore.set(groupId, groupConv);
+    messagesServerStore.set(groupId, [sysMsg]);
+
+    if (serverSupabase) {
+      (async () => {
+        try {
+          await serverSupabase.from('conversations').upsert({
+            id: groupId,
+            type: 'group',
+            name: groupConv.name,
+            description: groupConv.description,
+            avatar_url: groupConv.avatar_url,
+            owner_id: creatorId,
+            created_at: nowIso,
+            updated_at: nowIso,
+          }, { onConflict: 'id' });
+
+          for (const mId of allMembers) {
+            await serverSupabase.from('conversation_members').upsert({
+              conversation_id: groupId,
+              user_id: mId,
+              role: memberRoles[mId] || 'member',
+              joined_at: nowIso,
+            }, { onConflict: 'conversation_id,user_id' });
+          }
 
           await serverSupabase.from('messages').upsert({
             id: sysMsg.id,
@@ -2945,16 +3084,27 @@ app.post('/api/messages/send', async (req, res) => {
     deletedConversationsServerStore.delete(convId);
 
     const existingConv = serverConversationsStore.get(convId);
-    const isGroupChat = existingConv?.type === 'group';
+    const isGroupChat =
+      existingConv?.type === 'group' ||
+      Boolean(existingConv?.name) ||
+      Boolean(existingConv?.owner_id) ||
+      Boolean(existingConv?.member_roles) ||
+      (Array.isArray(existingConv?.member_ids) && existingConv.member_ids.length > 2) ||
+      req.body.isGroup === true ||
+      req.body.conversationType === 'group' ||
+      Boolean(req.body.groupName);
 
-    let targetRecipient = recipientId || receiverId;
-    if (!targetRecipient && existingConv) {
-      targetRecipient = existingConv.member_ids.find((id) => id !== senderId);
+    let targetRecipient = isGroupChat ? undefined : (recipientId || receiverId);
+    if (!isGroupChat && !targetRecipient && existingConv) {
+      targetRecipient = existingConv.member_ids.find((id: string) => id !== senderId);
     }
 
     if (isGroupChat) {
-      if (existingConv && !existingConv.member_ids.includes(senderId)) {
-        return res.status(403).json({ error: 'You are not a member of this group' });
+      if (existingConv) {
+        existingConv.type = 'group';
+        if (Array.isArray(existingConv.member_ids) && !existingConv.member_ids.includes(senderId)) {
+          existingConv.member_ids.push(senderId);
+        }
       }
     } else {
       // Direct 1-to-1 messaging check: Mutual follow required unless self-messaging
@@ -3019,16 +3169,21 @@ app.post('/api/messages/send', async (req, res) => {
     // Update conversation record in server memory
     let conv = serverConversationsStore.get(convId);
     if (conv) {
+      if (isGroupChat) {
+        conv.type = 'group';
+        if (req.body.groupName && !conv.name) conv.name = req.body.groupName;
+      }
       conv.updated_at = nowIso;
       conv.last_message = message;
-      if (recipientId && !conv.member_ids.includes(recipientId)) {
+      if (!isGroupChat && recipientId && !conv.member_ids.includes(recipientId)) {
         conv.member_ids.push(recipientId);
       }
     } else {
-      const memberIds = recipientId && recipientId !== senderId ? [senderId, recipientId] : [senderId];
+      const memberIds = !isGroupChat && recipientId && recipientId !== senderId ? [senderId, recipientId] : [senderId];
       conv = {
         id: convId,
-        type: 'direct',
+        type: isGroupChat ? 'group' : 'direct',
+        name: isGroupChat ? req.body.groupName || 'Group Chat' : undefined,
         member_ids: memberIds,
         members_meta: {
           [senderId]: senderProfile || serverProfilesStore.get(senderId),
@@ -3043,27 +3198,42 @@ app.post('/api/messages/send', async (req, res) => {
 
     // Determine target recipient for push notification
     if (!targetRecipient && conv) {
-      targetRecipient = conv.member_ids.find((id) => id !== senderId);
+      targetRecipient = conv.member_ids.find((id: string) => id !== senderId);
     }
 
-    if (targetRecipient && targetRecipient !== senderId) {
-      const senderName =
-        senderProfile?.display_name ||
-        senderProfile?.username ||
-        serverProfilesStore.get(senderId)?.display_name ||
-        'Someone';
+    const senderName =
+      senderProfile?.display_name ||
+      senderProfile?.username ||
+      serverProfilesStore.get(senderId)?.display_name ||
+      'Someone';
 
-      let notifPreview = message.content;
-      if (notifPreview.startsWith('[IMAGE:')) {
-        const parts = notifPreview.slice(7, -1).split(':');
-        const caption = parts.length > 2 ? parts.slice(2).join(':') : (parts.length === 2 && !parts[1].startsWith('/') ? parts[1] : '');
-        notifPreview = caption ? `📷 Photo: ${caption}` : '📷 Sent a photo';
-      } else if (notifPreview.startsWith('[VOICE:')) {
-        notifPreview = '🎙️ Sent a voice note';
-      } else if (notifPreview.startsWith('[STICKER:')) {
-        notifPreview = '✨ Sent a sticker';
+    let notifPreview = message.content;
+    if (notifPreview.startsWith('[IMAGE:')) {
+      const parts = notifPreview.slice(7, -1).split(':');
+      const caption = parts.length > 2 ? parts.slice(2).join(':') : (parts.length === 2 && !parts[1].startsWith('/') ? parts[1] : '');
+      notifPreview = caption ? `📷 Photo: ${caption}` : '📷 Sent a photo';
+    } else if (notifPreview.startsWith('[VOICE:')) {
+      notifPreview = '🎙️ Sent a voice note';
+    } else if (notifPreview.startsWith('[STICKER:')) {
+      notifPreview = '✨ Sent a sticker';
+    }
+
+    if (isGroupChat && conv && Array.isArray(conv.member_ids)) {
+      const groupName = conv.name || 'Group';
+      for (const mId of conv.member_ids) {
+        if (mId !== senderId) {
+          addNotification(
+            mId,
+            senderId,
+            'message',
+            `${senderName} in ${groupName}`,
+            notifPreview,
+            convId,
+            senderProfile || serverProfilesStore.get(senderId)
+          );
+        }
       }
-
+    } else if (targetRecipient && targetRecipient !== senderId) {
       addNotification(
         targetRecipient,
         senderId,
@@ -3079,20 +3249,31 @@ app.post('/api/messages/send', async (req, res) => {
     if (serverSupabase) {
       (async () => {
         try {
-          // 1. Ensure conversation exists in DB
-          await serverSupabase
-            .from('conversations')
-            .upsert({ id: convId, type: 'direct', updated_at: nowIso }, { onConflict: 'id' });
+          if (!isGroupChat) {
+            // 1. Ensure conversation exists in DB
+            await serverSupabase
+              .from('conversations')
+              .upsert({ id: convId, type: 'direct', updated_at: nowIso }, { onConflict: 'id' });
 
-          // 2. Ensure members exist in DB
-          await serverSupabase
-            .from('conversation_members')
-            .upsert({ conversation_id: convId, user_id: senderId }, { onConflict: 'conversation_id,user_id' });
-
-          if (targetRecipient && targetRecipient !== senderId) {
+            // 2. Ensure members exist in DB
             await serverSupabase
               .from('conversation_members')
-              .upsert({ conversation_id: convId, user_id: targetRecipient }, { onConflict: 'conversation_id,user_id' });
+              .upsert({ conversation_id: convId, user_id: senderId }, { onConflict: 'conversation_id,user_id' });
+
+            if (targetRecipient && targetRecipient !== senderId) {
+              await serverSupabase
+                .from('conversation_members')
+                .upsert({ conversation_id: convId, user_id: targetRecipient }, { onConflict: 'conversation_id,user_id' });
+            }
+          } else {
+            await serverSupabase
+              .from('conversations')
+              .upsert({
+                id: convId,
+                type: 'group',
+                name: conv?.name || req.body.groupName || 'Group Chat',
+                updated_at: nowIso,
+              }, { onConflict: 'id' });
           }
 
           // 3. Insert message (ensure content is safe for db constraints)
@@ -3583,9 +3764,17 @@ app.post('/api/messages/list', async (req, res) => {
       return res.status(400).json({ error: 'conversationId required' });
     }
 
-    const allIds: string[] = Array.from(
-      new Set([conversationId, ...(Array.isArray(candidateIds) ? candidateIds : [])].filter(Boolean))
-    );
+    const targetConv = serverConversationsStore.get(conversationId);
+    const isTargetGroup =
+      targetConv?.type === 'group' ||
+      Boolean(targetConv?.name) ||
+      Boolean(targetConv?.owner_id);
+
+    const allIds: string[] = isTargetGroup
+      ? [conversationId]
+      : Array.from(
+          new Set([conversationId, ...(Array.isArray(candidateIds) ? candidateIds : [])].filter(Boolean))
+        );
 
     let msgs: any[] = [];
     const memoryMap = new Map<string, any>();
@@ -3618,9 +3807,13 @@ app.post('/api/messages/list', async (req, res) => {
           msgs = Array.from(map.values()).sort(
             (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
           );
-          allIds.forEach((id) => {
-            messagesServerStore.set(id, msgs);
-          });
+          if (isTargetGroup) {
+            messagesServerStore.set(conversationId, msgs);
+          } else {
+            allIds.forEach((id) => {
+              messagesServerStore.set(id, msgs);
+            });
+          }
         }
       } catch (dbErr) {
         // ignore

@@ -57,6 +57,18 @@ function loadLocalConversations(userId?: string): Conversation[] {
   return [];
 }
 
+export function isGroupConversation(c: any): boolean {
+  if (!c) return false;
+  return (
+    c.type === 'group' ||
+    Boolean(c.name) ||
+    Boolean(c.owner_id) ||
+    Boolean(c.member_roles) ||
+    (Array.isArray(c.member_ids) && c.member_ids.length > 2) ||
+    (Array.isArray((c as any).members) && (c as any).members.length > 2)
+  );
+}
+
 export function cleanAndDeduplicateConversations(convs: Conversation[], userId?: string): Conversation[] {
   if (!Array.isArray(convs) || convs.length === 0) return [];
   const deleted = loadDeletedConvIds(userId);
@@ -75,6 +87,41 @@ export function cleanAndDeduplicateConversations(convs: Conversation[], userId?:
 
   for (const c of convs) {
     if (!c || !c.id || deleted.has(c.id)) continue;
+
+    // Is this a group conversation?
+    if (isGroupConversation(c)) {
+      const normalizedGroup: Conversation = {
+        ...c,
+        type: 'group',
+        other_member: undefined, // Groups NEVER have other_member!
+      };
+
+      if (!groupConvs.has(c.id)) {
+        groupConvs.set(c.id, normalizedGroup);
+      } else {
+        const existing = groupConvs.get(c.id)!;
+        const existingTime = Math.max(
+          new Date(existing.updated_at || 0).getTime(),
+          new Date(existing.last_message?.created_at || 0).getTime()
+        );
+        const cTime = Math.max(
+          new Date(c.updated_at || 0).getTime(),
+          new Date(c.last_message?.created_at || 0).getTime()
+        );
+
+        const newestLastMsg = cTime >= existingTime ? (c.last_message || existing.last_message) : (existing.last_message || c.last_message);
+        const newestUpdatedAt = cTime >= existingTime ? (c.updated_at || existing.updated_at) : (existing.updated_at || c.updated_at);
+
+        groupConvs.set(c.id, {
+          ...existing,
+          ...normalizedGroup,
+          last_message: newestLastMsg,
+          updated_at: newestUpdatedAt,
+          unread_count: Math.max(existing.unread_count || 0, c.unread_count || 0),
+        });
+      }
+      continue; // Strictly skip direct chat logic for group conversations!
+    }
     
     // Extract other member id
     let otherMemberId = c.other_member?.id;
@@ -97,7 +144,7 @@ export function cleanAndDeduplicateConversations(convs: Conversation[], userId?:
       if (other) otherMemberId = other;
     }
 
-    const isDirect = c.type === 'group' ? false : (c.type === 'direct' || (!c.type && Boolean(otherMemberId)));
+    const isDirect = Boolean(otherMemberId);
 
     if (isDirect && otherMemberId) {
       const canonicalId = userId ? getDeterministicDirectConvId(userId, otherMemberId) : c.id;
@@ -402,19 +449,22 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
             });
 
             populatedConversations = convData.map((conv) => {
+              const isGroup = isGroupConversation(conv);
               const convMembers = allMembers.filter((m) => m.conversation_id === conv.id);
-              const otherMemberItem =
-                convMembers.find((m) => m.user_id !== currentUserId) ||
-                convMembers.find((m) => m.user_id === currentUserId) ||
-                convMembers[0];
+              const otherMemberItem = !isGroup
+                ? convMembers.find((m) => m.user_id !== currentUserId) ||
+                  convMembers.find((m) => m.user_id === currentUserId) ||
+                  convMembers[0]
+                : undefined;
               const otherProfile = otherMemberItem ? profilesMap[otherMemberItem.user_id] : undefined;
 
               const existingLocal = convRef.current.find((c) => c.id === conv.id);
-              const finalOtherMember = otherProfile || existingLocal?.other_member;
+              const finalOtherMember = isGroup ? undefined : (otherProfile || existingLocal?.other_member);
               const isViewingThis = isCurrentActivelyViewing(conv.id);
 
               return {
                 ...conv,
+                type: isGroup ? 'group' : 'direct',
                 other_member: finalOtherMember,
                 last_message: lastMessagesMap[conv.id] || existingLocal?.last_message,
                 unread_count: isViewingThis ? 0 : (unreadCountMap[conv.id] || 0),
