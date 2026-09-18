@@ -743,42 +743,6 @@ export default function App() {
         onUnblock={socialRelations.unblockUser}
       />
 
-      {/* Group Chat System Modals */}
-      <CreateGroupModal
-        isOpen={isCreateGroupOpen}
-        onClose={() => setIsCreateGroupOpen(false)}
-        currentUser={profile}
-        currentUserProfile={activeUserProfile || profile || undefined}
-        currentUserId={user?.id || profile?.id || ''}
-        onGroupCreated={(groupConvId) => {
-          setActiveTab('messages');
-          fetchConversations();
-          setActiveConversationId(groupConvId);
-        }}
-      />
-
-      {viewingGroup && (
-        <GroupProfileModal
-          isOpen={Boolean(viewingGroup)}
-          onClose={() => setViewingGroup(null)}
-          conversation={viewingGroup}
-          currentUser={activeUserProfile}
-          onGroupUpdated={() => {
-            fetchConversations();
-          }}
-        />
-      )}
-
-      {forwardingMessage && (
-        <ForwardMessageModal
-          isOpen={Boolean(forwardingMessage)}
-          onClose={() => setForwardingMessage(null)}
-          message={forwardingMessage}
-          conversations={conversations}
-          currentUserId={user?.id || ''}
-        />
-      )}
-
       <SettingsModal
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
