@@ -2637,6 +2637,55 @@ app.post('/api/conversations/list', (req, res) => {
 // ----------------------------------------------------
 
 // Create Group
+app.post('/api/users/search', async (req, res) => {
+  try {
+    const { query, userId } = req.body;
+    const cleanQuery = String(query || '').trim().toLowerCase();
+
+    const activeAdmin = adminSupabase || serverSupabase;
+    if (!activeAdmin) {
+      return res.status(500).json({ error: 'Server not configured' });
+    }
+
+    const followedIds = new Set();
+    if (userId) {
+      for (const entry of followsStore) {
+        const [followerId, followingId] = entry.split(':');
+        if (followerId === userId) {
+          followedIds.add(followingId);
+        }
+      }
+    }
+
+    let queryBuilder = activeAdmin
+      .from('profiles')
+      .select('id, username, display_name, avatar_url, bio, is_online')
+      .neq('id', userId || '')
+      .limit(100);
+
+    if (cleanQuery) {
+      queryBuilder = queryBuilder.or(
+        `username.ilike.%${cleanQuery}%,display_name.ilike.%${cleanQuery}%`
+      );
+    }
+
+    const { data, error } = await queryBuilder;
+    if (error) throw error;
+
+    const allUsers = data || [];
+
+    const sorted = allUsers.sort((a, b) => {
+      const aFollowed = followedIds.has(a.id) ? 1 : 0;
+      const bFollowed = followedIds.has(b.id) ? 1 : 0;
+      return bFollowed - aFollowed;
+    });
+
+    return res.json({ users: sorted });
+  } catch (err) {
+    console.error('[users/search] error:', err.message || err);
+    return res.status(500).json({ error: err.message || 'Failed to search users' });
+  }
+});
 app.post('/api/groups/create', async (req, res) => {
   try {
     const { name, description, avatarUrl, memberIds, creatorId, creatorProfile } = req.body;
