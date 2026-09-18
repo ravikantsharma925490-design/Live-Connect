@@ -83,13 +83,13 @@ function enhanceMediaSDP(sdpText?: string): string {
           map.set('minptime', '10');
           map.set('ptime', '20');
           map.set('useinbandfec', '1');
-          map.set('maxaveragebitrate', '96000');
+          map.set('maxaveragebitrate', '64000');
           map.set('stereo', '0');
           map.set('sprop-stereo', '0');
           map.set('cbr', '0');
           map.set('maxplaybackrate', '48000');
           map.set('sprop-maxcapturerate', '48000');
-          map.set('usedtx', '0');
+          map.set('usedtx', '1');
  
           const formatted = Array.from(map.entries())
             .map(([k, v]) => (v ? `${k}=${v}` : k))
@@ -97,7 +97,7 @@ function enhanceMediaSDP(sdpText?: string): string {
           return `a=fmtp:${pt} ${formatted}`;
         });
       } else {
-        const hdParams = 'minptime=10;ptime=20;useinbandfec=1;maxaveragebitrate=96000;stereo=0;sprop-stereo=0;cbr=0;maxplaybackrate=48000;sprop-maxcapturerate=48000;usedtx=0';
+        const hdParams = 'minptime=10;ptime=20;useinbandfec=1;maxaveragebitrate=64000;stereo=0;sprop-stereo=0;cbr=0;maxplaybackrate=48000;sprop-maxcapturerate=48000;usedtx=1';
         sdp = sdp.replace(
           new RegExp(`(a=rtpmap:${pt}\\s+opus\\/48000\\/2\r?\n)`, 'i'),
           `$1a=fmtp:${pt} ${hdParams}\r\n`
@@ -279,8 +279,16 @@ export class WebRTCP2PSession {
     }
  
     this.pc.ontrack = (event) => {
+      // Prevent local audio/video tracks from loopbacking as remote tracks
+      if (event.track && this.localStream?.getTracks().some((lt) => lt.id === event.track.id)) {
+        return;
+      }
+
       if (event.streams && event.streams[0]) {
         event.streams[0].getTracks().forEach((t) => {
+          if (this.localStream?.getTracks().some((lt) => lt.id === t.id)) {
+            return;
+          }
           if (!this.remoteStream.getTracks().some((existing) => existing.id === t.id)) {
             this.remoteStream.addTrack(t);
           }
@@ -506,7 +514,13 @@ export class WebRTCP2PSession {
             const audioTrack = this.localStream.getAudioTracks()[0];
             if (audioTrack && audioTrack.readyState === 'ended') {
               navigator.mediaDevices
-                .getUserMedia({ audio: true })
+                .getUserMedia({
+                  audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true,
+                  },
+                })
                 .then((newStream) => {
                   const newTrack = newStream.getAudioTracks()[0];
                   if (newTrack && this.pc) {

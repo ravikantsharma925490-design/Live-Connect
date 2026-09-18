@@ -34,14 +34,21 @@ function generateCallUUID(): string {
   });
 }
 
-// Studio Voice Audio Constraints for Live Calls (Mobile-safe & desktop-optimized)
+// Studio Voice Audio Constraints with Multi-Browser Acoustic Echo Cancellation (AEC)
 export const HD_CALL_AUDIO_CONSTRAINTS: MediaTrackConstraints = {
-  echoCancellation: true,
-  noiseSuppression: true, // Enabled to remove background noise
-  autoGainControl: true, // Enabled to automatically adjust microphone volume
-  sampleRate: { ideal: 48000 },
+  echoCancellation: { ideal: true },
+  noiseSuppression: { ideal: true },
+  autoGainControl: { ideal: true },
   channelCount: { ideal: 1 },
-};
+  // Chromium & WebKit specific AEC / AGC / Noise Suppression flags
+  googEchoCancellation: true,
+  googEchoCancellation2: true,
+  googAutoGainControl: true,
+  googNoiseSuppression: true,
+  googHighpassFilter: true,
+  googTypingNoiseDetection: true,
+  googAudioMirroring: false,
+} as any;
 
 // High Definition (1080p / 720p 30fps) Video Constraints (Mobile-safe ideal parameters)
 export const HD_CALL_VIDEO_CONSTRAINTS: MediaTrackConstraints = {
@@ -161,13 +168,25 @@ export function useCall(
           try {
             // Priority 2: 720p HD Video fallback with standard noise cancellation and echo cancellation
             stream = await navigator.mediaDevices.getUserMedia({
-              audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+              audio: {
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+                googEchoCancellation: true,
+                googAutoGainControl: true,
+                googNoiseSuppression: true,
+                googHighpassFilter: true,
+              } as any,
               video: isVideo ? { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } } : false,
             });
           } catch {
-            // Priority 3: Basic standard video fallback
+            // Priority 3: Basic standard video fallback with echo cancellation
             stream = await navigator.mediaDevices.getUserMedia({
-              audio: true,
+              audio: {
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+              },
               video: isVideo,
             });
           }
@@ -273,14 +292,26 @@ export function useCall(
                   (window as any).__liveconnect_active_remote_stream = stream;
                 }
                 if (track.kind === 'video' && remoteVideoRef.current) {
-                  if (remoteVideoRef.current.srcObject !== stream) {
-                    remoteVideoRef.current.srcObject = stream;
+                  // Attach ONLY video tracks to video element and strictly force muted
+                  const videoTracks = stream.getVideoTracks();
+                  if (videoTracks.length > 0) {
+                    const videoStream = new MediaStream(videoTracks);
+                    if (remoteVideoRef.current.srcObject !== videoStream) {
+                      remoteVideoRef.current.srcObject = videoStream;
+                    }
                   }
+                  remoteVideoRef.current.muted = true;
+                  remoteVideoRef.current.defaultMuted = true;
                   remoteVideoRef.current.play().catch(() => {});
                 }
                 if (track.kind === 'audio' && remoteAudioRef.current) {
-                  if (remoteAudioRef.current.srcObject !== stream) {
-                    remoteAudioRef.current.srcObject = stream;
+                  // Attach ONLY audio tracks to dedicated audio element
+                  const audioTracks = stream.getAudioTracks();
+                  if (audioTracks.length > 0) {
+                    const audioStream = new MediaStream(audioTracks);
+                    if (remoteAudioRef.current.srcObject !== audioStream) {
+                      remoteAudioRef.current.srcObject = audioStream;
+                    }
                   }
                   remoteAudioRef.current.volume = 1.0;
                   remoteAudioRef.current.play().catch(() => {});
@@ -1395,9 +1426,11 @@ export function useCall(
         localStreamRef.current.removeTrack(localStreamRef.current.getVideoTracks()[0]);
         localStreamRef.current.addTrack(newVideoTrack);
 
-        // Update local video element
+        // Update local video element with video track only
         if (localVideoRef.current) {
-          localVideoRef.current.srcObject = localStreamRef.current;
+          localVideoRef.current.muted = true;
+          localVideoRef.current.defaultMuted = true;
+          localVideoRef.current.srcObject = new MediaStream([newVideoTrack]);
         }
 
         // Update WebRTC peer track
@@ -1412,7 +1445,7 @@ export function useCall(
     }
   };
 
-  // Ensure local video stream is attached to local video element once rendered
+  // Ensure local video stream is attached to local video element once rendered (video tracks ONLY, strictly muted)
   useEffect(() => {
     if (
       activeCallState &&
@@ -1420,8 +1453,14 @@ export function useCall(
       localStreamRef.current &&
       localVideoRef.current
     ) {
-      if (localVideoRef.current.srcObject !== localStreamRef.current) {
-        localVideoRef.current.srcObject = localStreamRef.current;
+      const videoTracks = localStreamRef.current.getVideoTracks();
+      if (videoTracks.length > 0) {
+        localVideoRef.current.muted = true;
+        localVideoRef.current.defaultMuted = true;
+        const currentSrc = localVideoRef.current.srcObject as MediaStream | null;
+        if (!currentSrc || currentSrc.getVideoTracks()[0]?.id !== videoTracks[0].id) {
+          localVideoRef.current.srcObject = new MediaStream(videoTracks);
+        }
         localVideoRef.current.play().catch(() => {});
       }
     }
@@ -1434,23 +1473,34 @@ export function useCall(
     const stream = remoteStreamRef.current || p2pSessionRef.current?.remoteStream;
     if (!stream) return;
 
-    // Attach remote audio element for crystal clear voice playback
+    // Attach remote audio element for crystal clear voice playback (Audio tracks ONLY)
     if (remoteAudioRef.current) {
-      if (remoteAudioRef.current.srcObject !== stream) {
-        remoteAudioRef.current.srcObject = stream;
+      const audioTracks = stream.getAudioTracks();
+      if (audioTracks.length > 0) {
+        const currentSrc = remoteAudioRef.current.srcObject as MediaStream | null;
+        if (!currentSrc || currentSrc.getAudioTracks()[0]?.id !== audioTracks[0].id) {
+          remoteAudioRef.current.srcObject = new MediaStream(audioTracks);
+        }
+        remoteAudioRef.current.volume = 1.0;
+        remoteAudioRef.current.play().catch(() => {});
       }
-      remoteAudioRef.current.volume = 1.0;
-      remoteAudioRef.current.play().catch(() => {});
     }
 
-    // Attach remote video element
+    // Attach remote video element (Video tracks ONLY, strictly muted)
     if (
       activeCallState.call.call_type === 'video' &&
-      remoteVideoRef.current &&
-      remoteVideoRef.current.srcObject !== stream
+      remoteVideoRef.current
     ) {
-      remoteVideoRef.current.srcObject = stream;
-      remoteVideoRef.current.play().catch(() => {});
+      const videoTracks = stream.getVideoTracks();
+      if (videoTracks.length > 0) {
+        remoteVideoRef.current.muted = true;
+        remoteVideoRef.current.defaultMuted = true;
+        const currentSrc = remoteVideoRef.current.srcObject as MediaStream | null;
+        if (!currentSrc || currentSrc.getVideoTracks()[0]?.id !== videoTracks[0].id) {
+          remoteVideoRef.current.srcObject = new MediaStream(videoTracks);
+        }
+        remoteVideoRef.current.play().catch(() => {});
+      }
     }
   }, [activeCallState?.call.id, activeCallState?.status, connectionState]);
 

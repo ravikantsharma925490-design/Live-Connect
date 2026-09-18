@@ -59,16 +59,28 @@ export const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
 
   // Ensure video and audio elements start playing as soon as streams are ready
   React.useEffect(() => {
-    if (localVideoRef?.current && localVideoRef.current.srcObject) {
-      localVideoRef.current.play().catch(() => {});
+    if (localVideoRef?.current) {
+      localVideoRef.current.muted = true;
+      localVideoRef.current.defaultMuted = true;
+      if (localVideoRef.current.srcObject) {
+        localVideoRef.current.play().catch(() => {});
+      }
     }
-    if (remoteVideoRef?.current && remoteVideoRef.current.srcObject) {
-      remoteVideoRef.current.play().catch(() => {});
+    if (remoteVideoRef?.current) {
+      remoteVideoRef.current.muted = true;
+      remoteVideoRef.current.defaultMuted = true;
+      if (remoteVideoRef.current.srcObject) {
+        remoteVideoRef.current.play().catch(() => {});
+      }
     }
     const audioEl = remoteAudioRef?.current;
     if (audioEl) {
       if (!audioEl.srcObject && (window as any).__liveconnect_active_remote_stream) {
-        audioEl.srcObject = (window as any).__liveconnect_active_remote_stream;
+        const rawStream = (window as any).__liveconnect_active_remote_stream as MediaStream;
+        const audioTracks = rawStream.getAudioTracks();
+        if (audioTracks.length > 0) {
+          audioEl.srcObject = new MediaStream(audioTracks);
+        }
       }
       if (audioEl.srcObject) {
         audioEl.volume = 1.0;
@@ -113,6 +125,7 @@ export const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
           autoPlay
           playsInline
           muted
+          defaultMuted
           className="w-full h-full object-cover"
         />
 
@@ -153,6 +166,7 @@ export const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
             autoPlay
             playsInline
             muted
+            defaultMuted
             className={cn(
               'w-full h-full object-cover -scale-x-100',
               !localVideoEnabled && 'hidden'

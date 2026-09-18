@@ -47,7 +47,11 @@ export const AudioCallScreen: React.FC<AudioCallScreenProps> = ({
     if (!audioEl) return;
 
     if (!audioEl.srcObject && (window as any).__liveconnect_active_remote_stream) {
-      audioEl.srcObject = (window as any).__liveconnect_active_remote_stream;
+      const rawStream = (window as any).__liveconnect_active_remote_stream as MediaStream;
+      const audioTracks = rawStream.getAudioTracks();
+      if (audioTracks.length > 0) {
+        audioEl.srcObject = new MediaStream(audioTracks);
+      }
     }
 
     if (audioEl.srcObject) {
