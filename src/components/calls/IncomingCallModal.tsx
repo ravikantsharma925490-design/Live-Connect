@@ -5,7 +5,7 @@ import { cn, getAvatarColor, getInitials } from '@/src/lib/utils';
 
 interface IncomingCallModalProps {
   incomingCall: Call | null;
-  onAccept: () => void;
+  onAccept: (call?: Call) => void;
   onReject: () => void;
   onOpenProfile?: (profile: any) => void;
 }
@@ -29,10 +29,11 @@ export const IncomingCallModal: React.FC<IncomingCallModalProps> = ({
   const avatarUrl = caller?.avatar_url;
   const isVideo = incomingCall.call_type === 'video';
 
-  const handleAccept = () => {
+  const handleAccept = (e?: React.MouseEvent) => {
+    e?.stopPropagation();
     if (isAccepting) return;
     setIsAccepting(true);
-    onAccept();
+    onAccept(incomingCall);
   };
 
   return (
@@ -101,14 +102,15 @@ export const IncomingCallModal: React.FC<IncomingCallModalProps> = ({
 
           {/* Accept Button */}
           <button
+            id="accept-call-button"
             onClick={handleAccept}
             type="button"
             disabled={isAccepting}
-            className="flex flex-col items-center gap-2 group cursor-pointer focus:outline-none"
+            className="flex flex-col items-center gap-2 group cursor-pointer focus:outline-none touch-manipulation select-none"
           >
             <div className={cn(
-              "w-16 h-16 rounded-full bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white flex items-center justify-center shadow-lg shadow-emerald-600/40 transition-all group-hover:scale-110 active:scale-95",
-              !isAccepting && "animate-bounce"
+              "w-16 h-16 rounded-full bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white flex items-center justify-center shadow-lg shadow-emerald-600/40 transition-all group-hover:scale-105 active:scale-95",
+              !isAccepting && "ring-4 ring-emerald-500/40 animate-pulse"
             )}>
               {isAccepting ? (
                 <Loader2 className="w-7 h-7 animate-spin" />
@@ -118,7 +120,7 @@ export const IncomingCallModal: React.FC<IncomingCallModalProps> = ({
                 <Phone className="w-7 h-7" />
               )}
             </div>
-            <span className="text-xs font-semibold text-neutral-400 group-hover:text-emerald-400 transition-colors">
+            <span className="text-xs font-semibold text-neutral-300 group-hover:text-emerald-400 transition-colors">
               {isAccepting ? 'Connecting...' : 'Accept'}
             </span>
           </button>

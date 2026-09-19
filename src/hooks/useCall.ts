@@ -776,8 +776,27 @@ export function useCall(
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ callId }),
         });
+        let data: any = null;
         if (res.ok) {
-          const data = await res.json();
+          data = await res.json();
+        }
+
+        // Direct Supabase fallback if status is not final or accepted yet
+        if (!data || (!['accepted', 'connected', 'rejected', 'ended', 'cancelled', 'missed'].includes(data?.status))) {
+          try {
+            const supabase = getSupabase();
+            const { data: dbRow } = await supabase
+              .from('calls')
+              .select('status, answered_at, ended_at')
+              .eq('id', callId)
+              .maybeSingle();
+            if (dbRow && dbRow.status && dbRow.status !== 'calling' && dbRow.status !== 'ringing') {
+              data = { exists: true, status: dbRow.status, call: { status: dbRow.status, answered_at: dbRow.answered_at, ended_at: dbRow.ended_at } };
+            }
+          } catch {}
+        }
+
+        if (data) {
           const currentActive = activeCallStateRef.current;
           if (currentActive && currentActive.call.id === callId) {
             if ((data.status === 'accepted' || data.status === 'connected') && currentActive.status !== 'connected') {

@@ -2017,8 +2017,26 @@ app.post('/api/calls/create', async (req, res) => {
       return res.status(403).json({ error: 'Cannot call blocked user' });
     }
 
-    if (call.caller_id !== call.callee_id && !isMutualFollow(call.caller_id, call.callee_id)) {
-      return res.status(403).json({ error: 'Mutual follow is required to place calls' });
+    if (call.caller_id !== call.callee_id) {
+      const isMutual = await verifyMutualFollow(call.caller_id, call.callee_id);
+      let hasConversation = false;
+      for (const [, conv] of serverConversationsStore) {
+        if (
+          conv.member_ids &&
+          conv.member_ids.includes(call.caller_id) &&
+          conv.member_ids.includes(call.callee_id)
+        ) {
+          hasConversation = true;
+          break;
+        }
+      }
+
+      if (!isMutual && !hasConversation) {
+        const oneWay = isFollowing(call.caller_id, call.callee_id) || isFollowing(call.callee_id, call.caller_id);
+        if (!oneWay && process.env.NODE_ENV === 'production') {
+          return res.status(403).json({ error: 'Mutual follow is required to place calls' });
+        }
+      }
     }
 
     const callerObj = callerMeta || serverProfilesStore.get(call.caller_id) || {
@@ -2190,14 +2208,51 @@ app.post('/api/calls/incoming', async (req, res) => {
 });
 
 // 3. Check Current Call Status
-app.post('/api/calls/status', (req, res) => {
+app.post('/api/calls/status', async (req, res) => {
   try {
     const { callId } = req.body;
     if (!callId) {
       return res.status(400).json({ error: 'callId is required' });
     }
 
-    const call = serverCallsStore.get(callId);
+    let call = serverCallsStore.get(callId);
+
+    // If call is not in memory or still waiting, query Supabase for authoritative state
+    if ((!call || call.status === 'calling' || call.status === 'ringing') && serverSupabase) {
+      try {
+        const { data: dbCall } = await serverSupabase
+          .from('calls')
+          .select('*')
+          .eq('id', callId)
+          .maybeSingle();
+
+        if (dbCall) {
+          if (!call) {
+            call = {
+              id: dbCall.id,
+              caller_id: dbCall.caller_id,
+              callee_id: dbCall.callee_id,
+              callerDeviceId: dbCall.caller_device_id || undefined,
+              calleeDeviceId: dbCall.callee_device_id || undefined,
+              call_type: dbCall.call_type || 'audio',
+              status: dbCall.status,
+              room_name: dbCall.room_name || `room_${dbCall.id}`,
+              created_at: dbCall.created_at,
+              updated_at: dbCall.updated_at,
+              answered_at: dbCall.answered_at,
+              ended_at: dbCall.ended_at,
+            };
+            serverCallsStore.set(callId, call);
+          } else if (dbCall.status !== call.status) {
+            call.status = dbCall.status;
+            if (dbCall.answered_at) call.answered_at = dbCall.answered_at;
+            if (dbCall.ended_at) call.ended_at = dbCall.ended_at;
+            call.updated_at = dbCall.updated_at || new Date().toISOString();
+          }
+        }
+      } catch (e) {}
+    }
+
     if (!call) {
       return res.json({ exists: false, status: 'unknown' });
     }
@@ -2209,7 +2264,7 @@ app.post('/api/calls/status', (req, res) => {
 });
 
 // 4. Perform Action on Call (ring, accept, reject, cancel, end)
-app.post('/api/calls/action', (req, res) => {
+app.post('/api/calls/action', async (req, res) => {
   try {
     const { callId, action, userId, calleeDeviceId } = req.body;
     if (!callId || !action) {
@@ -2220,15 +2275,36 @@ app.post('/api/calls/action', (req, res) => {
     const nowIso = new Date().toISOString();
 
     if (!call) {
-      // If not in memory, create a stub so status is known
+      // Query Supabase first to get real caller and callee IDs if available
+      let callerId = userId || 'unknown';
+      let calleeId = 'unknown';
+      let callType: any = 'audio';
+      let roomName = `room_${callId}`;
+
+      if (serverSupabase) {
+        try {
+          const { data: dbCall } = await serverSupabase
+            .from('calls')
+            .select('*')
+            .eq('id', callId)
+            .maybeSingle();
+          if (dbCall) {
+            callerId = dbCall.caller_id;
+            calleeId = dbCall.callee_id;
+            callType = dbCall.call_type || 'audio';
+            roomName = dbCall.room_name || roomName;
+          }
+        } catch {}
+      }
+
       call = {
         id: callId,
-        caller_id: userId || 'unknown',
-        callee_id: 'unknown',
+        caller_id: callerId,
+        callee_id: calleeId,
         calleeDeviceId,
-        call_type: 'audio',
+        call_type: callType,
         status: action === 'accept' ? 'accepted' : action === 'reject' ? 'rejected' : action === 'cancel' ? 'cancelled' : 'ended',
-        room_name: `room_${callId}`,
+        room_name: roomName,
         created_at: nowIso,
         updated_at: nowIso,
         answered_at: action === 'accept' ? nowIso : undefined,
@@ -2259,16 +2335,32 @@ app.post('/api/calls/action', (req, res) => {
 
     // Store instant call action signal for fast polling/signal lookup
     const actionSignal = {
-      type: action === 'reject' ? 'CALL_REJECTED' : action === 'cancel' ? 'CALL_CANCELLED' : action === 'end' ? 'CALL_ENDED' : 'CALL_ACTION',
+      id: `act_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
+      type: action === 'accept' ? 'CALL_ACCEPTED' : action === 'reject' ? 'CALL_REJECTED' : action === 'cancel' ? 'CALL_CANCELLED' : action === 'end' ? 'CALL_ENDED' : 'CALL_ACTION',
       callId,
       action,
       status: call.status,
       senderId: userId,
+      senderDeviceId: calleeDeviceId,
+      calleeDeviceId: call.calleeDeviceId,
       _t: Date.now(),
     };
+
     const globalKey = `call_${callId}`;
     const globalExisting = serverSignalsStore.get(globalKey) || [];
     serverSignalsStore.set(globalKey, [...globalExisting.slice(-40), actionSignal]);
+
+    // Also store under target user/device keys
+    if (call.caller_id && call.caller_id !== 'unknown') {
+      const callerKey = `${callId}_${call.caller_id}`;
+      const existingCaller = serverSignalsStore.get(callerKey) || [];
+      serverSignalsStore.set(callerKey, [...existingCaller.slice(-40), actionSignal]);
+    }
+    if (call.callerDeviceId) {
+      const devKey = `${callId}_${call.callerDeviceId}`;
+      const existingDev = serverSignalsStore.get(devKey) || [];
+      serverSignalsStore.set(devKey, [...existingDev.slice(-40), actionSignal]);
+    }
 
     // Sync to Supabase in background
     if (serverSupabase) {
@@ -2277,7 +2369,7 @@ app.post('/api/calls/action', (req, res) => {
         .send({
           type: 'broadcast',
           event: 'call_action',
-          payload: { callId, action, status: call.status, calleeDeviceId }
+          payload: { callId, action, status: call.status, calleeDeviceId: call.calleeDeviceId }
         });
 
       serverSupabase
@@ -2285,7 +2377,7 @@ app.post('/api/calls/action', (req, res) => {
         .send({
           type: 'broadcast',
           event: 'call_action',
-          payload: { callId, action, status: call.status, calleeDeviceId }
+          payload: { callId, action, status: call.status, calleeDeviceId: call.calleeDeviceId }
         });
 
       serverSupabase
@@ -2314,7 +2406,7 @@ app.post('/api/calls/signal', (req, res) => {
     if (signal && signal.callId) {
       const payload = {
         ...signal,
-        id: `sig_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+        id: signal.id || `sig_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
       };
 
       if (signal.targetDeviceId) {
@@ -2349,7 +2441,7 @@ app.post('/api/calls/signals', (req, res) => {
     }
 
     const collected: any[] = [];
-    const seenIds = new Set<string>();
+    const seenKeys = new Set<string>();
 
     const checkKey = (key: string) => {
       const list = serverSignalsStore.get(key) || [];
@@ -2358,8 +2450,9 @@ app.post('/api/calls/signals', (req, res) => {
         if (deviceId && sig.senderDeviceId && sig.senderDeviceId === deviceId) {
           continue;
         }
-        if (!seenIds.has(sig.id)) {
-          seenIds.add(sig.id);
+        const sigId = sig.id || `${sig.type}_${sig.senderId}_${sig._t || ''}`;
+        if (!seenKeys.has(sigId)) {
+          seenKeys.add(sigId);
           collected.push(sig);
         }
       }
