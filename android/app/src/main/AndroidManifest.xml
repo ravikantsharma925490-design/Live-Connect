@@ -23,6 +23,15 @@
     <!-- Google AdMob Advertising ID -->
     <uses-permission android:name="com.google.android.gms.permission.AD_ID" />
 
+    <!-- Truecaller App Queries (Android 11+ Requirement) -->
+    <queries>
+        <package android:name="com.truecaller" />
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="truecallersdk" />
+        </intent>
+    </queries>
+
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
@@ -65,6 +74,11 @@
         <meta-data
             android:name="com.google.android.gms.ads.APPLICATION_ID"
             android:value="ca-app-pub-4584671817749395~7447215874"/>
+
+        <!-- Truecaller SDK Partner Key -->
+        <meta-data
+            android:name="com.truecaller.android.sdk.PartnerKey"
+            android:value="VVB4Vacf5545a70f7467094bc0747d59a9819" />
 
     </application>
 

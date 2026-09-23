@@ -49,6 +49,7 @@ export interface Conversation {
   members?: ConversationMember[];
   member_ids?: string[];
   members_meta?: Record<string, Profile>;
+  member_roles?: Record<string, 'admin' | 'member'>;
 }
 
 export interface ConversationMember {

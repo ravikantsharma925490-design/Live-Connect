@@ -1457,6 +1457,290 @@ function devApiPlugin(): Plugin {
           return;
         }
 
+        // ----------------------------------------------------
+        // TRUECALLER DEV SERVER MIDDLEWARES
+        // ----------------------------------------------------
+        const TC_APP_KEY = (process.env.VITE_TRUECALLER_APP_KEY || 'VVB4Vacf5545a70f7467094bc0747d59a9819').trim();
+
+        if (url === '/api/auth/truecaller/initiate' && req.method === 'POST') {
+          const nonce = `tc_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+          const partnerName = encodeURIComponent('Live Connect APP');
+          const privacyUrl = encodeURIComponent('https://live-connect-o0u7.onrender.com');
+          const termsUrl = encodeURIComponent('https://live-connect-o0u7.onrender.com');
+          const params = `type=btmsheet&requestNonce=${nonce}&partnerKey=${TC_APP_KEY}&partnerName=${partnerName}&countryCode=IN&lang=en&title=login&privacyUrl=${privacyUrl}&termsUrl=${termsUrl}&loginPrefix=continue&loginSuffix=login&ctaPrefix=proceed&ctaColor=%230087FF&ctaTextColor=%23ffffff&btnShape=round&skipOption=useanothermethod&ttl=120000`;
+          const deepLink = `truecallersdk://truesdk/web_verify?${params}`;
+          const androidIntent = `intent://truesdk/web_verify?${params}#Intent;scheme=truecallersdk;package=com.truecaller;end`;
+
+          (global as any).__truecallerStore = (global as any).__truecallerStore || new Map();
+          (global as any).__truecallerStore.set(nonce, {
+            requestId: nonce,
+            status: 'pending',
+            createdAt: Date.now(),
+          });
+
+          res.setHeader('Content-Type', 'application/json');
+          res.end(
+            JSON.stringify({
+              success: true,
+              requestId: nonce,
+              partnerKey: TC_APP_KEY,
+              deepLink,
+              androidIntent,
+              expiresIn: 300,
+            })
+          );
+          return;
+        }
+
+        if ((url === '/auth/callback' || url === '/api/auth/truecaller/callback') && req.method === 'POST') {
+          const body = await parseJsonBody(req);
+          const { requestId, accessToken, endpoint } = body || {};
+
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ status: 'ok', received: true }));
+
+          if (requestId && accessToken) {
+            (async () => {
+              try {
+                const profileUrl = endpoint || 'https://profile4-noneu.truecaller.com/v1/default';
+                const tcRes = await fetch(profileUrl, {
+                  headers: { Authorization: `Bearer ${accessToken}`, 'Cache-Control': 'no-cache' },
+                });
+                if (tcRes.ok) {
+                  const tcData: any = await tcRes.json();
+                  const phone = tcData.phoneNumber || (Array.isArray(tcData.phoneNumbers) ? tcData.phoneNumbers[0] : '') || '';
+                  const cleanDigits = phone.replace(/\D/g, '');
+                  const formattedPhone = cleanDigits.length === 10 ? `+91${cleanDigits}` : `+${cleanDigits}`;
+                  const firstName = tcData.name?.first || tcData.firstName || '';
+                  const lastName = tcData.name?.last || tcData.lastName || '';
+                  const fullName = [firstName, lastName].filter(Boolean).join(' ') || `User ${cleanDigits.slice(-4)}`;
+
+                  const userId = `tc_usr_${cleanDigits}`;
+                  const profile = {
+                    id: userId,
+                    username: `tc_${cleanDigits.slice(-6)}`,
+                    display_name: fullName,
+                    avatar_url: tcData.avatarUrl || null,
+                    phone_number: formattedPhone,
+                    country: tcData.address?.countryCode || 'India',
+                    is_online: true,
+                    last_seen: new Date().toISOString(),
+                  };
+
+                  const user = {
+                    id: userId,
+                    email: `tc_${cleanDigits}@liveconnect.app`,
+                    user_metadata: {
+                      display_name: fullName,
+                      phone: formattedPhone,
+                      verified_by: 'truecaller',
+                    },
+                  };
+
+                  devProfilesStore.set(userId, profile);
+                  (global as any).__truecallerStore = (global as any).__truecallerStore || new Map();
+                  (global as any).__truecallerStore.set(requestId, {
+                    requestId,
+                    status: 'completed',
+                    profile,
+                    user,
+                    createdAt: Date.now(),
+                  });
+                }
+              } catch (e) {
+                console.warn('Dev Truecaller webhook error:', e);
+              }
+            })();
+          }
+          return;
+        }
+
+        if (url === '/api/auth/truecaller/status' && req.method === 'GET') {
+          const reqId = new URL(`http://localhost${req.url}`).searchParams.get('requestId') || '';
+          (global as any).__truecallerStore = (global as any).__truecallerStore || new Map();
+          const rec = (global as any).__truecallerStore.get(reqId);
+
+          res.setHeader('Content-Type', 'application/json');
+          if (!rec) {
+            res.end(JSON.stringify({ status: 'pending', notFoundYet: true }));
+          } else {
+            res.end(JSON.stringify(rec));
+          }
+          return;
+        }
+
+        // PC Truecaller OTP Endpoints
+        if (url === '/api/auth/truecaller/send-otp' && req.method === 'POST') {
+          const { phoneNumber } = await parseJsonBody(req);
+          const cleanDigits = String(phoneNumber || '').replace(/\D/g, '');
+          if (cleanDigits.length < 7) {
+            res.statusCode = 400;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: 'Please enter a valid mobile number' }));
+            return;
+          }
+
+          const code = Math.floor(100000 + Math.random() * 900000).toString();
+          (global as any).__pcOtpStore = (global as any).__pcOtpStore || new Map();
+          (global as any).__pcOtpStore.set(cleanDigits, {
+            code,
+            expiresAt: Date.now() + 5 * 60 * 1000,
+            attempts: 0,
+          });
+
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({
+            success: true,
+            message: `Verification code sent to ${phoneNumber}`,
+            expiresIn: 300,
+          }));
+          return;
+        }
+
+        if (url === '/api/auth/truecaller/verify-otp' && req.method === 'POST') {
+          const { phoneNumber, code, name, requestId } = await parseJsonBody(req);
+          const cleanDigits = String(phoneNumber || '').replace(/\D/g, '');
+          const cleanCode = String(code || '').trim();
+
+          (global as any).__pcOtpStore = (global as any).__pcOtpStore || new Map();
+          const record = (global as any).__pcOtpStore.get(cleanDigits);
+
+          if (!record) {
+            res.statusCode = 400;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: 'Verification code expire ho gaya ya nahi mila. Naya code mangwayein.' }));
+            return;
+          }
+
+          if (Date.now() > record.expiresAt) {
+            (global as any).__pcOtpStore.delete(cleanDigits);
+            res.statusCode = 400;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: 'Verification code expire ho chuka hai. Naya code mangwayein.' }));
+            return;
+          }
+
+          if (record.code !== cleanCode) {
+            record.attempts = (record.attempts || 0) + 1;
+            if (record.attempts >= 5) {
+              (global as any).__pcOtpStore.delete(cleanDigits);
+              res.statusCode = 400;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ error: 'Bohat zyada galat attempts. Kripya naya code mangwayein.' }));
+              return;
+            }
+            res.statusCode = 400;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: 'Galat verification code hai. Kripya dobara check karein.' }));
+            return;
+          }
+
+          (global as any).__pcOtpStore.delete(cleanDigits);
+
+          const formattedPhone = cleanDigits.length === 10 ? `+91${cleanDigits}` : `+${cleanDigits}`;
+          const userId = `tc_usr_${cleanDigits}`;
+          const cleanName = String(name || `User ${cleanDigits.slice(-4)}`).trim();
+
+          const profile = {
+            id: userId,
+            username: `tc_${cleanDigits.slice(-6)}`,
+            display_name: cleanName,
+            avatar_url: null,
+            phone_number: formattedPhone,
+            country: 'India',
+            is_online: true,
+            last_seen: new Date().toISOString(),
+          };
+
+          const user = {
+            id: userId,
+            email: `tc_${cleanDigits}@liveconnect.app`,
+            user_metadata: {
+              display_name: cleanName,
+              phone: formattedPhone,
+              verified_by: 'truecaller',
+            },
+          };
+
+          devProfilesStore.set(userId, profile);
+          if (devSupabase) {
+            try {
+              await devSupabase.from('profiles').upsert(profile);
+            } catch (e) {}
+          }
+
+          const reqId = requestId || `tc_man_${Date.now()}`;
+          (global as any).__truecallerStore = (global as any).__truecallerStore || new Map();
+          (global as any).__truecallerStore.set(reqId, {
+            requestId: reqId,
+            status: 'completed',
+            profile,
+            user,
+            createdAt: Date.now(),
+          });
+
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ success: true, profile, user }));
+          return;
+        }
+
+        if (url === '/api/auth/truecaller/verify-number' && req.method === 'POST') {
+          const { phoneNumber, name, requestId } = await parseJsonBody(req);
+          const cleanDigits = String(phoneNumber || '').replace(/\D/g, '');
+          if (cleanDigits.length < 10) {
+            res.statusCode = 400;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: 'Please enter a valid 10-digit mobile number' }));
+            return;
+          }
+
+          const formattedPhone = cleanDigits.length === 10 ? `+91${cleanDigits}` : `+${cleanDigits}`;
+          const userId = `tc_usr_${cleanDigits}`;
+          const cleanName = String(name || `User ${cleanDigits.slice(-4)}`).trim();
+
+          const profile = {
+            id: userId,
+            username: `tc_${cleanDigits.slice(-6)}`,
+            display_name: cleanName,
+            avatar_url: null,
+            phone_number: formattedPhone,
+            country: 'India',
+            is_online: true,
+            last_seen: new Date().toISOString(),
+          };
+
+          const user = {
+            id: userId,
+            email: `tc_${cleanDigits}@liveconnect.app`,
+            user_metadata: {
+              display_name: cleanName,
+              phone: formattedPhone,
+              verified_by: 'truecaller',
+            },
+          };
+
+          devProfilesStore.set(userId, profile);
+          if (devSupabase) {
+            try {
+              await devSupabase.from('profiles').upsert(profile);
+            } catch (e) {}
+          }
+
+          const reqId = requestId || `tc_man_${Date.now()}`;
+          (global as any).__truecallerStore = (global as any).__truecallerStore || new Map();
+          (global as any).__truecallerStore.set(reqId, {
+            requestId: reqId,
+            status: 'completed',
+            profile,
+            user,
+            createdAt: Date.now(),
+          });
+
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ success: true, profile, user }));
+          return;
+        }
+
         next();
       });
     },

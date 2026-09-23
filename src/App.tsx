@@ -46,6 +46,7 @@ export default function App() {
     signUp,
     signIn,
     signInWithGoogle,
+    loginWithTruecaller,
     sendLoginOtp,
     signOut,
     resetPassword,
@@ -111,6 +112,7 @@ export default function App() {
     createGroup,
     deleteConversation,
     markConversationAsRead,
+    updateConversation,
   } = useConversations(user?.id, activeTab);
 
   const {
@@ -761,7 +763,11 @@ export default function App() {
         onClose={() => setViewingGroup(null)}
         conversation={viewingGroup}
         currentUser={profile}
-        onGroupUpdated={() => {
+        onGroupUpdated={(updatedConv) => {
+          if (updatedConv) {
+            setViewingGroup(updatedConv);
+            updateConversation(updatedConv);
+          }
           fetchConversations();
         }}
         onGroupDeleted={() => {

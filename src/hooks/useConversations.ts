@@ -372,10 +372,10 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
           if (convData && convData.length > 0) {
             const { data: allMembersData } = await supabase
               .from('conversation_members')
-              .select('conversation_id, user_id')
+              .select('conversation_id, user_id, role, joined_at')
               .in('conversation_id', convIds);
 
-            const allMembers = allMembersData || [];
+            const allMembers = (allMembersData || []) as any[];
             const allUserIds = Array.from(new Set(allMembers.map((m) => m.user_id)));
 
             let profilesMap: Record<string, Profile> = {};
@@ -462,9 +462,29 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
               const finalOtherMember = isGroup ? undefined : (otherProfile || existingLocal?.other_member);
               const isViewingThis = isCurrentActivelyViewing(conv.id);
 
+              const memberIds = isGroup
+                ? Array.from(new Set(convMembers.map((m) => m.user_id)))
+                : undefined;
+
+              const memberRoles: Record<string, 'admin' | 'member'> = {};
+              const membersMeta: Record<string, Profile> = {};
+
+              if (isGroup && convMembers.length > 0) {
+                convMembers.forEach((m: any) => {
+                  memberRoles[m.user_id] = m.role || (m.user_id === conv.owner_id ? 'admin' : 'member');
+                  if (profilesMap[m.user_id]) {
+                    membersMeta[m.user_id] = profilesMap[m.user_id];
+                  }
+                });
+              }
+
               return {
                 ...conv,
                 type: isGroup ? 'group' : 'direct',
+                owner_id: conv.owner_id || existingLocal?.owner_id,
+                member_ids: isGroup ? (memberIds && memberIds.length > 0 ? memberIds : existingLocal?.member_ids) : undefined,
+                member_roles: isGroup ? (Object.keys(memberRoles).length > 0 ? memberRoles : existingLocal?.member_roles) : undefined,
+                members_meta: isGroup ? (Object.keys(membersMeta).length > 0 ? membersMeta : existingLocal?.members_meta) : undefined,
                 other_member: finalOtherMember,
                 last_message: lastMessagesMap[conv.id] || existingLocal?.last_message,
                 unread_count: isViewingThis ? 0 : (unreadCountMap[conv.id] || 0),
@@ -517,6 +537,10 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
           combinedMap.set(c.id, {
             ...existing,
             ...c,
+            member_ids: c.member_ids && c.member_ids.length > 0 ? c.member_ids : existing.member_ids,
+            member_roles: c.member_roles && Object.keys(c.member_roles).length > 0 ? c.member_roles : existing.member_roles,
+            members_meta: c.members_meta && Object.keys(c.members_meta).length > 0 ? c.members_meta : existing.members_meta,
+            owner_id: c.owner_id || existing.owner_id,
             other_member: c.other_member || existing.other_member,
             last_message: newestLastMsg,
             unread_count: maxUnread,
@@ -1082,6 +1106,22 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
     }
   };
 
+  const updateConversation = useCallback(
+    (updatedConv: Conversation) => {
+      if (!updatedConv || !updatedConv.id) return;
+      updateConversationsState((prev) => {
+        const idx = prev.findIndex((c) => c.id === updatedConv.id);
+        if (idx !== -1) {
+          const next = [...prev];
+          next[idx] = { ...next[idx], ...updatedConv };
+          return next;
+        }
+        return [updatedConv, ...prev];
+      });
+    },
+    [updateConversationsState]
+  );
+
   return {
     conversations,
     loading,
@@ -1094,5 +1134,6 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
     createGroup,
     deleteConversation,
     markConversationAsRead,
+    updateConversation,
   };
 }

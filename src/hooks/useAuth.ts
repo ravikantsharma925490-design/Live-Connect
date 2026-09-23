@@ -890,6 +890,33 @@ export function useAuth() {
     }
   };
 
+  const loginWithTruecaller = async (payload: { user: any; profile: any; session?: any }) => {
+    setAuthError(null);
+    try {
+      const supabase = getSupabase();
+      if (payload.session) {
+        try {
+          await supabase.auth.setSession(payload.session);
+        } catch (sessErr) {
+          console.warn('[Truecaller Login] Session sync notice:', sessErr);
+        }
+      }
+      if (payload.user) {
+        updateUserState(payload.user);
+      }
+      if (payload.profile) {
+        updateProfileState(payload.profile);
+      }
+      setNeedsOnboarding(false);
+      setOnboardingUser(null);
+      return { success: true };
+    } catch (err: any) {
+      console.error('[Truecaller Login Error]:', err);
+      setAuthError(err.message || 'Failed to finish Truecaller login');
+      throw err;
+    }
+  };
+
   return {
     user,
     profile,
@@ -900,6 +927,7 @@ export function useAuth() {
     signUp,
     signIn,
     signInWithGoogle,
+    loginWithTruecaller,
     sendLoginOtp,
     signOut,
     resetPassword,

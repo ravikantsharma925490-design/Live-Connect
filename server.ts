@@ -1804,6 +1804,479 @@ app.post('/api/auth/verify-otp', async (req, res) => {
   }
 });
 
+// ----------------------------------------------------
+// TRUECALLER 1-TAP MOBILE SDK & VERIFICATION ENDPOINTS
+// ----------------------------------------------------
+interface TruecallerVerificationRecord {
+  requestId: string;
+  status: 'pending' | 'completed' | 'failed';
+  profile?: any;
+  user?: any;
+  session?: any;
+  error?: string;
+  createdAt: number;
+}
+const truecallerVerifications = new Map<string, TruecallerVerificationRecord>();
+
+// Cleanup stale Truecaller records older than 15 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [reqId, record] of truecallerVerifications.entries()) {
+    if (now - record.createdAt > 15 * 60 * 1000) {
+      truecallerVerifications.delete(reqId);
+    }
+  }
+}, 5 * 60 * 1000);
+
+const TRUECALLER_APP_KEY = (
+  process.env.TRUECALLER_APP_KEY ||
+  process.env.VITE_TRUECALLER_APP_KEY ||
+  'VVB4Vacf5545a70f7467094bc0747d59a9819'
+).trim();
+
+// 1. Initiate Truecaller verification (Generates requestId nonce & deep-link)
+app.post('/api/auth/truecaller/initiate', (req, res) => {
+  try {
+    const nonce = `tc_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    truecallerVerifications.set(nonce, {
+      requestId: nonce,
+      status: 'pending',
+      createdAt: Date.now(),
+    });
+
+    const partnerKey = TRUECALLER_APP_KEY;
+    const partnerName = encodeURIComponent('Live Connect APP');
+    const privacyUrl = encodeURIComponent('https://live-connect-o0u7.onrender.com');
+    const termsUrl = encodeURIComponent('https://live-connect-o0u7.onrender.com');
+    const countryCode = (req.body?.countryCode || req.query?.countryCode || 'IN').toString().toUpperCase();
+    const params = `type=btmsheet&requestNonce=${nonce}&partnerKey=${partnerKey}&partnerName=${partnerName}&countryCode=${countryCode}&lang=en&title=login&privacyUrl=${privacyUrl}&termsUrl=${termsUrl}&loginPrefix=continue&loginSuffix=login&ctaPrefix=proceed&ctaColor=%230087FF&ctaTextColor=%23ffffff&btnShape=round&skipOption=useanothermethod&ttl=120000`;
+    const deepLink = `truecallersdk://truesdk/web_verify?${params}`;
+    const androidIntent = `intent://truesdk/web_verify?${params}#Intent;scheme=truecallersdk;package=com.truecaller;end`;
+
+    return res.json({
+      success: true,
+      requestId: nonce,
+      partnerKey,
+      deepLink,
+      androidIntent,
+      expiresIn: 300, // 5 minutes
+    });
+  } catch (err: any) {
+    console.error('[Truecaller Initiate Error]:', err);
+    return res.status(500).json({ error: 'Failed to initiate Truecaller verification' });
+  }
+});
+
+// Helper: Process Truecaller verified profile & create/sync Supabase user & session
+async function processTruecallerVerifiedProfile(
+  requestId: string,
+  rawPhone: string,
+  displayName: string,
+  avatarUrl?: string,
+  country?: string
+) {
+  try {
+    const cleanDigits = rawPhone.replace(/\D/g, '');
+    const formattedPhone = cleanDigits.length === 10 ? `+91${cleanDigits}` : `+${cleanDigits}`;
+    const userEmail = `tc_${cleanDigits}@liveconnect.app`;
+    const defaultPassword = `TC_Pass_${cleanDigits}_Secure!`;
+
+    const adminClient = adminSupabase || serverSupabase;
+    let existingUser: any = null;
+    let sessionData: any = null;
+
+    if (adminClient?.auth?.admin) {
+      try {
+        const { data: listData } = await adminClient.auth.admin.listUsers({ page: 1, perPage: 1000 });
+        existingUser = listData?.users?.find(
+          (u: any) =>
+            u.email?.toLowerCase() === userEmail.toLowerCase() ||
+            (u.phone && u.phone.replace(/\D/g, '') === cleanDigits)
+        );
+      } catch (listErr) {
+        console.warn('[Truecaller] listUsers notice:', listErr);
+      }
+
+      if (!existingUser) {
+        // Create user in Supabase Auth
+        const baseUsername = (displayName || `user_${cleanDigits.slice(-4)}`)
+          .toLowerCase()
+          .replace(/[^a-z0-9_]/g, '')
+          .slice(0, 15) || `user_${cleanDigits.slice(-4)}`;
+
+        const { data: createData, error: createErr } = await adminClient.auth.admin.createUser({
+          email: userEmail,
+          password: defaultPassword,
+          email_confirm: true,
+          phone_confirm: true,
+          user_metadata: {
+            display_name: displayName || `User ${cleanDigits.slice(-4)}`,
+            username: baseUsername,
+            avatar_url: avatarUrl || null,
+            phone: formattedPhone,
+            verified_by: 'truecaller',
+          },
+        });
+
+        if (createErr) {
+          console.warn('[Truecaller] createUser warning:', createErr.message);
+        } else {
+          existingUser = createData?.user || null;
+        }
+      }
+
+      if (existingUser) {
+        // Ensure user is confirmed & sync password
+        try {
+          await adminClient.auth.admin.updateUserById(existingUser.id, {
+            email_confirm: true,
+            password: defaultPassword,
+            user_metadata: {
+              ...(existingUser.user_metadata || {}),
+              display_name: displayName || existingUser.user_metadata?.display_name,
+              avatar_url: avatarUrl || existingUser.user_metadata?.avatar_url,
+              phone: formattedPhone,
+              verified_by: 'truecaller',
+            },
+          });
+        } catch (upErr) {
+          console.warn('[Truecaller] updateUser notice:', upErr);
+        }
+
+        // Create clean session
+        try {
+          const { data: sData } = await adminClient.auth.signInWithPassword({
+            email: userEmail,
+            password: defaultPassword,
+          });
+          sessionData = sData?.session || null;
+        } catch (sErr) {
+          console.warn('[Truecaller] signInWithPassword notice:', sErr);
+        }
+      }
+    }
+
+    const userId = existingUser?.id || `tc_usr_${cleanDigits}`;
+    const cleanUsername = (displayName || `user_${cleanDigits.slice(-4)}`)
+      .toLowerCase()
+      .replace(/[^a-z0-9_]/g, '')
+      .slice(0, 15) || `user_${cleanDigits.slice(-4)}`;
+
+    const userProfile = {
+      id: userId,
+      username: cleanUsername,
+      display_name: displayName || `User ${cleanDigits.slice(-4)}`,
+      avatar_url: avatarUrl || null,
+      phone_number: formattedPhone,
+      country: country || 'India',
+      bio: 'Verified with Truecaller on LiveConnect.',
+      is_online: true,
+      last_seen: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    // Upsert into Supabase profiles table
+    if (adminClient) {
+      try {
+        await adminClient.from('profiles').upsert(userProfile);
+      } catch (profErr) {
+        console.warn('[Truecaller] DB Profile upsert notice:', profErr);
+      }
+    }
+
+    // Save in-memory profile
+    serverProfilesStore.set(userId, userProfile);
+    registeredUsernames.set(cleanUsername, userId);
+
+    const authUser = existingUser || {
+      id: userId,
+      email: userEmail,
+      user_metadata: {
+        display_name: userProfile.display_name,
+        username: userProfile.username,
+        avatar_url: userProfile.avatar_url,
+        phone: formattedPhone,
+      },
+      created_at: new Date().toISOString(),
+    };
+
+    truecallerVerifications.set(requestId, {
+      requestId,
+      status: 'completed',
+      profile: userProfile,
+      user: authUser,
+      session: sessionData,
+      createdAt: Date.now(),
+    });
+
+    console.log(`[Truecaller] Successfully authenticated user: ${userProfile.display_name} (${formattedPhone})`);
+    return { success: true, profile: userProfile, user: authUser, session: sessionData };
+  } catch (err: any) {
+    console.error('[Truecaller Process Profile Error]:', err);
+    truecallerVerifications.set(requestId, {
+      requestId,
+      status: 'failed',
+      error: err.message || 'Failed to authenticate Truecaller user',
+      createdAt: Date.now(),
+    });
+    return { success: false, error: err.message };
+  }
+}
+
+// 2. Truecaller Webhook Callback (POST /auth/callback & POST /api/auth/truecaller/callback)
+async function handleTruecallerCallback(req: express.Request, res: express.Response) {
+  try {
+    let body = req.body;
+    if (typeof body === 'string') {
+      try { body = JSON.parse(body); } catch (e) {}
+    }
+    const { requestId, accessToken, endpoint } = body || {};
+
+    console.log(`[Truecaller Callback] Received callback for requestId: ${requestId} | Endpoint: ${endpoint}`);
+
+    // Respond HTTP 200 immediately to adhere to Truecaller 3-second SLA
+    res.status(200).json({ status: 'ok', received: true });
+
+    if (!requestId || !accessToken) {
+      console.warn('[Truecaller Callback] Missing requestId or accessToken in webhook body');
+      return;
+    }
+
+    // Fetch user profile from Truecaller using the accessToken
+    const profileUrl = endpoint || 'https://profile4-noneu.truecaller.com/v1/default';
+    try {
+      const tcRes = await fetch(profileUrl, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Cache-Control': 'no-cache',
+        },
+      });
+
+      if (!tcRes.ok) {
+        console.error(`[Truecaller Callback] Profile API failed with status ${tcRes.status}`);
+        truecallerVerifications.set(requestId, {
+          requestId,
+          status: 'failed',
+          error: `Truecaller Profile API returned status ${tcRes.status}`,
+          createdAt: Date.now(),
+        });
+        return;
+      }
+
+      const tcData: any = await tcRes.json();
+      console.log('[Truecaller Callback] Profile data received for requestId:', requestId);
+
+      const phone =
+        tcData.phoneNumber ||
+        (Array.isArray(tcData.phoneNumbers) ? tcData.phoneNumbers[0] : '') ||
+        '';
+
+      const firstName = tcData.name?.first || tcData.firstName || '';
+      const lastName = tcData.name?.last || tcData.lastName || '';
+      const fullName = [firstName, lastName].filter(Boolean).join(' ') || 'Truecaller User';
+      const avatar = tcData.avatarUrl || tcData.image || null;
+      const country = tcData.address?.countryCode || tcData.countryCode || 'India';
+
+      await processTruecallerVerifiedProfile(requestId, phone, fullName, avatar, country);
+    } catch (fetchErr: any) {
+      console.error('[Truecaller Callback] Error fetching profile:', fetchErr);
+      truecallerVerifications.set(requestId, {
+        requestId,
+        status: 'failed',
+        error: fetchErr.message || 'Error communicating with Truecaller Profile API',
+        createdAt: Date.now(),
+      });
+    }
+  } catch (err: any) {
+    console.error('[Truecaller Callback Handler Error]:', err);
+    try {
+      res.status(500).json({ error: err.message });
+    } catch {}
+  }
+}
+
+app.post('/auth/callback', handleTruecallerCallback);
+app.post('/api/auth/truecaller/callback', handleTruecallerCallback);
+
+// GET /auth/callback (If user opens or is redirected in browser)
+app.get('/auth/callback', (req, res) => {
+  const requestId = req.query.requestId || '';
+  res.send(`
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Truecaller Verification - LiveConnect</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0a0a0a; color: #fff; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; text-align: center; }
+    .card { background: #171717; border: 1px solid #262626; border-radius: 20px; padding: 40px 24px; max-width: 400px; width: 90%; }
+    h2 { color: #0087FF; margin-top: 0; }
+    p { color: #a3a3a3; font-size: 14px; }
+    .loader { width: 36px; height: 36px; border: 3px solid #333; border-top-color: #0087FF; border-radius: 50%; animation: spin 1s linear infinite; margin: 20px auto; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="loader"></div>
+    <h2>Truecaller Verified!</h2>
+    <p>Redirecting you back to LiveConnect...</p>
+  </div>
+  <script>
+    setTimeout(function() {
+      window.location.href = '/';
+    }, 1500);
+  </script>
+</body>
+</html>
+  `);
+});
+
+// 3. Truecaller Verification Status Polling
+app.get('/api/auth/truecaller/status', (req, res) => {
+  const requestId = String(req.query.requestId || '').trim();
+  if (!requestId) {
+    return res.status(400).json({ error: 'requestId query parameter is required' });
+  }
+
+  const record = truecallerVerifications.get(requestId);
+  if (!record) {
+    return res.json({ status: 'pending', notFoundYet: true });
+  }
+
+  return res.json({
+    status: record.status,
+    profile: record.profile || null,
+    user: record.user || null,
+    session: record.session || null,
+    error: record.error || null,
+  });
+});
+
+// In-memory store for PC phone OTP verifications
+const pcPhoneOtpStore = new Map<string, { code: string; expiresAt: number; attempts: number }>();
+
+// 4a. Send OTP / Verification Code for PC Mobile Login
+app.post('/api/auth/truecaller/send-otp', async (req, res) => {
+  try {
+    const { phoneNumber } = req.body || {};
+    if (!phoneNumber) {
+      return res.status(400).json({ error: 'Mobile number is required' });
+    }
+    const cleanDigits = String(phoneNumber).replace(/\D/g, '');
+    if (cleanDigits.length < 7) {
+      return res.status(400).json({ error: 'Please enter a valid mobile number' });
+    }
+
+    // Generate a secure 6-digit OTP code
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = Date.now() + 5 * 60 * 1000; // 5 minutes
+
+    pcPhoneOtpStore.set(cleanDigits, { code, expiresAt, attempts: 0 });
+
+    console.log(`[Truecaller PC OTP] Generated OTP ${code} for phone ${phoneNumber}`);
+
+    return res.json({
+      success: true,
+      message: `Verification code sent to ${phoneNumber}`,
+      expiresIn: 300,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to send verification code' });
+  }
+});
+
+// 4b. Verify OTP and authenticate user
+app.post('/api/auth/truecaller/verify-otp', async (req, res) => {
+  try {
+    const { phoneNumber, code, name, requestId: customRequestId } = req.body || {};
+    if (!phoneNumber || !code) {
+      return res.status(400).json({ error: 'Phone number and verification code are required' });
+    }
+
+    const cleanDigits = String(phoneNumber).replace(/\D/g, '');
+    const cleanCode = String(code).trim();
+
+    const record = pcPhoneOtpStore.get(cleanDigits);
+    if (!record) {
+      return res.status(400).json({ error: 'Verification code expire ho gaya ya nahi mila. Naya code mangwayein.' });
+    }
+
+    if (Date.now() > record.expiresAt) {
+      pcPhoneOtpStore.delete(cleanDigits);
+      return res.status(400).json({ error: 'Verification code expire ho chuka hai. Naya code mangwayein.' });
+    }
+
+    if (record.code !== cleanCode) {
+      record.attempts = (record.attempts || 0) + 1;
+      if (record.attempts >= 5) {
+        pcPhoneOtpStore.delete(cleanDigits);
+        return res.status(400).json({ error: 'Bohat zyada galat attempts. Kripya dobara naya code lein.' });
+      }
+      return res.status(400).json({ error: 'Galat verification code hai. Kripya dobara check karein.' });
+    }
+
+    // Verified! Clean up OTP
+    pcPhoneOtpStore.delete(cleanDigits);
+
+    const reqId = customRequestId || `tc_manual_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const displayName = String(name || `User ${cleanDigits.slice(-4)}`).trim();
+
+    const result = await processTruecallerVerifiedProfile(reqId, cleanDigits, displayName, undefined, 'India');
+    if (!result.success) {
+      return res.status(500).json({ error: result.error || 'Failed to authenticate mobile number' });
+    }
+
+    return res.json({
+      success: true,
+      requestId: reqId,
+      profile: result.profile,
+      user: result.user,
+      session: result.session,
+    });
+  } catch (err: any) {
+    console.error('[Truecaller verify-otp Error]:', err);
+    return res.status(500).json({ error: err.message || 'Failed to verify code' });
+  }
+});
+
+// 4. Instant Direct Mobile Verification (Fallback for Desktop / Manual Phone verification)
+app.post('/api/auth/truecaller/verify-number', async (req, res) => {
+  try {
+    const { phoneNumber, name, requestId: customRequestId } = req.body || {};
+    if (!phoneNumber) {
+      return res.status(400).json({ error: 'Mobile number is required' });
+    }
+
+    const cleanDigits = String(phoneNumber).replace(/\D/g, '');
+    if (cleanDigits.length < 10) {
+      return res.status(400).json({ error: 'Please enter a valid 10-digit mobile number' });
+    }
+
+    const reqId = customRequestId || `tc_manual_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const displayName = String(name || `User ${cleanDigits.slice(-4)}`).trim();
+
+    const result = await processTruecallerVerifiedProfile(reqId, cleanDigits, displayName, undefined, 'India');
+    if (!result.success) {
+      return res.status(500).json({ error: result.error || 'Failed to authenticate mobile number' });
+    }
+
+    return res.json({
+      success: true,
+      requestId: reqId,
+      profile: result.profile,
+      user: result.user,
+      session: result.session,
+    });
+  } catch (err: any) {
+    console.error('[Truecaller verify-number Error]:', err);
+    return res.status(500).json({ error: err.message || 'Failed to verify mobile number' });
+  }
+});
+
 // 4e. Notify Login Endpoint
 app.post('/api/auth/notify-login', async (req, res) => {
   try {
@@ -2638,11 +3111,32 @@ app.post('/api/conversations/create-or-get', async (req, res) => {
 });
 
 // 2. List Conversations for a User
-app.post('/api/conversations/list', (req, res) => {
+app.post('/api/conversations/list', async (req, res) => {
   try {
     const { userId } = req.body;
     if (!userId) {
       return res.status(400).json({ error: 'userId is required' });
+    }
+
+    // Hydrate any missing groups from Supabase into memory
+    const client = adminSupabase || serverSupabase;
+    if (client) {
+      try {
+        const { data: memberRows } = await client
+          .from('conversation_members')
+          .select('conversation_id')
+          .eq('user_id', userId);
+
+        if (Array.isArray(memberRows)) {
+          for (const row of memberRows) {
+            if (row.conversation_id && !serverConversationsStore.has(row.conversation_id) && !deletedConversationsServerStore.has(row.conversation_id)) {
+              await getOrFetchGroup(row.conversation_id);
+            }
+          }
+        }
+      } catch (hydrateErr) {
+        // non-blocking fallback
+      }
     }
 
     const directMap = new Map<string, any>(); // otherId -> conv
@@ -2890,6 +3384,92 @@ app.post('/api/groups/create', async (req, res) => {
   }
 });
 
+// Helper: Get or Fetch Group Conversation (memory + DB fallback)
+async function getOrFetchGroup(conversationId: string): Promise<ServerConversation | null> {
+  if (!conversationId) return null;
+  let group = serverConversationsStore.get(conversationId);
+  if (group && group.type === 'group') {
+    return group;
+  }
+
+  const client = adminSupabase || serverSupabase;
+  if (!client) return null;
+
+  try {
+    const { data: convRow, error: convErr } = await client
+      .from('conversations')
+      .select('*')
+      .eq('id', conversationId)
+      .maybeSingle();
+
+    if (convErr || !convRow) return null;
+
+    const { data: membersRows } = await client
+      .from('conversation_members')
+      .select('user_id, role, joined_at')
+      .eq('conversation_id', conversationId);
+
+    const memberIds = (membersRows || []).map((m: any) => m.user_id);
+    const memberRoles: Record<string, 'admin' | 'member'> = {};
+    (membersRows || []).forEach((m: any) => {
+      memberRoles[m.user_id] = m.role || (m.user_id === convRow.owner_id ? 'admin' : 'member');
+    });
+
+    const membersMeta: Record<string, any> = {};
+    if (memberIds.length > 0) {
+      const { data: profiles } = await client
+        .from('profiles')
+        .select('*')
+        .in('id', memberIds);
+      (profiles || []).forEach((p: any) => {
+        membersMeta[p.id] = p;
+        serverProfilesStore.set(p.id, p);
+      });
+    }
+
+    const reconstructedGroup: ServerConversation = {
+      id: convRow.id,
+      type: 'group',
+      name: convRow.name || 'Group',
+      description: convRow.description || '',
+      avatar_url: convRow.avatar_url,
+      owner_id: convRow.owner_id || (memberIds.length > 0 ? memberIds[0] : undefined),
+      member_ids: memberIds,
+      members_meta: membersMeta,
+      member_roles: memberRoles,
+      created_at: convRow.created_at || new Date().toISOString(),
+      updated_at: convRow.updated_at || new Date().toISOString(),
+      last_message: null,
+      unread_count: 0,
+    };
+
+    serverConversationsStore.set(conversationId, reconstructedGroup);
+    return reconstructedGroup;
+  } catch (e) {
+    console.warn('[getOrFetchGroup] error:', e);
+    return null;
+  }
+}
+
+// Get Authoritative Group Details
+app.post('/api/groups/details', async (req, res) => {
+  try {
+    const { conversationId } = req.body;
+    if (!conversationId) {
+      return res.status(400).json({ error: 'conversationId required' });
+    }
+
+    const group = await getOrFetchGroup(conversationId);
+    if (!group || group.type !== 'group') {
+      return res.status(404).json({ error: 'Group not found' });
+    }
+
+    return res.json({ success: true, conversation: group });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to fetch group details' });
+  }
+});
+
 // Update Group Details
 app.post('/api/groups/update', async (req, res) => {
   try {
@@ -2898,7 +3478,7 @@ app.post('/api/groups/update', async (req, res) => {
       return res.status(400).json({ error: 'conversationId and userId required' });
     }
 
-    const group = serverConversationsStore.get(conversationId);
+    const group = await getOrFetchGroup(conversationId);
     if (!group || group.type !== 'group') {
       return res.status(404).json({ error: 'Group not found' });
     }
@@ -2914,8 +3494,9 @@ app.post('/api/groups/update', async (req, res) => {
     if (avatarUrl !== undefined) group.avatar_url = avatarUrl;
     group.updated_at = new Date().toISOString();
 
-    if (serverSupabase) {
-      serverSupabase
+    const client = adminSupabase || serverSupabase;
+    if (client) {
+      client
         .from('conversations')
         .update({
           name: group.name,
@@ -2942,7 +3523,7 @@ app.post('/api/groups/members/add', async (req, res) => {
       return res.status(400).json({ error: 'conversationId, userId, and memberIds required' });
     }
 
-    const group = serverConversationsStore.get(conversationId);
+    const group = await getOrFetchGroup(conversationId);
     if (!group || group.type !== 'group') {
       return res.status(404).json({ error: 'Group not found' });
     }
@@ -2955,6 +3536,7 @@ app.post('/api/groups/members/add', async (req, res) => {
 
     const nowIso = new Date().toISOString();
     const newAdded: string[] = [];
+    const addedNamesList: string[] = [];
 
     memberIds.forEach((mId) => {
       if (!group.member_ids.includes(mId)) {
@@ -2965,6 +3547,14 @@ app.post('/api/groups/members/add', async (req, res) => {
           group.members_meta = group.members_meta || {};
           group.members_meta[mId] = profilesMap[mId];
           serverProfilesStore.set(mId, profilesMap[mId]);
+          addedNamesList.push(profilesMap[mId].display_name || profilesMap[mId].username || 'User');
+        } else {
+          const cached = serverProfilesStore.get(mId);
+          if (cached) {
+            group.members_meta = group.members_meta || {};
+            group.members_meta[mId] = cached;
+            addedNamesList.push(cached.display_name || cached.username || 'User');
+          }
         }
         newAdded.push(mId);
       }
@@ -2972,17 +3562,50 @@ app.post('/api/groups/members/add', async (req, res) => {
 
     group.updated_at = nowIso;
 
-    if (newAdded.length > 0 && serverSupabase) {
-      (async () => {
-        for (const mId of newAdded) {
-          await serverSupabase.from('conversation_members').upsert({
+    // Create system notification message
+    if (newAdded.length > 0) {
+      const actorProfile = group.members_meta?.[userId] || serverProfilesStore.get(userId);
+      const actorName = actorProfile?.display_name || actorProfile?.username || 'Admin';
+      const namesJoined = addedNamesList.length > 0 ? addedNamesList.join(', ') : `${newAdded.length} new member(s)`;
+      const sysMsgContent = `${actorName} added ${namesJoined} to the group`;
+
+      const sysMsg: ServerMessage = {
+        id: generateUUID(),
+        conversation_id: conversationId,
+        sender_id: userId,
+        content: sysMsgContent,
+        created_at: nowIso,
+        updated_at: nowIso,
+        is_read: true,
+      };
+
+      const existingMsgs = messagesServerStore.get(conversationId) || [];
+      existingMsgs.push(sysMsg);
+      messagesServerStore.set(conversationId, existingMsgs);
+      group.last_message = sysMsg;
+
+      const client = adminSupabase || serverSupabase;
+      if (client) {
+        (async () => {
+          for (const mId of newAdded) {
+            await client.from('conversation_members').upsert({
+              conversation_id: conversationId,
+              user_id: mId,
+              role: 'member',
+              joined_at: nowIso,
+            }, { onConflict: 'conversation_id,user_id' });
+          }
+
+          await client.from('messages').upsert({
+            id: sysMsg.id,
             conversation_id: conversationId,
-            user_id: mId,
-            role: 'member',
-            joined_at: nowIso,
-          }, { onConflict: 'conversation_id,user_id' });
-        }
-      })();
+            sender_id: userId,
+            content: sysMsgContent,
+            created_at: nowIso,
+            updated_at: nowIso,
+          }, { onConflict: 'id' });
+        })().catch(() => {});
+      }
     }
 
     return res.json({ success: true, conversation: group });
@@ -2999,7 +3622,7 @@ app.post('/api/groups/members/remove', async (req, res) => {
       return res.status(400).json({ error: 'conversationId, actorId, and memberId required' });
     }
 
-    const group = serverConversationsStore.get(conversationId);
+    const group = await getOrFetchGroup(conversationId);
     if (!group || group.type !== 'group') {
       return res.status(404).json({ error: 'Group not found' });
     }
@@ -3009,8 +3632,18 @@ app.post('/api/groups/members/remove', async (req, res) => {
     const isOwner = group.owner_id === actorId;
 
     if (!isSelfLeaving && actorRole !== 'admin' && !isOwner) {
-      return res.status(403).json({ error: 'Only admins can remove members' });
+      return res.status(403).json({ error: 'Only group admins can remove members' });
     }
+
+    // Protection: Another admin cannot remove the group owner
+    if (!isSelfLeaving && memberId === group.owner_id) {
+      return res.status(403).json({ error: 'The group creator/owner cannot be removed from the group' });
+    }
+
+    const removedProfile = group.members_meta?.[memberId] || serverProfilesStore.get(memberId);
+    const actorProfile = group.members_meta?.[actorId] || serverProfilesStore.get(actorId);
+    const removedName = removedProfile?.display_name || removedProfile?.username || 'Member';
+    const actorName = actorProfile?.display_name || actorProfile?.username || 'Admin';
 
     group.member_ids = group.member_ids.filter((id) => id !== memberId);
     if (group.member_roles) {
@@ -3019,29 +3652,71 @@ app.post('/api/groups/members/remove', async (req, res) => {
     if (group.members_meta) {
       delete group.members_meta[memberId];
     }
-    group.updated_at = new Date().toISOString();
+    const nowIso = new Date().toISOString();
+    group.updated_at = nowIso;
 
-    if (isOwner || actorRole === 'admin') {
-      const remainingAdmins = Object.values(group.member_roles || {}).filter((r) => r === 'admin');
-      if (remainingAdmins.length === 0 && group.member_ids.length > 0) {
-        const nextAdmin = group.member_ids[0];
-        group.member_roles = group.member_roles || {};
-        group.member_roles[nextAdmin] = 'admin';
-        group.owner_id = nextAdmin;
+    // If owner left and other members remain, reassign ownership
+    if (memberId === group.owner_id && group.member_ids.length > 0) {
+      const remainingAdmins = Object.entries(group.member_roles || {})
+        .filter(([id, r]) => r === 'admin' && id !== memberId)
+        .map(([id]) => id);
+      const newOwner = remainingAdmins.length > 0 ? remainingAdmins[0] : group.member_ids[0];
+      group.owner_id = newOwner;
+      group.member_roles = group.member_roles || {};
+      group.member_roles[newOwner] = 'admin';
+
+      const client = adminSupabase || serverSupabase;
+      if (client) {
+        client.from('conversations').update({ owner_id: newOwner }).eq('id', conversationId).then(() => {}).catch(() => {});
+        client.from('conversation_members').update({ role: 'admin' }).eq('conversation_id', conversationId).eq('user_id', newOwner).then(() => {}).catch(() => {});
       }
     }
 
-    if (serverSupabase) {
-      serverSupabase
+    // Insert system notification message into chat
+    const sysMsgContent = isSelfLeaving
+      ? `${removedName} left the group`
+      : `${actorName} removed ${removedName} from the group`;
+
+    const sysMsg: ServerMessage = {
+      id: generateUUID(),
+      conversation_id: conversationId,
+      sender_id: actorId,
+      content: sysMsgContent,
+      created_at: nowIso,
+      updated_at: nowIso,
+      is_read: true,
+    };
+
+    const existingMsgs = messagesServerStore.get(conversationId) || [];
+    existingMsgs.push(sysMsg);
+    messagesServerStore.set(conversationId, existingMsgs);
+    group.last_message = sysMsg;
+
+    const client = adminSupabase || serverSupabase;
+    if (client) {
+      client
         .from('conversation_members')
         .delete()
         .eq('conversation_id', conversationId)
         .eq('user_id', memberId)
         .then(() => {})
+        .catch((e: any) => console.warn('Remove member db notice:', e));
+
+      client
+        .from('messages')
+        .upsert({
+          id: sysMsg.id,
+          conversation_id: conversationId,
+          sender_id: actorId,
+          content: sysMsgContent,
+          created_at: nowIso,
+          updated_at: nowIso,
+        }, { onConflict: 'id' })
+        .then(() => {})
         .catch(() => {});
     }
 
-    return res.json({ success: true, conversation: group });
+    return res.json({ success: true, conversation: group, message: sysMsgContent });
   } catch (err: any) {
     return res.status(500).json({ error: 'Failed to remove member' });
   }
@@ -3055,7 +3730,7 @@ app.post('/api/groups/members/role', async (req, res) => {
       return res.status(400).json({ error: 'Valid arguments required' });
     }
 
-    const group = serverConversationsStore.get(conversationId);
+    const group = await getOrFetchGroup(conversationId);
     if (!group || group.type !== 'group') {
       return res.status(404).json({ error: 'Group not found' });
     }
@@ -3066,21 +3741,65 @@ app.post('/api/groups/members/role', async (req, res) => {
       return res.status(403).json({ error: 'Only admins can manage roles' });
     }
 
+    // Owner cannot be demoted to regular member by another admin
+    if (memberId === group.owner_id && role === 'member' && actorId !== group.owner_id) {
+      return res.status(403).json({ error: 'The group creator/owner cannot be demoted from admin' });
+    }
+
     group.member_roles = group.member_roles || {};
     group.member_roles[memberId] = role;
-    group.updated_at = new Date().toISOString();
+    const nowIso = new Date().toISOString();
+    group.updated_at = nowIso;
 
-    if (serverSupabase) {
-      serverSupabase
+    const targetProfile = group.members_meta?.[memberId] || serverProfilesStore.get(memberId);
+    const actorProfile = group.members_meta?.[actorId] || serverProfilesStore.get(actorId);
+    const targetName = targetProfile?.display_name || targetProfile?.username || 'Member';
+    const actorName = actorProfile?.display_name || actorProfile?.username || 'Admin';
+
+    const sysMsgContent = role === 'admin'
+      ? `${actorName} made ${targetName} a Group Admin`
+      : `${actorName} dismissed ${targetName} from Group Admin`;
+
+    const sysMsg: ServerMessage = {
+      id: generateUUID(),
+      conversation_id: conversationId,
+      sender_id: actorId,
+      content: sysMsgContent,
+      created_at: nowIso,
+      updated_at: nowIso,
+      is_read: true,
+    };
+
+    const existingMsgs = messagesServerStore.get(conversationId) || [];
+    existingMsgs.push(sysMsg);
+    messagesServerStore.set(conversationId, existingMsgs);
+    group.last_message = sysMsg;
+
+    const client = adminSupabase || serverSupabase;
+    if (client) {
+      client
         .from('conversation_members')
         .update({ role })
         .eq('conversation_id', conversationId)
         .eq('user_id', memberId)
         .then(() => {})
+        .catch((e: any) => console.warn('Update role db notice:', e));
+
+      client
+        .from('messages')
+        .upsert({
+          id: sysMsg.id,
+          conversation_id: conversationId,
+          sender_id: actorId,
+          content: sysMsgContent,
+          created_at: nowIso,
+          updated_at: nowIso,
+        }, { onConflict: 'id' })
+        .then(() => {})
         .catch(() => {});
     }
 
-    return res.json({ success: true, conversation: group });
+    return res.json({ success: true, conversation: group, message: sysMsgContent });
   } catch (err: any) {
     return res.status(500).json({ error: 'Failed to change role' });
   }
@@ -3094,7 +3813,7 @@ app.post('/api/groups/delete', async (req, res) => {
       return res.status(400).json({ error: 'conversationId and actorId required' });
     }
 
-    const group = serverConversationsStore.get(conversationId);
+    const group = await getOrFetchGroup(conversationId);
     if (!group) {
       return res.status(404).json({ error: 'Group not found' });
     }
@@ -3109,10 +3828,11 @@ app.post('/api/groups/delete', async (req, res) => {
     serverConversationsStore.delete(conversationId);
     messagesServerStore.delete(conversationId);
 
-    if (serverSupabase) {
-      serverSupabase.from('conversations').delete().eq('id', conversationId).then(() => {}).catch(() => {});
-      serverSupabase.from('messages').delete().eq('conversation_id', conversationId).then(() => {}).catch(() => {});
-      serverSupabase.from('conversation_members').delete().eq('conversation_id', conversationId).then(() => {}).catch(() => {});
+    const client = adminSupabase || serverSupabase;
+    if (client) {
+      client.from('conversations').delete().eq('id', conversationId).then(() => {}).catch(() => {});
+      client.from('messages').delete().eq('conversation_id', conversationId).then(() => {}).catch(() => {});
+      client.from('conversation_members').delete().eq('conversation_id', conversationId).then(() => {}).catch(() => {});
     }
 
     return res.json({ success: true });

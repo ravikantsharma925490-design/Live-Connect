@@ -54,39 +54,19 @@ export const AuthPage: React.FC<AuthPageProps> = ({
         const { data, error } = await supabase.auth.signInWithOAuth({
           provider: 'google',
           options: {
-            redirectTo: origin,
+            redirectTo: `${origin}/`,
             skipBrowserRedirect: isInIframe,
-            queryParams: {
-              access_type: 'offline',
-              prompt: 'consent',
-            },
           },
         });
-        if (error) throw error;
 
+        if (error) throw error;
         if (isInIframe && data?.url) {
-          const popup = window.open(data.url, '_blank', 'width=500,height=600');
-          if (!popup || popup.closed || typeof popup.closed === 'undefined') {
-            try {
-              window.top!.location.href = data.url;
-            } catch (e) {
-              window.location.href = data.url;
-            }
-          }
+          window.open(data.url, '_blank', 'width=500,height=600');
         }
       }
     } catch (err: any) {
-      const msg = err?.message || String(err);
-      console.error('Google Sign In Error:', err);
-      if (
-        msg.toLowerCase().includes('provider is not enabled') ||
-        msg.toLowerCase().includes('unsupported provider') ||
-        msg.toLowerCase().includes('provider is disabled')
-      ) {
-        setGoogleError('Google Sign-In is not enabled in Supabase. Please enable Google provider in your Supabase Dashboard.');
-      } else {
-        setGoogleError(msg);
-      }
+      console.error('[Google Auth Error]:', err);
+      setGoogleError(err.message || 'Google Sign-in failed. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -95,40 +75,36 @@ export const AuthPage: React.FC<AuthPageProps> = ({
   const activeError = googleError || authError;
 
   return (
-    <div className="min-h-screen-safe w-full flex items-center justify-center p-4 bg-neutral-950 text-white relative overflow-hidden">
-      {/* Background Glow */}
-      <div className="absolute -top-40 -left-40 w-96 h-96 bg-blue-600/15 rounded-full blur-3xl pointer-events-none" />
-      <div className="absolute -bottom-40 -right-40 w-96 h-96 bg-indigo-600/15 rounded-full blur-3xl pointer-events-none" />
+    <div className="min-h-screen-safe w-full flex items-center justify-center p-4 bg-neutral-950 relative overflow-hidden">
+      {/* Background Ambience */}
+      <div className="absolute top-1/4 left-1/2 -translate-x-1/2 w-96 h-96 bg-blue-600/10 rounded-full blur-3xl pointer-events-none" />
+      <div className="absolute bottom-1/4 left-1/3 w-80 h-80 bg-indigo-600/10 rounded-full blur-3xl pointer-events-none" />
 
-      {/* Language Switcher */}
-      <div className="absolute top-4 right-4 md:top-6 md:right-6 z-20">
+      {/* Language Selector Top Right */}
+      <div className="absolute top-4 right-4 z-20">
         <button
           type="button"
           onClick={openLanguageModal}
-          className="flex items-center gap-2 px-3 py-1.5 rounded-2xl bg-neutral-900/80 hover:bg-neutral-800 border border-neutral-800 text-xs font-semibold text-neutral-300 hover:text-white transition-all shadow-lg backdrop-blur-md cursor-pointer hover:scale-105 active:scale-95"
+          className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-neutral-900/90 border border-neutral-800 text-neutral-300 hover:text-white text-xs font-semibold backdrop-blur-md transition-all hover:border-neutral-700 cursor-pointer shadow-lg"
         >
-          <span className="text-base">{currentLanguage.flag}</span>
-          <span>{currentLanguage.nativeName}</span>
-          <span className="text-[10px] text-neutral-500 font-mono">({currentLanguage.code.toUpperCase()})</span>
+          <span>{currentLanguage.flag}</span>
+          <span>{currentLanguage.name}</span>
         </button>
       </div>
 
-      {/* Main Card */}
-      <div className="w-full max-w-md p-8 md:p-10 rounded-3xl bg-neutral-900/90 border border-neutral-800 shadow-2xl backdrop-blur-xl relative z-10 space-y-6">
-        {/* Brand Header */}
-        <div className="text-center space-y-2">
-          <div className="w-12 h-12 rounded-2xl bg-blue-600 flex items-center justify-center shadow-lg shadow-blue-500/25 mx-auto">
-            <MessageSquare className="w-6 h-6 text-white" />
+      <div className="w-full max-w-sm rounded-3xl bg-neutral-900/80 border border-neutral-800 backdrop-blur-xl p-8 shadow-2xl space-y-6 relative z-10 text-white animate-in fade-in duration-300">
+        
+        {/* App Logo & Title */}
+        <div className="text-center space-y-3">
+          <div className="w-16 h-16 rounded-2xl bg-gradient-to-tr from-blue-600 to-indigo-600 flex items-center justify-center mx-auto shadow-lg shadow-blue-500/25 border border-white/10">
+            <MessageSquare className="w-8 h-8 text-white" />
           </div>
-          <p className="text-xs font-semibold uppercase tracking-wider text-blue-400">
-            LiveConnect
-          </p>
-          <h1 className="text-2xl font-extrabold tracking-tight text-white">
-            Welcome to LiveConnect
-          </h1>
-          <p className="text-xs text-neutral-400 font-medium leading-relaxed max-w-xs mx-auto">
-            Connect with people worldwide via real-time video calls & instant messaging with your Google account
-          </p>
+          <div>
+            <h1 className="text-2xl font-black tracking-tight text-white">LiveConnect</h1>
+            <p className="text-xs text-neutral-400 mt-1 font-medium">
+              Free, Secure & Real-time HD Messaging & Calling
+            </p>
+          </div>
         </div>
 
         {/* Error Messages Banner */}
@@ -193,7 +169,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
             type="button"
             onClick={handleGoogleAuth}
             disabled={loading}
-            className="w-full flex items-center justify-center gap-3 bg-white hover:bg-neutral-100 text-neutral-900 font-bold py-3.5 px-4 rounded-xl shadow-lg shadow-white/10 disabled:opacity-50 transition-all cursor-pointer hover:scale-[1.01] active:scale-[0.99] mt-2"
+            className="w-full flex items-center justify-center gap-3 bg-white hover:bg-neutral-100 text-neutral-900 font-bold py-3.5 px-4 rounded-xl shadow-lg shadow-white/10 disabled:opacity-50 transition-all cursor-pointer hover:scale-[1.01] active:scale-[0.99]"
           >
             {loading ? (
               <div className="w-5 h-5 border-2 border-neutral-800/30 border-t-neutral-800 rounded-full animate-spin" />
