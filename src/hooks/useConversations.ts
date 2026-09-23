@@ -23,7 +23,7 @@ function loadDeletedConvIds(userId?: string): Set<string> {
   return new Set();
 }
 
-function recordDeletedConvId(userId: string | undefined, convId: string) {
+export function recordDeletedConvId(userId: string | undefined, convId: string) {
   if (typeof window === 'undefined' || !userId || !convId) return;
   try {
     const existing = loadDeletedConvIds(userId);
@@ -583,6 +583,22 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
           }
         });
 
+        // Mark groups where current user is removed / no longer a member
+        if (currentUserId) {
+          for (const [, conv] of combinedMap.entries()) {
+            if (conv.type === 'group') {
+              const isMember = Array.isArray(conv.member_ids) ? conv.member_ids.includes(currentUserId) : true;
+              const hasRemovalRecord = Boolean(conv.is_removed || conv.removed_members?.[currentUserId]);
+              if (!isMember || hasRemovalRecord) {
+                conv.is_removed = true;
+                if (!conv.removal_info && conv.removed_members?.[currentUserId]) {
+                  conv.removal_info = conv.removed_members[currentUserId];
+                }
+              }
+            }
+          }
+        }
+
         return Array.from(combinedMap.values())
           .map((c) => (isActivelyViewing(c.id) ? { ...c, unread_count: 0 } : c))
           .sort((a, b) => {
@@ -1027,6 +1043,29 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
         }
       }
 
+      // If it's a group conversation, deleting it means leaving the group if still a member, and deleting for user
+      if (targetConv?.type === 'group' && currentUserId) {
+        const isMember = Array.isArray(targetConv.member_ids) ? targetConv.member_ids.includes(currentUserId) : false;
+        if (isMember) {
+          fetch('/api/groups/members/remove', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              conversationId,
+              actorId: currentUserId,
+              memberId: currentUserId,
+            }),
+          }).catch(() => {});
+        }
+
+        fetch('/api/conversations/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ conversationId, userId: currentUserId }),
+        }).catch(() => {});
+        return true;
+      }
+
       // 3. Notify backend server relay to purge from server memory & broadcasts
       fetch('/api/conversations/delete', {
         method: 'POST',
@@ -1106,6 +1145,42 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
     }
   };
 
+  const leaveGroup = useCallback(
+    async (groupId: string): Promise<boolean> => {
+      if (!groupId || !currentUserId) return false;
+      try {
+        recordDeletedConvId(currentUserId, groupId);
+        updateConversationsState((prev) => prev.filter((c) => c.id !== groupId));
+        if (activeConversationId === groupId) {
+          setActiveConversationId(null);
+          if (typeof window !== 'undefined') {
+            localStorage.removeItem(`liveconnect_active_conv_${currentUserId}`);
+          }
+        }
+        if (typeof window !== 'undefined') {
+          localStorage.removeItem(`liveconnect_msgs_${groupId}`);
+          localStorage.removeItem(`liveconnect_deleted_ids_${groupId}`);
+        }
+
+        await fetch('/api/groups/members/remove', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            conversationId: groupId,
+            actorId: currentUserId,
+            memberId: currentUserId,
+          }),
+        }).catch(() => {});
+
+        return true;
+      } catch (err: any) {
+        console.error('Error leaving group:', err.message);
+        return false;
+      }
+    },
+    [currentUserId, activeConversationId, updateConversationsState, setActiveConversationId]
+  );
+
   const updateConversation = useCallback(
     (updatedConv: Conversation) => {
       if (!updatedConv || !updatedConv.id) return;
@@ -1132,6 +1207,7 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
     searchUsers,
     startConversation,
     createGroup,
+    leaveGroup,
     deleteConversation,
     markConversationAsRead,
     updateConversation,

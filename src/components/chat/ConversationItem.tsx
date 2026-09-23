@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Conversation } from '@/src/types';
 import { cn, formatDate, getAvatarColor, getInitials } from '@/src/lib/utils';
-import { Check, CheckCheck, Trash2, Phone, Video, PhoneMissed, PhoneOutgoing, PhoneIncoming, MoreVertical, X } from 'lucide-react';
+import { Check, CheckCheck, Trash2, Phone, Video, PhoneMissed, PhoneOutgoing, PhoneIncoming, MoreVertical, X, Lock } from 'lucide-react';
 import { UserAvatar } from '@/src/components/ui/UserAvatar';
 
 interface ConversationItemProps {
@@ -35,6 +35,18 @@ export const ConversationItem: React.FC<ConversationItemProps> = ({
   const otherUser = isGroup ? null : conversation.other_member;
   const lastMsg = conversation.last_message;
   const isLastMsgFromMe = lastMsg?.sender_id === currentUserId;
+
+  const isCurrentUserMember = Boolean(
+    isGroup && currentUserId && Array.isArray(conversation.member_ids)
+      ? conversation.member_ids.includes(currentUserId)
+      : true
+  );
+
+  const isRemovedFromGroup = Boolean(
+    isGroup &&
+    currentUserId &&
+    (!isCurrentUserMember || conversation.is_removed || conversation.removed_members?.[currentUserId])
+  );
 
   const isSelf = !isGroup && otherUser?.id === currentUserId;
   const rawDisplayName = isGroup
@@ -114,6 +126,15 @@ export const ConversationItem: React.FC<ConversationItemProps> = ({
 
   // Render call log label if last message is a call log
   const renderMessagePreview = () => {
+    if (isRemovedFromGroup) {
+      return (
+        <span className={cn('inline-flex items-center gap-1 font-semibold', isSelected ? 'text-red-200' : 'text-red-500 dark:text-red-400')}>
+          <Lock className="w-3 h-3 shrink-0" />
+          <span>Chat Locked • You were removed</span>
+        </span>
+      );
+    }
+
     if (!lastMsg?.content) return 'No messages yet';
 
     if (lastMsg.content.startsWith('[CALL_LOG:') && lastMsg.content.endsWith(']')) {
@@ -254,6 +275,17 @@ export const ConversationItem: React.FC<ConversationItemProps> = ({
               >
                 {displayName}
               </h4>
+              {isRemovedFromGroup && (
+                <span
+                  className={cn(
+                    'px-1.5 py-0.5 rounded-md text-[10px] font-bold shrink-0 flex items-center gap-0.5',
+                    isSelected ? 'bg-red-500/40 text-red-100' : 'bg-red-500/10 text-red-600 dark:text-red-400'
+                  )}
+                >
+                  <Lock className="w-2.5 h-2.5" />
+                  Locked
+                </span>
+              )}
               {otherUser?.username && (
                 <span
                   className={cn(

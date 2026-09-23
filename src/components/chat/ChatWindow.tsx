@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from 'react';
 import {
   Phone,
   Video,
@@ -14,6 +14,9 @@ import {
   UserPlus,
   UserCheck,
   ShieldAlert,
+  ShieldCheck,
+  UserMinus,
+  Copy,
   Heart,
   CheckCircle2,
   RefreshCw,
@@ -195,6 +198,90 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     (conversation?.members_meta ? Object.keys(conversation.members_meta).length : 0) ||
     1;
 
+  const isCurrentUserMember = Boolean(
+    isGroup && currentUser?.id && Array.isArray(conversation?.member_ids)
+      ? conversation.member_ids.includes(currentUser.id)
+      : true
+  );
+
+  const isRemovedFromGroup = Boolean(
+    isGroup &&
+    currentUser?.id &&
+    (!isCurrentUserMember || conversation?.is_removed || conversation?.removed_members?.[currentUser.id])
+  );
+
+  const removalDetails = useMemo(() => {
+    if (!isRemovedFromGroup || !currentUser?.id) return null;
+
+    if (conversation?.removal_info) {
+      return {
+        adminId: conversation.removal_info.removed_by,
+        adminName: conversation.removal_info.admin_name || 'Group Admin',
+        adminUsername: conversation.removal_info.admin_username || 'admin',
+        memberId: currentUser.id,
+        memberName: conversation.removal_info.member_name || currentUser.display_name || 'You',
+        memberUsername: conversation.removal_info.member_username || currentUser.username || 'user',
+        removedAt: conversation.removal_info.removed_at,
+      };
+    }
+
+    if (conversation?.removed_members?.[currentUser.id]) {
+      const info = conversation.removed_members[currentUser.id];
+      return {
+        adminId: info.removed_by,
+        adminName: info.admin_name || 'Group Admin',
+        adminUsername: info.admin_username || 'admin',
+        memberId: currentUser.id,
+        memberName: info.member_name || currentUser.display_name || 'You',
+        memberUsername: info.member_username || currentUser.username || 'user',
+        removedAt: info.removed_at,
+      };
+    }
+
+    // Search messages in reverse for tagged removal
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m?.content?.startsWith('[SYSTEM:MEMBER_REMOVED:')) {
+        const endTag = m.content.indexOf(']');
+        if (endTag !== -1) {
+          const parts = m.content.substring(23, endTag).split(':');
+          if (parts[3] === currentUser.id || !isCurrentUserMember) {
+            return {
+              adminId: parts[0] || conversation?.owner_id || 'admin',
+              adminName: parts[1] || 'Group Admin',
+              adminUsername: parts[2] || 'admin',
+              memberId: parts[3] || currentUser.id,
+              memberName: parts[4] || currentUser.display_name || 'You',
+              memberUsername: parts[5] || currentUser.username || 'user',
+              removedAt: m.created_at,
+            };
+          }
+        }
+      }
+    }
+
+    return {
+      adminId: conversation?.owner_id || 'Admin',
+      adminName: 'Group Admin',
+      adminUsername: 'admin',
+      memberId: currentUser.id,
+      memberName: currentUser.display_name || 'You',
+      memberUsername: currentUser.username || 'user',
+      removedAt: conversation?.updated_at || new Date().toISOString(),
+    };
+  }, [isRemovedFromGroup, currentUser, conversation, messages, isCurrentUserMember]);
+
+  const [copiedIdField, setCopiedIdField] = useState<'admin' | 'member' | null>(null);
+
+  const handleCopyId = (text: string, field: 'admin' | 'member') => {
+    if (!text) return;
+    navigator.clipboard.writeText(text);
+    setCopiedIdField(field);
+    setTimeout(() => {
+      setCopiedIdField((prev) => (prev === field ? null : prev));
+    }, 2000);
+  };
+
   const currentConvIdRef = useRef<string | null>(null);
 
   // Direct Live Relation Check from backend (only for direct 1-on-1 chats)
@@ -269,9 +356,9 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
       (isFollowingUser && isFollowedByUser)
     );
 
-  // canChat: Always enabled for groups, or 1-on-1 when mutual follow and not blocked
-  const canChat = isGroup || (!isBlocked && (isSelf || isMutual));
-  const canCall = !isGroup && (!isBlocked && (isSelf || isMutual));
+  // canChat: Disabled if removed from group; otherwise enabled for groups or mutual follow
+  const canChat = !isRemovedFromGroup && (isGroup || (!isBlocked && (isSelf || isMutual)));
+  const canCall = !isRemovedFromGroup && !isGroup && (!isBlocked && (isSelf || isMutual));
 
   const handleSendMessage = async (content: string) => {
     if (!content.trim() || sending) return;
@@ -354,11 +441,19 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
             <div className="text-center space-y-1">
               <h3 className="text-base font-bold text-neutral-900 dark:text-neutral-100">
-                {confirmAction === 'clear' ? 'Clear All Messages?' : 'Delete Conversation?'}
+                {confirmAction === 'clear'
+                  ? 'Clear All Messages?'
+                  : isGroup
+                  ? 'Delete Group?'
+                  : 'Delete Conversation?'}
               </h3>
               <p className="text-xs text-neutral-500 dark:text-neutral-400">
                 {confirmAction === 'clear'
                   ? 'All messages in this chat will be permanently deleted for you.'
+                  : isRemovedFromGroup
+                  ? `This will remove "${displayName}" completely from your chats list. This cannot be undone.`
+                  : isGroup
+                  ? `Are you sure you want to delete or leave "${displayName}"?`
                   : `Are you sure you want to delete the chat with ${displayName}? This cannot be undone.`}
               </p>
             </div>
@@ -366,15 +461,15 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             <div className="grid grid-cols-2 gap-2 pt-2">
               <button
                 onClick={() => setConfirmAction(null)}
-                className="py-2.5 px-4 rounded-xl border border-neutral-300 dark:border-neutral-700 font-semibold text-xs text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
+                className="py-2.5 px-4 rounded-xl border border-neutral-300 dark:border-neutral-700 font-semibold text-xs text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors cursor-pointer"
               >
                 Cancel
               </button>
               <button
                 onClick={confirmAction === 'clear' ? handleClearMessages : handleDeleteConversation}
-                className="py-2.5 px-4 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-xs shadow-md shadow-red-500/20 transition-all active:scale-95"
+                className="py-2.5 px-4 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-xs shadow-md shadow-red-500/20 transition-all active:scale-95 cursor-pointer"
               >
-                {confirmAction === 'clear' ? 'Clear Messages' : 'Delete Chat'}
+                {confirmAction === 'clear' ? 'Clear Messages' : isGroup ? 'Delete Group' : 'Delete Chat'}
               </button>
             </div>
           </div>
@@ -429,9 +524,15 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                 {displayName}
               </h3>
               {isGroup ? (
-                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20">
-                  <Users className="w-3 h-3" /> Group
-                </span>
+                isRemovedFromGroup ? (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-500/15 text-red-600 dark:text-red-400 border border-red-500/30">
+                    <Lock className="w-3 h-3" /> Removed • Locked
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20">
+                    <Users className="w-3 h-3" /> Group
+                  </span>
+                )
               ) : !isSelf && isMutual && !isBlocked ? (
                 <span className="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
                   <UserCheck className="w-3 h-3" /> Mutual Follow
@@ -440,10 +541,17 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             </div>
             <p className="text-xs text-neutral-500 dark:text-neutral-400 truncate flex items-center gap-1.5">
               {isGroup ? (
-                <span>
-                  {memberCount} member{memberCount === 1 ? '' : 's'}
-                  {conversation.description ? ` • ${conversation.description}` : ''}
-                </span>
+                isRemovedFromGroup ? (
+                  <span className="text-red-600 dark:text-red-400 font-semibold flex items-center gap-1">
+                    <Lock className="w-3 h-3 shrink-0" />
+                    Chat Locked • You were removed by admin
+                  </span>
+                ) : (
+                  <span>
+                    {memberCount} member{memberCount === 1 ? '' : 's'}
+                    {conversation.description ? ` • ${conversation.description}` : ''}
+                  </span>
+                )
               ) : isSelf ? (
                 <span className="text-blue-600 dark:text-blue-400 font-medium">Message yourself (Personal notes)</span>
               ) : isOnline ? (
@@ -693,8 +801,116 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
       {/* Footer Area */}
       <footer className="p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] bg-white dark:bg-neutral-900 border-t border-neutral-200 dark:border-neutral-800 space-y-2">
-        {/* Case 1: Blocked */}
-        {isBlocked ? (
+        {/* Case 0: Removed from Group (Chat Locked) */}
+        {isRemovedFromGroup ? (
+          <div className="rounded-2xl bg-linear-to-b from-red-50/90 via-white to-red-50/30 dark:from-red-950/40 dark:via-neutral-900 dark:to-neutral-900 border border-red-200 dark:border-red-900/60 p-4 space-y-3 shadow-md animate-in fade-in duration-200">
+            {/* Lock Header */}
+            <div className="flex items-center justify-between gap-2 border-b border-red-200/60 dark:border-red-900/40 pb-2.5">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="p-2 rounded-xl bg-red-600 text-white shadow-xs shrink-0">
+                  <Lock className="w-4 h-4" />
+                </div>
+                <div className="min-w-0">
+                  <h4 className="text-xs font-black uppercase tracking-wider text-red-700 dark:text-red-300 truncate">
+                    Chat Locked • You were removed from this group
+                  </h4>
+                  <p className="text-[11px] text-neutral-600 dark:text-neutral-400 truncate">
+                    An admin has removed you. You cannot send or receive messages.
+                  </p>
+                </div>
+              </div>
+              <span className="px-2 py-0.5 rounded-full bg-red-100 dark:bg-red-900/60 text-red-700 dark:text-red-300 font-mono text-[10px] font-black shrink-0">
+                LOCKED
+              </span>
+            </div>
+
+            {/* Admin and Member ID display cards */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-left">
+              {/* Admin Who Removed Card */}
+              <div className="p-3 rounded-xl bg-white dark:bg-neutral-850 border border-neutral-200 dark:border-neutral-800 shadow-2xs">
+                <div className="flex items-center justify-between text-[10px] font-extrabold uppercase tracking-wider text-purple-700 dark:text-purple-400 mb-1">
+                  <span className="flex items-center gap-1.5">
+                    <ShieldCheck className="w-3.5 h-3.5 text-purple-600 dark:text-purple-400" />
+                    Removed By (Admin)
+                  </span>
+                </div>
+                <p className="text-xs font-bold text-neutral-900 dark:text-neutral-100 truncate">
+                  {removalDetails?.adminName || 'Group Admin'}
+                </p>
+                <p className="text-[11px] text-neutral-500 dark:text-neutral-400 font-mono truncate">
+                  @{removalDetails?.adminUsername || 'admin'}
+                </p>
+                <div className="mt-2 flex items-center justify-between gap-1.5 bg-neutral-100 dark:bg-neutral-800 px-2 py-1 rounded-lg">
+                  <span className="text-[9px] font-bold text-neutral-500 dark:text-neutral-400 shrink-0">ADMIN ID:</span>
+                  <span className="text-[10px] font-mono font-bold text-neutral-800 dark:text-neutral-200 truncate select-all" title={removalDetails?.adminId}>
+                    {removalDetails?.adminId || 'admin'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => handleCopyId(removalDetails?.adminId || '', 'admin')}
+                    className="p-1 hover:bg-neutral-200 dark:hover:bg-neutral-700 rounded text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-100 transition-colors shrink-0 cursor-pointer"
+                    title="Copy Admin ID"
+                  >
+                    {copiedIdField === 'admin' ? (
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
+                    ) : (
+                      <Copy className="w-3.5 h-3.5" />
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {/* Removed Member (You) Card */}
+              <div className="p-3 rounded-xl bg-red-50/70 dark:bg-red-950/30 border border-red-200/80 dark:border-red-900/60 shadow-2xs">
+                <div className="flex items-center justify-between text-[10px] font-extrabold uppercase tracking-wider text-red-600 dark:text-red-400 mb-1">
+                  <span className="flex items-center gap-1.5">
+                    <UserMinus className="w-3.5 h-3.5 text-red-600 dark:text-red-400" />
+                    Removed Member (You)
+                  </span>
+                </div>
+                <p className="text-xs font-bold text-red-950 dark:text-red-200 truncate">
+                  {removalDetails?.memberName || currentUser?.display_name || 'You'}
+                </p>
+                <p className="text-[11px] text-red-700/80 dark:text-red-400/80 font-mono truncate">
+                  @{removalDetails?.memberUsername || currentUser?.username || 'user'}
+                </p>
+                <div className="mt-2 flex items-center justify-between gap-1.5 bg-red-100/90 dark:bg-red-900/50 px-2 py-1 rounded-lg">
+                  <span className="text-[9px] font-bold text-red-600 dark:text-red-400 shrink-0">USER ID:</span>
+                  <span className="text-[10px] font-mono font-bold text-red-900 dark:text-red-200 truncate select-all" title={removalDetails?.memberId}>
+                    {removalDetails?.memberId || currentUser?.id}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => handleCopyId(removalDetails?.memberId || currentUser?.id || '', 'member')}
+                    className="p-1 hover:bg-red-200 dark:hover:bg-red-800 rounded text-red-700 dark:text-red-300 transition-colors shrink-0 cursor-pointer"
+                    title="Copy Member ID"
+                  >
+                    {copiedIdField === 'member' ? (
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
+                    ) : (
+                      <Copy className="w-3.5 h-3.5" />
+                    )}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Bottom Delete Button: "NICHE AAYE GA DELTE OR DELTE KRNE KE BAAD DELTED HOGA VO" */}
+            <div className="pt-2 flex flex-col sm:flex-row items-center justify-between gap-2.5 border-t border-red-200/50 dark:border-red-900/40">
+              <p className="text-[11px] text-neutral-500 dark:text-neutral-400 text-center sm:text-left">
+                To remove this group permanently from your chats list, click Delete Group below.
+              </p>
+              <button
+                type="button"
+                onClick={() => setConfirmAction('delete')}
+                className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 active:scale-95 text-white text-xs font-bold flex items-center justify-center gap-2 shadow-md shadow-red-500/20 transition-all cursor-pointer shrink-0"
+              >
+                <Trash2 className="w-4 h-4" />
+                <span>Delete Group</span>
+              </button>
+            </div>
+          </div>
+        ) : isBlocked ? (
           <div className="p-3.5 rounded-2xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/50 flex items-center justify-between gap-3 text-xs text-rose-700 dark:text-rose-300">
             <div className="flex items-center gap-2">
               <ShieldAlert className="w-4 h-4 shrink-0 text-rose-500" />

@@ -32,6 +32,15 @@ export interface Profile {
   updated_at: string;
 }
 
+export interface RemovedMemberInfo {
+  removed_at: string;
+  removed_by: string;
+  admin_name?: string;
+  admin_username?: string;
+  member_name?: string;
+  member_username?: string;
+}
+
 export interface Conversation {
   id: string;
   type: 'direct' | 'group';
@@ -50,6 +59,9 @@ export interface Conversation {
   member_ids?: string[];
   members_meta?: Record<string, Profile>;
   member_roles?: Record<string, 'admin' | 'member'>;
+  removed_members?: Record<string, RemovedMemberInfo>;
+  is_removed?: boolean;
+  removal_info?: RemovedMemberInfo | null;
 }
 
 export interface ConversationMember {

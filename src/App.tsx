@@ -771,6 +771,9 @@ export default function App() {
           fetchConversations();
         }}
         onGroupDeleted={() => {
+          if (viewingGroup) {
+            deleteConversation(viewingGroup.id);
+          }
           setViewingGroup(null);
           setActiveConversationId(null);
           fetchConversations();

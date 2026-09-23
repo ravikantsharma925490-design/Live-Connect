@@ -365,6 +365,14 @@ interface ServerConversation {
   member_ids: string[];
   members_meta?: Record<string, any>;
   member_roles?: Record<string, 'admin' | 'member'>;
+  removed_members?: Record<string, {
+    removed_at: string;
+    removed_by: string;
+    admin_name?: string;
+    admin_username?: string;
+    member_name?: string;
+    member_username?: string;
+  }>;
   created_at: string;
   updated_at: string;
   last_message?: ServerMessage | null;
@@ -388,7 +396,8 @@ interface ServerCall {
 const serverConversationsStore = new Map<string, ServerConversation>(); // convId -> conv
 const messagesServerStore = new Map<string, ServerMessage[]>(); // conversation_id -> messages[]
 const callsServerStore = new Map<string, ServerCall>(); // call_id -> call
-const deletedConversationsServerStore = new Set<string>(); // convId -> deleted set
+const deletedConversationsServerStore = new Set<string>(); // convId -> globally deleted set
+const userDeletedConversationsStore = new Map<string, Set<string>>(); // userId -> Set<convId>
 
 function getDeterministicDirectConvId(userA: string, userB: string): string {
   const sorted = [userA || '', userB || ''].sort().join(':');
@@ -3146,7 +3155,14 @@ app.post('/api/conversations/list', async (req, res) => {
       if (deletedConversationsServerStore.has(conv.id)) {
         continue;
       }
-      if (conv.member_ids.includes(userId)) {
+      if (userDeletedConversationsStore.get(userId)?.has(conv.id)) {
+        continue;
+      }
+
+      const isMember = conv.member_ids.includes(userId);
+      const isRemoved = Boolean(conv.removed_members?.[userId]);
+
+      if (isMember || isRemoved) {
         const isGroupConv =
           conv.type === 'group' ||
           Boolean(conv.name) ||
@@ -3191,6 +3207,9 @@ app.post('/api/conversations/list', async (req, res) => {
           member_ids: conv.member_ids,
           members_meta: conv.members_meta,
           member_roles: conv.member_roles,
+          removed_members: conv.removed_members,
+          is_removed: isRemoved,
+          removal_info: isRemoved ? conv.removed_members?.[userId] : null,
           created_at: conv.created_at,
           updated_at: effectiveUpdatedAt,
           other_member: isGroupConv ? undefined : otherProfile,
@@ -3565,9 +3584,10 @@ app.post('/api/groups/members/add', async (req, res) => {
     // Create system notification message
     if (newAdded.length > 0) {
       const actorProfile = group.members_meta?.[userId] || serverProfilesStore.get(userId);
-      const actorName = actorProfile?.display_name || actorProfile?.username || 'Admin';
+      const actorDisplayName = actorProfile?.display_name || actorProfile?.username || 'Admin';
+      const actorUsername = actorProfile?.username || 'admin';
       const namesJoined = addedNamesList.length > 0 ? addedNamesList.join(', ') : `${newAdded.length} new member(s)`;
-      const sysMsgContent = `${actorName} added ${namesJoined} to the group`;
+      const sysMsgContent = `[SYSTEM:MEMBERS_ADDED:${userId}:${actorDisplayName}:${actorUsername}] 🛡️ Admin ${actorDisplayName} (@${actorUsername} • ID: ${userId}) added ${namesJoined} to the group`;
 
       const sysMsg: ServerMessage = {
         id: generateUUID(),
@@ -3642,18 +3662,34 @@ app.post('/api/groups/members/remove', async (req, res) => {
 
     const removedProfile = group.members_meta?.[memberId] || serverProfilesStore.get(memberId);
     const actorProfile = group.members_meta?.[actorId] || serverProfilesStore.get(actorId);
-    const removedName = removedProfile?.display_name || removedProfile?.username || 'Member';
-    const actorName = actorProfile?.display_name || actorProfile?.username || 'Admin';
+    const removedDisplayName = removedProfile?.display_name || removedProfile?.username || 'Member';
+    const removedUsername = removedProfile?.username || 'user';
+    const actorDisplayName = actorProfile?.display_name || actorProfile?.username || 'Admin';
+    const actorUsername = actorProfile?.username || 'admin';
 
     group.member_ids = group.member_ids.filter((id) => id !== memberId);
     if (group.member_roles) {
       delete group.member_roles[memberId];
     }
+
+    const nowIso = new Date().toISOString();
+    group.updated_at = nowIso;
+
+    group.removed_members = group.removed_members || {};
+    if (!isSelfLeaving) {
+      group.removed_members[memberId] = {
+        removed_at: nowIso,
+        removed_by: actorId,
+        admin_name: actorDisplayName,
+        admin_username: actorUsername,
+        member_name: removedDisplayName,
+        member_username: removedUsername,
+      };
+    }
+
     if (group.members_meta) {
       delete group.members_meta[memberId];
     }
-    const nowIso = new Date().toISOString();
-    group.updated_at = nowIso;
 
     // If owner left and other members remain, reassign ownership
     if (memberId === group.owner_id && group.member_ids.length > 0) {
@@ -3672,10 +3708,24 @@ app.post('/api/groups/members/remove', async (req, res) => {
       }
     }
 
-    // Insert system notification message into chat
+    // If last member left, clean up group entirely
+    if (group.member_ids.length === 0) {
+      serverConversationsStore.delete(conversationId);
+      deletedConversationsServerStore.add(conversationId);
+      messagesServerStore.delete(conversationId);
+      const client = adminSupabase || serverSupabase;
+      if (client) {
+        client.from('conversations').delete().eq('id', conversationId).then(() => {}).catch(() => {});
+        client.from('messages').delete().eq('conversation_id', conversationId).then(() => {}).catch(() => {});
+        client.from('conversation_members').delete().eq('conversation_id', conversationId).then(() => {}).catch(() => {});
+      }
+      return res.json({ success: true, groupDeleted: true });
+    }
+
+    // Insert rich system notification message into chat showing both Admin ID and Removed Member ID
     const sysMsgContent = isSelfLeaving
-      ? `${removedName} left the group`
-      : `${actorName} removed ${removedName} from the group`;
+      ? `[SYSTEM:MEMBER_LEFT:${memberId}:${removedDisplayName}:${removedUsername}] ${removedDisplayName} (@${removedUsername} • ID: ${memberId.slice(0, 8)}) left the group`
+      : `[SYSTEM:MEMBER_REMOVED:${actorId}:${actorDisplayName}:${actorUsername}:${memberId}:${removedDisplayName}:${removedUsername}] 🛡️ Admin ${actorDisplayName} (@${actorUsername} • ID: ${actorId.slice(0, 8)}) removed ${removedDisplayName} (@${removedUsername} • ID: ${memberId.slice(0, 8)}) from the group`;
 
     const sysMsg: ServerMessage = {
       id: generateUUID(),
@@ -3753,12 +3803,14 @@ app.post('/api/groups/members/role', async (req, res) => {
 
     const targetProfile = group.members_meta?.[memberId] || serverProfilesStore.get(memberId);
     const actorProfile = group.members_meta?.[actorId] || serverProfilesStore.get(actorId);
-    const targetName = targetProfile?.display_name || targetProfile?.username || 'Member';
-    const actorName = actorProfile?.display_name || actorProfile?.username || 'Admin';
+    const targetDisplayName = targetProfile?.display_name || targetProfile?.username || 'Member';
+    const targetUsername = targetProfile?.username || 'user';
+    const actorDisplayName = actorProfile?.display_name || actorProfile?.username || 'Admin';
+    const actorUsername = actorProfile?.username || 'admin';
 
     const sysMsgContent = role === 'admin'
-      ? `${actorName} made ${targetName} a Group Admin`
-      : `${actorName} dismissed ${targetName} from Group Admin`;
+      ? `[SYSTEM:ROLE_CHANGED:admin:${actorId}:${actorDisplayName}:${actorUsername}:${memberId}:${targetDisplayName}:${targetUsername}] 🛡️ Admin ${actorDisplayName} (@${actorUsername} • ID: ${actorId.slice(0, 8)}) made ${targetDisplayName} (@${targetUsername} • ID: ${memberId.slice(0, 8)}) a Group Admin`
+      : `[SYSTEM:ROLE_CHANGED:member:${actorId}:${actorDisplayName}:${actorUsername}:${memberId}:${targetDisplayName}:${targetUsername}] 🛡️ Admin ${actorDisplayName} (@${actorUsername} • ID: ${actorId.slice(0, 8)}) dismissed ${targetDisplayName} (@${targetUsername} • ID: ${memberId.slice(0, 8)}) from Group Admin`;
 
     const sysMsg: ServerMessage = {
       id: generateUUID(),
@@ -3915,8 +3967,11 @@ app.post('/api/messages/send', async (req, res) => {
     if (isGroupChat) {
       if (existingConv) {
         existingConv.type = 'group';
+        if (existingConv.removed_members?.[senderId]) {
+          return res.status(403).json({ error: 'You cannot send messages because you were removed from this group by an admin' });
+        }
         if (Array.isArray(existingConv.member_ids) && !existingConv.member_ids.includes(senderId)) {
-          existingConv.member_ids.push(senderId);
+          return res.status(403).json({ error: 'You are not a member of this group' });
         }
       }
     } else {
@@ -4905,9 +4960,36 @@ app.post('/api/conversations/delete', async (req, res) => {
     if (typeof body === 'string') {
       try { body = JSON.parse(body); } catch (e) {}
     }
-    const { conversationId } = body || {};
+    const { conversationId, userId } = body || {};
     if (!conversationId) {
       return res.status(400).json({ error: 'conversationId required' });
+    }
+
+    const targetConv = serverConversationsStore.get(conversationId);
+    if (targetConv && targetConv.type === 'group' && userId) {
+      if (!userDeletedConversationsStore.has(userId)) {
+        userDeletedConversationsStore.set(userId, new Set<string>());
+      }
+      userDeletedConversationsStore.get(userId)!.add(conversationId);
+
+      targetConv.member_ids = targetConv.member_ids.filter((id) => id !== userId);
+      if (targetConv.removed_members) {
+        delete targetConv.removed_members[userId];
+      }
+      if (targetConv.member_roles) {
+        delete targetConv.member_roles[userId];
+      }
+      if (targetConv.members_meta) {
+        delete targetConv.members_meta[userId];
+      }
+
+      // If other members remain in the group, do not destroy the group globally
+      if (targetConv.member_ids.length > 0) {
+        if (serverSupabase) {
+          serverSupabase.from('conversation_members').delete().eq('conversation_id', conversationId).eq('user_id', userId).then(() => {}).catch(() => {});
+        }
+        return res.json({ success: true, conversationId, deletedForUser: true });
+      }
     }
 
     // 1. Mark conversation in deleted set

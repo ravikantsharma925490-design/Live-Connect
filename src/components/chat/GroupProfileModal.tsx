@@ -20,6 +20,7 @@ import {
 import { Conversation, Profile } from '@/src/types';
 import { UserAvatar } from '../ui/UserAvatar';
 import { uploadMediaToServer } from '@/src/lib/mediaUpload';
+import { recordDeletedConvId } from '@/src/hooks/useConversations';
 
 interface GroupProfileModalProps {
   isOpen: boolean;
@@ -57,7 +58,7 @@ export const GroupProfileModal: React.FC<GroupProfileModalProps> = ({
   const [loadingAvailable, setLoadingAvailable] = useState(false);
 
   // Confirmation modals
-  const [confirmRemoveTarget, setConfirmRemoveTarget] = useState<{ id: string; name: string } | null>(null);
+  const [confirmRemoveTarget, setConfirmRemoveTarget] = useState<{ id: string; name: string; username?: string } | null>(null);
   const [confirmRoleTarget, setConfirmRoleTarget] = useState<{ id: string; name: string; targetRole: 'admin' | 'member' } | null>(null);
   const [confirmDeleteGroup, setConfirmDeleteGroup] = useState(false);
   const [confirmLeaveGroup, setConfirmLeaveGroup] = useState(false);
@@ -290,6 +291,15 @@ export const GroupProfileModal: React.FC<GroupProfileModalProps> = ({
     setConfirmLeaveGroup(false);
 
     try {
+      if (currentUserId && localGroup?.id) {
+        recordDeletedConvId(currentUserId, localGroup.id);
+        try {
+          localStorage.removeItem(`liveconnect_msgs_${localGroup.id}`);
+          localStorage.removeItem(`liveconnect_deleted_ids_${localGroup.id}`);
+          localStorage.removeItem(`liveconnect_active_conv_${currentUserId}`);
+        } catch (e) {}
+      }
+
       const res = await fetch('/api/groups/members/remove', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -729,32 +739,61 @@ export const GroupProfileModal: React.FC<GroupProfileModalProps> = ({
                   <div className="p-1.5 rounded-xl bg-red-100 dark:bg-red-900/60 text-red-600 dark:text-red-300 shrink-0">
                     <UserMinus className="w-4 h-4" />
                   </div>
-                  <div>
+                  <div className="min-w-0 flex-1">
                     <h5 className="text-xs font-bold text-red-900 dark:text-red-200">
                       Remove {confirmRemoveTarget.name} from group?
                     </h5>
                     <p className="text-[11px] text-red-700/80 dark:text-red-300/80 mt-0.5">
-                      They will be removed immediately and won't be able to read or send messages in this group.
+                      This will remove the user from the group. The chat conversation will be automatically deleted from their screen.
                     </p>
+
+                    {/* Both Admin ID and Target Member ID side-by-side */}
+                    <div className="mt-2.5 grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
+                      <div className="p-2 rounded-xl bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800">
+                        <span className="text-[10px] font-bold text-neutral-400 dark:text-neutral-500 uppercase tracking-wider block">Admin (You)</span>
+                        <span className="font-bold text-neutral-800 dark:text-neutral-200 block truncate mt-0.5">
+                          {currentUser?.display_name || 'Admin'} (@{currentUser?.username || 'admin'})
+                        </span>
+                        <div className="mt-1 flex items-center gap-1 font-mono text-[10px] text-neutral-500">
+                          <span>ID:</span>
+                          <span className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded font-bold text-neutral-800 dark:text-neutral-200 truncate max-w-[130px]" title={currentUserId}>
+                            {currentUserId}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="p-2 rounded-xl bg-red-100/60 dark:bg-red-900/30 border border-red-200 dark:border-red-800">
+                        <span className="text-[10px] font-bold text-red-600 dark:text-red-400 uppercase tracking-wider block">Target Member</span>
+                        <span className="font-bold text-red-950 dark:text-red-100 block truncate mt-0.5">
+                          {confirmRemoveTarget.name} (@{confirmRemoveTarget.username || 'user'})
+                        </span>
+                        <div className="mt-1 flex items-center gap-1 font-mono text-[10px] text-red-600 dark:text-red-400">
+                          <span>ID:</span>
+                          <span className="bg-red-200/60 dark:bg-red-900/60 px-1.5 py-0.5 rounded font-bold text-red-900 dark:text-red-100 truncate max-w-[130px]" title={confirmRemoveTarget.id}>
+                            {confirmRemoveTarget.id}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </div>
                 <div className="flex items-center justify-end gap-2 pt-1">
                   <button
                     onClick={() => setConfirmRemoveTarget(null)}
                     disabled={Boolean(actionLoadingId)}
-                    className="px-3 py-1.5 rounded-xl text-xs font-semibold text-neutral-600 dark:text-neutral-400 hover:bg-neutral-200/60 dark:hover:bg-neutral-800"
+                    className="px-3 py-1.5 rounded-xl text-xs font-semibold text-neutral-600 dark:text-neutral-400 hover:bg-neutral-200/60 dark:hover:bg-neutral-800 cursor-pointer"
                   >
                     Cancel
                   </button>
                   <button
                     onClick={() => executeRemoveMember(confirmRemoveTarget.id)}
                     disabled={Boolean(actionLoadingId)}
-                    className="px-3.5 py-1.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-xs"
+                    className="px-3.5 py-1.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-xs cursor-pointer active:scale-95"
                   >
                     {actionLoadingId === confirmRemoveTarget.id && (
                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
                     )}
-                    Yes, Remove Member
+                    Confirm & Remove
                   </button>
                 </div>
               </div>
@@ -847,9 +886,14 @@ export const GroupProfileModal: React.FC<GroupProfileModalProps> = ({
                               </span>
                             )}
                           </div>
-                          <p className="text-[10px] text-neutral-500 dark:text-neutral-400 truncate">
-                            @{memberMeta.username || 'user'}
-                          </p>
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <p className="text-[10px] text-neutral-500 dark:text-neutral-400 truncate">
+                              @{memberMeta.username || 'user'}
+                            </p>
+                            <span className="font-mono text-[9px] text-neutral-400 dark:text-neutral-500 bg-neutral-200/60 dark:bg-neutral-800/80 px-1.5 py-0.2 rounded" title={mId}>
+                              ID: {mId.length > 8 ? `${mId.slice(0, 8)}...` : mId}
+                            </span>
+                          </div>
                         </div>
                       </div>
 
@@ -918,11 +962,12 @@ export const GroupProfileModal: React.FC<GroupProfileModalProps> = ({
                                   setConfirmRemoveTarget({
                                     id: mId,
                                     name: memberMeta.display_name || memberMeta.username || 'Member',
+                                    username: memberMeta.username || 'user',
                                   })
                                 }
                                 disabled={isPerformingAction}
                                 title="Remove member from group"
-                                className="px-2 py-1 rounded-xl text-[11px] font-bold bg-red-50 dark:bg-red-950/40 text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-900/40 border border-red-200 dark:border-red-800 flex items-center gap-1 transition-all active:scale-95"
+                                className="px-2 py-1 rounded-xl text-[11px] font-bold bg-red-50 dark:bg-red-950/40 text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-900/40 border border-red-200 dark:border-red-800 flex items-center gap-1 transition-all active:scale-95 cursor-pointer"
                               >
                                 <UserMinus className="w-3 h-3" />
                                 <span>Remove</span>

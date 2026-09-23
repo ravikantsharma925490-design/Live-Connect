@@ -25,6 +25,11 @@ import {
   PinOff,
   Reply,
   Share2,
+  UserMinus,
+  UserPlus,
+  ShieldCheck,
+  ShieldAlert,
+  LogOut,
 } from 'lucide-react';
 
 // WhatsApp-style accurate SVG call icons
@@ -534,6 +539,128 @@ const VoiceNotePlayer = ({
   );
 };
 
+interface ParsedSystemMessage {
+  type: 'MEMBER_REMOVED' | 'MEMBER_LEFT' | 'ROLE_CHANGED' | 'MEMBERS_ADDED' | 'GENERIC';
+  actorId?: string;
+  actorName?: string;
+  actorUsername?: string;
+  targetId?: string;
+  targetName?: string;
+  targetUsername?: string;
+  newRole?: 'admin' | 'member';
+  rawText: string;
+}
+
+function parseSystemMessage(content: string | undefined): ParsedSystemMessage | null {
+  if (!content || typeof content !== 'string') return null;
+
+  // 1. Tagged format: [SYSTEM:MEMBER_REMOVED:actorId:actorName:actorUsername:targetId:targetName:targetUsername] text
+  if (content.startsWith('[SYSTEM:MEMBER_REMOVED:')) {
+    const endTagIdx = content.indexOf(']');
+    if (endTagIdx !== -1) {
+      const tagContent = content.substring(23, endTagIdx);
+      const parts = tagContent.split(':');
+      const text = content.substring(endTagIdx + 1).trim();
+      return {
+        type: 'MEMBER_REMOVED',
+        actorId: parts[0] || '',
+        actorName: parts[1] || 'Admin',
+        actorUsername: parts[2] || 'admin',
+        targetId: parts[3] || '',
+        targetName: parts[4] || 'Member',
+        targetUsername: parts[5] || 'user',
+        rawText: text,
+      };
+    }
+  }
+
+  // 2. Tagged format: [SYSTEM:MEMBER_LEFT:targetId:targetName:targetUsername] text
+  if (content.startsWith('[SYSTEM:MEMBER_LEFT:')) {
+    const endTagIdx = content.indexOf(']');
+    if (endTagIdx !== -1) {
+      const tagContent = content.substring(20, endTagIdx);
+      const parts = tagContent.split(':');
+      const text = content.substring(endTagIdx + 1).trim();
+      return {
+        type: 'MEMBER_LEFT',
+        targetId: parts[0] || '',
+        targetName: parts[1] || 'Member',
+        targetUsername: parts[2] || 'user',
+        rawText: text,
+      };
+    }
+  }
+
+  // 3. Tagged format: [SYSTEM:ROLE_CHANGED:newRole:actorId:actorName:actorUsername:targetId:targetName:targetUsername] text
+  if (content.startsWith('[SYSTEM:ROLE_CHANGED:')) {
+    const endTagIdx = content.indexOf(']');
+    if (endTagIdx !== -1) {
+      const tagContent = content.substring(21, endTagIdx);
+      const parts = tagContent.split(':');
+      const text = content.substring(endTagIdx + 1).trim();
+      return {
+        type: 'ROLE_CHANGED',
+        newRole: parts[0] === 'admin' ? 'admin' : 'member',
+        actorId: parts[1] || '',
+        actorName: parts[2] || 'Admin',
+        actorUsername: parts[3] || 'admin',
+        targetId: parts[4] || '',
+        targetName: parts[5] || 'Member',
+        targetUsername: parts[6] || 'user',
+        rawText: text,
+      };
+    }
+  }
+
+  // 4. Tagged format: [SYSTEM:MEMBERS_ADDED:actorId:actorName:actorUsername] text
+  if (content.startsWith('[SYSTEM:MEMBERS_ADDED:')) {
+    const endTagIdx = content.indexOf(']');
+    if (endTagIdx !== -1) {
+      const tagContent = content.substring(22, endTagIdx);
+      const parts = tagContent.split(':');
+      const text = content.substring(endTagIdx + 1).trim();
+      return {
+        type: 'MEMBERS_ADDED',
+        actorId: parts[0] || '',
+        actorName: parts[1] || 'Admin',
+        actorUsername: parts[2] || 'admin',
+        rawText: text,
+      };
+    }
+  }
+
+  // 5. Plain text heuristics for group events
+  if (content.includes('removed') && content.includes('from the group')) {
+    return {
+      type: 'MEMBER_REMOVED',
+      rawText: content,
+    };
+  }
+
+  if (content.includes('left the group')) {
+    return {
+      type: 'MEMBER_LEFT',
+      rawText: content,
+    };
+  }
+
+  if (content.includes('Group Admin') || content.includes('group admin')) {
+    return {
+      type: 'ROLE_CHANGED',
+      rawText: content,
+    };
+  }
+
+  if (content.includes('added') && content.includes('to the group')) {
+    return {
+      type: 'MEMBERS_ADDED',
+      rawText: content,
+    };
+  }
+
+  return null;
+}
+
 interface MessageBubbleProps {
   message: Message;
   isMine: boolean;
@@ -862,7 +989,185 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
     );
   }
 
-  // 2. Check if message is a STICKER: [STICKER:emojiOrIcon:label]
+  // 2. Check if this is a SYSTEM NOTIFICATION message (Member removed, member left, role change, etc.)
+  const systemMessage = parseSystemMessage(message.content);
+  if (systemMessage) {
+    return (
+      <div className="flex justify-center my-3.5 w-full px-2 select-none">
+        {systemMessage.type === 'MEMBER_REMOVED' ? (
+          <div className="max-w-md w-full bg-linear-to-b from-red-50/90 via-white to-red-50/40 dark:from-red-950/40 dark:via-neutral-900 dark:to-neutral-900 border border-red-200/90 dark:border-red-900/60 rounded-2xl p-3.5 shadow-xs space-y-2.5 text-center animate-in fade-in duration-200">
+            {/* Header Badge */}
+            <div className="flex items-center justify-center gap-2">
+              <div className="p-1 rounded-full bg-red-100 dark:bg-red-900/60 text-red-600 dark:text-red-400">
+                <UserMinus className="w-3.5 h-3.5" />
+              </div>
+              <span className="text-[11px] font-extrabold uppercase tracking-wider text-red-700 dark:text-red-300">
+                Member Removed From Group
+              </span>
+            </div>
+
+            {systemMessage.actorId && systemMessage.targetId ? (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-left pt-0.5">
+                {/* Admin who performed removal */}
+                <div className="p-2.5 rounded-xl bg-white dark:bg-neutral-800 border border-neutral-200/90 dark:border-neutral-700/80 shadow-2xs">
+                  <div className="text-[10px] font-extrabold text-neutral-400 dark:text-neutral-500 uppercase tracking-wider flex items-center gap-1">
+                    <ShieldCheck className="w-3 h-3 text-purple-500" />
+                    <span>Removed By (Admin)</span>
+                  </div>
+                  <p className="text-xs font-bold text-neutral-900 dark:text-neutral-100 truncate mt-0.5">
+                    {systemMessage.actorName}
+                  </p>
+                  <p className="text-[11px] text-neutral-500 dark:text-neutral-400 truncate font-mono">
+                    @{systemMessage.actorUsername}
+                  </p>
+                  <div className="mt-1.5 flex items-center justify-between gap-1 bg-neutral-100 dark:bg-neutral-700/60 px-2 py-1 rounded-lg">
+                    <span className="text-[9px] font-bold text-neutral-500 dark:text-neutral-400">ADMIN ID:</span>
+                    <span className="text-[10px] font-mono font-bold text-neutral-800 dark:text-neutral-200 truncate max-w-[120px]" title={systemMessage.actorId}>
+                      {systemMessage.actorId}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Member who was removed */}
+                <div className="p-2.5 rounded-xl bg-red-50/70 dark:bg-red-950/30 border border-red-200/80 dark:border-red-900/60 shadow-2xs">
+                  <div className="text-[10px] font-extrabold text-red-600 dark:text-red-400 uppercase tracking-wider flex items-center gap-1">
+                    <UserMinus className="w-3 h-3 text-red-500" />
+                    <span>Removed Member</span>
+                  </div>
+                  <p className="text-xs font-bold text-red-950 dark:text-red-200 truncate mt-0.5">
+                    {systemMessage.targetName}
+                  </p>
+                  <p className="text-[11px] text-red-700/80 dark:text-red-400/80 truncate font-mono">
+                    @{systemMessage.targetUsername}
+                  </p>
+                  <div className="mt-1.5 flex items-center justify-between gap-1 bg-red-100/90 dark:bg-red-900/50 px-2 py-1 rounded-lg">
+                    <span className="text-[9px] font-bold text-red-600 dark:text-red-400">USER ID:</span>
+                    <span className="text-[10px] font-mono font-bold text-red-900 dark:text-red-200 truncate max-w-[120px]" title={systemMessage.targetId}>
+                      {systemMessage.targetId}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <p className="text-xs font-medium text-neutral-700 dark:text-neutral-300">
+                {systemMessage.rawText}
+              </p>
+            )}
+
+            <div className="flex items-center justify-center gap-2 text-[10px] text-neutral-400 dark:text-neutral-500 pt-0.5">
+              <span>{formatTime(message.created_at)}</span>
+              {onDeleteMessage && (
+                <button
+                  onClick={() => onDeleteMessage(message.id)}
+                  title="Delete notification"
+                  className="hover:text-red-500 transition-colors p-0.5 rounded cursor-pointer"
+                >
+                  <Trash2 className="w-3 h-3" />
+                </button>
+              )}
+            </div>
+          </div>
+        ) : systemMessage.type === 'MEMBER_LEFT' ? (
+          <div className="max-w-sm w-full bg-neutral-50 dark:bg-neutral-900 border border-neutral-200/80 dark:border-neutral-800 rounded-2xl p-3 shadow-xs space-y-2 text-center animate-in fade-in duration-200">
+            <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-neutral-200/70 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300 text-[10px] font-bold">
+              <LogOut className="w-3 h-3 text-neutral-500" />
+              <span>Member Left Group</span>
+            </div>
+            <div className="p-2 rounded-xl bg-white dark:bg-neutral-800/80 border border-neutral-200/70 dark:border-neutral-700/60 text-left">
+              <p className="text-xs font-bold text-neutral-900 dark:text-neutral-100 truncate">
+                {systemMessage.targetName || 'Member'}
+              </p>
+              {systemMessage.targetUsername && (
+                <p className="text-[11px] text-neutral-500 dark:text-neutral-400 font-mono">
+                  @{systemMessage.targetUsername}
+                </p>
+              )}
+              {systemMessage.targetId && (
+                <div className="mt-1 flex items-center justify-between text-[10px] bg-neutral-100 dark:bg-neutral-700/50 px-2 py-0.5 rounded font-mono">
+                  <span className="text-neutral-400">USER ID:</span>
+                  <span className="text-neutral-700 dark:text-neutral-300 font-bold truncate max-w-[150px]">{systemMessage.targetId}</span>
+                </div>
+              )}
+            </div>
+            <div className="flex items-center justify-center gap-2 text-[10px] text-neutral-400 font-medium">
+              <span>{formatTime(message.created_at)}</span>
+              {onDeleteMessage && (
+                <button
+                  onClick={() => onDeleteMessage(message.id)}
+                  title="Delete message"
+                  className="hover:text-red-500 transition-colors p-0.5 rounded cursor-pointer"
+                >
+                  <Trash2 className="w-3 h-3" />
+                </button>
+              )}
+            </div>
+          </div>
+        ) : systemMessage.type === 'ROLE_CHANGED' ? (
+          <div className="max-w-md w-full bg-purple-50/50 dark:bg-purple-950/30 border border-purple-200/80 dark:border-purple-900/60 rounded-2xl p-3 shadow-xs space-y-2 text-center animate-in fade-in duration-200">
+            <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-purple-100 dark:bg-purple-900/60 text-purple-700 dark:text-purple-300 text-[10px] font-bold">
+              <ShieldCheck className="w-3 h-3 text-purple-600" />
+              <span>{systemMessage.newRole === 'admin' ? 'Promoted To Group Admin' : 'Dismissed From Group Admin'}</span>
+            </div>
+            {systemMessage.actorId && systemMessage.targetId ? (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-left pt-0.5">
+                <div className="p-2 rounded-xl bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700">
+                  <span className="text-[10px] font-bold text-neutral-400 uppercase">Updated By (Admin)</span>
+                  <p className="text-xs font-bold text-neutral-900 dark:text-neutral-100 truncate mt-0.5">{systemMessage.actorName}</p>
+                  <div className="mt-1 text-[9px] font-mono text-neutral-500 truncate">ID: {systemMessage.actorId}</div>
+                </div>
+                <div className="p-2 rounded-xl bg-purple-50 dark:bg-purple-900/30 border border-purple-200 dark:border-purple-800">
+                  <span className="text-[10px] font-bold text-purple-600 dark:text-purple-400 uppercase">Member</span>
+                  <p className="text-xs font-bold text-purple-950 dark:text-purple-100 truncate mt-0.5">{systemMessage.targetName}</p>
+                  <div className="mt-1 text-[9px] font-mono text-purple-700 dark:text-purple-300 truncate">ID: {systemMessage.targetId}</div>
+                </div>
+              </div>
+            ) : (
+              <p className="text-xs font-medium text-neutral-700 dark:text-neutral-300">{systemMessage.rawText}</p>
+            )}
+            <div className="flex items-center justify-center gap-2 text-[10px] text-neutral-400 font-medium">
+              <span>{formatTime(message.created_at)}</span>
+              {onDeleteMessage && (
+                <button
+                  onClick={() => onDeleteMessage(message.id)}
+                  title="Delete message"
+                  className="hover:text-red-500 transition-colors p-0.5 rounded cursor-pointer"
+                >
+                  <Trash2 className="w-3 h-3" />
+                </button>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="max-w-md w-full bg-blue-50/50 dark:bg-blue-950/30 border border-blue-200/80 dark:border-blue-900/60 rounded-2xl p-3 shadow-xs space-y-1.5 text-center animate-in fade-in duration-200">
+            <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-blue-100 dark:bg-blue-900/60 text-blue-700 dark:text-blue-300 text-[10px] font-bold">
+              <UserPlus className="w-3 h-3 text-blue-600" />
+              <span>Group Update</span>
+            </div>
+            <p className="text-xs font-medium text-neutral-800 dark:text-neutral-200 px-2">{systemMessage.rawText}</p>
+            {systemMessage.actorId && (
+              <p className="text-[10px] text-neutral-500 dark:text-neutral-400 font-mono">
+                Admin ID: {systemMessage.actorId}
+              </p>
+            )}
+            <div className="flex items-center justify-center gap-2 text-[10px] text-neutral-400 font-medium pt-0.5">
+              <span>{formatTime(message.created_at)}</span>
+              {onDeleteMessage && (
+                <button
+                  onClick={() => onDeleteMessage(message.id)}
+                  title="Delete message"
+                  className="hover:text-red-500 transition-colors p-0.5 rounded cursor-pointer"
+                >
+                  <Trash2 className="w-3 h-3" />
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // 3. Check if message is a STICKER: [STICKER:emojiOrIcon:label]
   const isSticker = message.content?.startsWith('[STICKER:') && message.content.endsWith(']');
   let stickerIcon = '';
   let stickerLabel = '';
