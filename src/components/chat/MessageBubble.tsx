@@ -539,6 +539,12 @@ const VoiceNotePlayer = ({
   );
 };
 
+export interface AddedMemberInfo {
+  id: string;
+  name: string;
+  username: string;
+}
+
 interface ParsedSystemMessage {
   type: 'MEMBER_REMOVED' | 'MEMBER_LEFT' | 'ROLE_CHANGED' | 'MEMBERS_ADDED' | 'GENERIC';
   actorId?: string;
@@ -548,6 +554,7 @@ interface ParsedSystemMessage {
   targetName?: string;
   targetUsername?: string;
   newRole?: 'admin' | 'member';
+  addedMembers?: AddedMemberInfo[];
   rawText: string;
 }
 
@@ -612,18 +619,36 @@ function parseSystemMessage(content: string | undefined): ParsedSystemMessage | 
     }
   }
 
-  // 4. Tagged format: [SYSTEM:MEMBERS_ADDED:actorId:actorName:actorUsername] text
+  // 4. Tagged format: [SYSTEM:MEMBERS_ADDED:actorId:actorName:actorUsername:encodedMembers] text
   if (content.startsWith('[SYSTEM:MEMBERS_ADDED:')) {
     const endTagIdx = content.indexOf(']');
     if (endTagIdx !== -1) {
       const tagContent = content.substring(22, endTagIdx);
       const parts = tagContent.split(':');
       const text = content.substring(endTagIdx + 1).trim();
+      const addedMembers: AddedMemberInfo[] = [];
+
+      // If parts[3] contains encoded member list (mId|mName|mUsername;mId2|mName2|mUsername2)
+      if (parts[3]) {
+        const rawMembers = parts[3].split(';');
+        rawMembers.forEach((item) => {
+          const mParts = item.split('|');
+          if (mParts[0]) {
+            addedMembers.push({
+              id: mParts[0],
+              name: mParts[1] || 'Member',
+              username: mParts[2] || 'user',
+            });
+          }
+        });
+      }
+
       return {
         type: 'MEMBERS_ADDED',
         actorId: parts[0] || '',
         actorName: parts[1] || 'Admin',
         actorUsername: parts[2] || 'admin',
+        addedMembers,
         rawText: text,
       };
     }
@@ -675,6 +700,7 @@ interface MessageBubbleProps {
   onReactMessage?: (messageId: string, emoji: string) => void;
   onPinMessage?: (message: Message) => void;
   isPinned?: boolean;
+  onOpenProfileView?: (profile: Profile) => void;
 }
 
 export const MessageBubble: React.FC<MessageBubbleProps> = ({
@@ -691,13 +717,178 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
   onReactMessage,
   onPinMessage,
   isPinned = false,
+  onOpenProfileView,
 }) => {
   const [showConfirm, setShowConfirm] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [copiedSystemId, setCopiedSystemId] = useState<string | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const longPressTimerRef = useRef<NodeJS.Timeout | null>(null);
   const touchStartPosRef = useRef<{ x: number; y: number } | null>(null);
+
+  const handleOpenUserProfile = async (
+    userId?: string,
+    fallbackMeta?: { name?: string; username?: string; avatar_url?: string }
+  ) => {
+    if (!userId || !onOpenProfileView) return;
+
+    if (otherUser && otherUser.id === userId) {
+      onOpenProfileView(otherUser);
+      return;
+    }
+
+    const cached = conversation?.members_meta?.[userId];
+    if (cached) {
+      onOpenProfileView({
+        id: userId,
+        display_name: cached.display_name || fallbackMeta?.name || 'User',
+        username: cached.username || fallbackMeta?.username || 'user',
+        avatar_url: cached.avatar_url || fallbackMeta?.avatar_url || null,
+        bio: cached.bio || 'Hey there! I am using LiveConnect.',
+        is_online: false,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        ...cached,
+      });
+      return;
+    }
+
+    try {
+      const res = await fetch(`/api/users/profile/${encodeURIComponent(userId)}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.profile) {
+          onOpenProfileView(data.profile);
+          return;
+        }
+      }
+    } catch (e) {}
+
+    onOpenProfileView({
+      id: userId,
+      display_name: fallbackMeta?.name || 'User',
+      username: fallbackMeta?.username || 'user',
+      avatar_url: fallbackMeta?.avatar_url || null,
+      bio: 'Hey there! I am using LiveConnect.',
+      is_online: false,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+  };
+
+  const renderSystemUserCard = ({
+    title,
+    roleIcon,
+    name,
+    username,
+    userId,
+    theme = 'neutral',
+  }: {
+    title: string;
+    roleIcon: React.ReactNode;
+    name?: string;
+    username?: string;
+    userId?: string;
+    theme?: 'red' | 'purple' | 'emerald' | 'blue' | 'neutral';
+  }) => {
+    const isCopied = copiedSystemId === userId;
+
+    const themeBorder = {
+      red: 'border-red-200/90 dark:border-red-900/60 bg-white/95 dark:bg-neutral-850 hover:border-red-400 dark:hover:border-red-700',
+      purple: 'border-purple-200/90 dark:border-purple-900/60 bg-white/95 dark:bg-neutral-850 hover:border-purple-400 dark:hover:border-purple-700',
+      emerald: 'border-emerald-200/90 dark:border-emerald-900/60 bg-white/95 dark:bg-neutral-850 hover:border-emerald-400 dark:hover:border-emerald-700',
+      blue: 'border-blue-200/90 dark:border-blue-900/60 bg-white/95 dark:bg-neutral-850 hover:border-blue-400 dark:hover:border-blue-700',
+      neutral: 'border-neutral-200/90 dark:border-neutral-700/80 bg-white/95 dark:bg-neutral-850 hover:border-blue-400 dark:hover:border-blue-600',
+    }[theme];
+
+    const titleColor = {
+      red: 'text-red-600 dark:text-red-400',
+      purple: 'text-purple-600 dark:text-purple-400',
+      emerald: 'text-emerald-600 dark:text-emerald-400',
+      blue: 'text-blue-600 dark:text-blue-400',
+      neutral: 'text-neutral-500 dark:text-neutral-400',
+    }[theme];
+
+    const idBoxBg = {
+      red: 'bg-red-50/90 dark:bg-red-950/40 text-red-900 dark:text-red-200 border-red-200/60 dark:border-red-900/40',
+      purple: 'bg-purple-50/90 dark:bg-purple-950/40 text-purple-900 dark:text-purple-200 border-purple-200/60 dark:border-purple-900/40',
+      emerald: 'bg-emerald-50/90 dark:bg-emerald-950/40 text-emerald-900 dark:text-emerald-200 border-emerald-200/60 dark:border-emerald-900/40',
+      blue: 'bg-blue-50/90 dark:bg-blue-950/40 text-blue-900 dark:text-blue-200 border-blue-200/60 dark:border-blue-900/40',
+      neutral: 'bg-neutral-100 dark:bg-neutral-750 text-neutral-800 dark:text-neutral-200 border-neutral-200/60 dark:border-neutral-700/40',
+    }[theme];
+
+    return (
+      <div
+        onClick={() => handleOpenUserProfile(userId, { name, username })}
+        className={cn(
+          'p-3 rounded-2xl border transition-all cursor-pointer select-none text-left shadow-2xs group/card relative',
+          'active:scale-[0.98] hover:shadow-md backdrop-blur-xs',
+          themeBorder
+        )}
+        title="Click to view full profile"
+      >
+        <div className="flex items-center justify-between gap-1 mb-1.5">
+          <div className={cn('text-[10px] font-extrabold uppercase tracking-wider flex items-center gap-1.5 truncate', titleColor)}>
+            {roleIcon}
+            <span className="truncate">{title}</span>
+          </div>
+          <span className="text-[9px] font-bold text-neutral-400 group-hover/card:text-blue-600 dark:group-hover/card:text-blue-400 flex items-center gap-0.5 shrink-0 transition-colors">
+            <span>Profile</span>
+            <span>→</span>
+          </span>
+        </div>
+
+        <div className="flex items-center gap-2.5">
+          <UserAvatar
+            name={name || 'User'}
+            id={userId}
+            className="w-8 h-8 text-xs shrink-0 shadow-2xs ring-1 ring-black/5 dark:ring-white/10"
+          />
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-bold text-neutral-900 dark:text-neutral-100 truncate group-hover/card:text-blue-600 dark:group-hover/card:text-blue-400 transition-colors">
+              {name || 'Member'}
+            </p>
+            {username && (
+              <p className="text-[11px] text-neutral-500 dark:text-neutral-400 font-mono truncate">
+                @{username}
+              </p>
+            )}
+          </div>
+        </div>
+
+        {userId && (
+          <div className={cn('mt-2 flex items-center justify-between gap-1.5 px-2.5 py-1 rounded-xl text-[10px] font-mono border', idBoxBg)}>
+            <div className="flex items-center gap-1 min-w-0 truncate">
+              <span className="font-extrabold text-[9px] opacity-75 shrink-0">ID:</span>
+              <span className="font-bold truncate select-all" title={userId}>
+                {userId}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                try {
+                  navigator?.clipboard?.writeText(userId);
+                  setCopiedSystemId(userId);
+                  setTimeout(() => setCopiedSystemId(null), 2000);
+                } catch (err) {}
+              }}
+              className="p-1 hover:bg-black/10 dark:hover:bg-white/10 rounded-md transition-colors shrink-0 cursor-pointer"
+              title="Copy ID"
+            >
+              {isCopied ? (
+                <Check className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+              ) : (
+                <Copy className="w-3.5 h-3.5 opacity-70 group-hover/card:opacity-100" />
+              )}
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  };
 
   // Close menu when clicking outside
   useEffect(() => {
@@ -989,72 +1180,49 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
     );
   }
 
-  // 2. Check if this is a SYSTEM NOTIFICATION message (Member removed, member left, role change, etc.)
+  // 2. Check if this is a SYSTEM NOTIFICATION message (Member removed, member left, role change, member added, etc.)
   const systemMessage = parseSystemMessage(message.content);
   if (systemMessage) {
     return (
-      <div className="flex justify-center my-3.5 w-full px-2 select-none">
+      <div className="flex justify-center items-center my-3.5 w-full px-2 select-none">
         {systemMessage.type === 'MEMBER_REMOVED' ? (
-          <div className="max-w-md w-full bg-linear-to-b from-red-50/90 via-white to-red-50/40 dark:from-red-950/40 dark:via-neutral-900 dark:to-neutral-900 border border-red-200/90 dark:border-red-900/60 rounded-2xl p-3.5 shadow-xs space-y-2.5 text-center animate-in fade-in duration-200">
-            {/* Header Badge */}
+          <div className="max-w-md w-full mx-auto bg-gradient-to-b from-red-50/90 via-white to-red-50/40 dark:from-red-950/40 dark:via-neutral-900 dark:to-neutral-900 border border-red-200/90 dark:border-red-900/60 rounded-3xl p-4 shadow-sm space-y-3 text-center animate-in fade-in duration-200">
+            {/* Centered Header Badge */}
             <div className="flex items-center justify-center gap-2">
-              <div className="p-1 rounded-full bg-red-100 dark:bg-red-900/60 text-red-600 dark:text-red-400">
-                <UserMinus className="w-3.5 h-3.5" />
+              <div className="p-1.5 rounded-full bg-red-100 dark:bg-red-900/60 text-red-600 dark:text-red-400 shadow-2xs">
+                <UserMinus className="w-4 h-4" />
               </div>
-              <span className="text-[11px] font-extrabold uppercase tracking-wider text-red-700 dark:text-red-300">
+              <span className="text-xs font-black uppercase tracking-wider text-red-700 dark:text-red-300">
                 Member Removed From Group
               </span>
             </div>
 
             {systemMessage.actorId && systemMessage.targetId ? (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-left pt-0.5">
-                {/* Admin who performed removal */}
-                <div className="p-2.5 rounded-xl bg-white dark:bg-neutral-800 border border-neutral-200/90 dark:border-neutral-700/80 shadow-2xs">
-                  <div className="text-[10px] font-extrabold text-neutral-400 dark:text-neutral-500 uppercase tracking-wider flex items-center gap-1">
-                    <ShieldCheck className="w-3 h-3 text-purple-500" />
-                    <span>Removed By (Admin)</span>
-                  </div>
-                  <p className="text-xs font-bold text-neutral-900 dark:text-neutral-100 truncate mt-0.5">
-                    {systemMessage.actorName}
-                  </p>
-                  <p className="text-[11px] text-neutral-500 dark:text-neutral-400 truncate font-mono">
-                    @{systemMessage.actorUsername}
-                  </p>
-                  <div className="mt-1.5 flex items-center justify-between gap-1 bg-neutral-100 dark:bg-neutral-700/60 px-2 py-1 rounded-lg">
-                    <span className="text-[9px] font-bold text-neutral-500 dark:text-neutral-400">ADMIN ID:</span>
-                    <span className="text-[10px] font-mono font-bold text-neutral-800 dark:text-neutral-200 truncate max-w-[120px]" title={systemMessage.actorId}>
-                      {systemMessage.actorId}
-                    </span>
-                  </div>
-                </div>
-
-                {/* Member who was removed */}
-                <div className="p-2.5 rounded-xl bg-red-50/70 dark:bg-red-950/30 border border-red-200/80 dark:border-red-900/60 shadow-2xs">
-                  <div className="text-[10px] font-extrabold text-red-600 dark:text-red-400 uppercase tracking-wider flex items-center gap-1">
-                    <UserMinus className="w-3 h-3 text-red-500" />
-                    <span>Removed Member</span>
-                  </div>
-                  <p className="text-xs font-bold text-red-950 dark:text-red-200 truncate mt-0.5">
-                    {systemMessage.targetName}
-                  </p>
-                  <p className="text-[11px] text-red-700/80 dark:text-red-400/80 truncate font-mono">
-                    @{systemMessage.targetUsername}
-                  </p>
-                  <div className="mt-1.5 flex items-center justify-between gap-1 bg-red-100/90 dark:bg-red-900/50 px-2 py-1 rounded-lg">
-                    <span className="text-[9px] font-bold text-red-600 dark:text-red-400">USER ID:</span>
-                    <span className="text-[10px] font-mono font-bold text-red-900 dark:text-red-200 truncate max-w-[120px]" title={systemMessage.targetId}>
-                      {systemMessage.targetId}
-                    </span>
-                  </div>
-                </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-0.5">
+                {renderSystemUserCard({
+                  title: 'Removed By (Admin)',
+                  roleIcon: <ShieldCheck className="w-3.5 h-3.5 text-purple-600 dark:text-purple-400" />,
+                  name: systemMessage.actorName,
+                  username: systemMessage.actorUsername,
+                  userId: systemMessage.actorId,
+                  theme: 'purple',
+                })}
+                {renderSystemUserCard({
+                  title: 'Removed Member',
+                  roleIcon: <UserMinus className="w-3.5 h-3.5 text-red-600 dark:text-red-400" />,
+                  name: systemMessage.targetName,
+                  username: systemMessage.targetUsername,
+                  userId: systemMessage.targetId,
+                  theme: 'red',
+                })}
               </div>
             ) : (
-              <p className="text-xs font-medium text-neutral-700 dark:text-neutral-300">
+              <p className="text-xs font-medium text-neutral-700 dark:text-neutral-300 px-2">
                 {systemMessage.rawText}
               </p>
             )}
 
-            <div className="flex items-center justify-center gap-2 text-[10px] text-neutral-400 dark:text-neutral-500 pt-0.5">
+            <div className="flex items-center justify-center gap-2 text-[10px] text-neutral-400 dark:text-neutral-500 pt-0.5 border-t border-red-100 dark:border-red-950/60">
               <span>{formatTime(message.created_at)}</span>
               {onDeleteMessage && (
                 <button
@@ -1068,33 +1236,100 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
             </div>
           </div>
         ) : systemMessage.type === 'MEMBER_LEFT' ? (
-          <div className="max-w-sm w-full bg-neutral-50 dark:bg-neutral-900 border border-neutral-200/80 dark:border-neutral-800 rounded-2xl p-3 shadow-xs space-y-2 text-center animate-in fade-in duration-200">
-            <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-neutral-200/70 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300 text-[10px] font-bold">
-              <LogOut className="w-3 h-3 text-neutral-500" />
-              <span>Member Left Group</span>
+          <div className="max-w-sm w-full mx-auto bg-gradient-to-b from-neutral-50 via-white to-neutral-50 dark:from-neutral-900 dark:via-neutral-900 dark:to-neutral-900 border border-neutral-200/90 dark:border-neutral-800 rounded-3xl p-4 shadow-sm space-y-3 text-center animate-in fade-in duration-200">
+            {/* Centered Header Badge */}
+            <div className="flex items-center justify-center gap-2">
+              <div className="p-1.5 rounded-full bg-neutral-200/80 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300 shadow-2xs">
+                <LogOut className="w-4 h-4" />
+              </div>
+              <span className="text-xs font-black uppercase tracking-wider text-neutral-700 dark:text-neutral-300">
+                Member Left Group
+              </span>
             </div>
-            <div className="p-2 rounded-xl bg-white dark:bg-neutral-800/80 border border-neutral-200/70 dark:border-neutral-700/60 text-left">
-              <p className="text-xs font-bold text-neutral-900 dark:text-neutral-100 truncate">
-                {systemMessage.targetName || 'Member'}
-              </p>
-              {systemMessage.targetUsername && (
-                <p className="text-[11px] text-neutral-500 dark:text-neutral-400 font-mono">
-                  @{systemMessage.targetUsername}
-                </p>
-              )}
-              {systemMessage.targetId && (
-                <div className="mt-1 flex items-center justify-between text-[10px] bg-neutral-100 dark:bg-neutral-700/50 px-2 py-0.5 rounded font-mono">
-                  <span className="text-neutral-400">USER ID:</span>
-                  <span className="text-neutral-700 dark:text-neutral-300 font-bold truncate max-w-[150px]">{systemMessage.targetId}</span>
-                </div>
-              )}
+
+            <div className="pt-0.5">
+              {renderSystemUserCard({
+                title: 'Member Left',
+                roleIcon: <LogOut className="w-3.5 h-3.5 text-neutral-500" />,
+                name: systemMessage.targetName,
+                username: systemMessage.targetUsername,
+                userId: systemMessage.targetId,
+                theme: 'neutral',
+              })}
             </div>
-            <div className="flex items-center justify-center gap-2 text-[10px] text-neutral-400 font-medium">
+
+            <div className="flex items-center justify-center gap-2 text-[10px] text-neutral-400 dark:text-neutral-500 pt-0.5 border-t border-neutral-100 dark:border-neutral-800">
               <span>{formatTime(message.created_at)}</span>
               {onDeleteMessage && (
                 <button
                   onClick={() => onDeleteMessage(message.id)}
-                  title="Delete message"
+                  title="Delete notification"
+                  className="hover:text-red-500 transition-colors p-0.5 rounded cursor-pointer"
+                >
+                  <Trash2 className="w-3 h-3" />
+                </button>
+              )}
+            </div>
+          </div>
+        ) : systemMessage.type === 'MEMBERS_ADDED' ? (
+          <div className="max-w-md w-full mx-auto bg-gradient-to-b from-emerald-50/80 via-white to-emerald-50/30 dark:from-emerald-950/40 dark:via-neutral-900 dark:to-neutral-900 border border-emerald-200/90 dark:border-emerald-900/60 rounded-3xl p-4 shadow-sm space-y-3 text-center animate-in fade-in duration-200">
+            {/* Centered Header Badge */}
+            <div className="flex items-center justify-center gap-2">
+              <div className="p-1.5 rounded-full bg-emerald-100 dark:bg-emerald-900/60 text-emerald-600 dark:text-emerald-400 shadow-2xs">
+                <UserPlus className="w-4 h-4" />
+              </div>
+              <span className="text-xs font-black uppercase tracking-wider text-emerald-700 dark:text-emerald-300">
+                Member(s) Added To Group
+              </span>
+            </div>
+
+            <div className="space-y-2 pt-0.5">
+              {/* Admin Card */}
+              {systemMessage.actorId && (
+                <div>
+                  {renderSystemUserCard({
+                    title: 'Added By (Admin)',
+                    roleIcon: <ShieldCheck className="w-3.5 h-3.5 text-purple-600 dark:text-purple-400" />,
+                    name: systemMessage.actorName,
+                    username: systemMessage.actorUsername,
+                    userId: systemMessage.actorId,
+                    theme: 'purple',
+                  })}
+                </div>
+              )}
+
+              {/* Added Members Cards */}
+              {systemMessage.addedMembers && systemMessage.addedMembers.length > 0 ? (
+                <div className={cn(
+                  'grid gap-2.5',
+                  systemMessage.addedMembers.length > 1 ? 'grid-cols-1 sm:grid-cols-2' : 'grid-cols-1'
+                )}>
+                  {systemMessage.addedMembers.map((m) => (
+                    <React.Fragment key={m.id}>
+                      {renderSystemUserCard({
+                        title: 'New Member',
+                        roleIcon: <UserPlus className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />,
+                        name: m.name,
+                        username: m.username,
+                        userId: m.id,
+                        theme: 'emerald',
+                      })}
+                    </React.Fragment>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs font-medium text-neutral-700 dark:text-neutral-300 px-2">
+                  {systemMessage.rawText}
+                </p>
+              )}
+            </div>
+
+            <div className="flex items-center justify-center gap-2 text-[10px] text-neutral-400 dark:text-neutral-500 pt-0.5 border-t border-emerald-100 dark:border-emerald-950/60">
+              <span>{formatTime(message.created_at)}</span>
+              {onDeleteMessage && (
+                <button
+                  onClick={() => onDeleteMessage(message.id)}
+                  title="Delete notification"
                   className="hover:text-red-500 transition-colors p-0.5 rounded cursor-pointer"
                 >
                   <Trash2 className="w-3 h-3" />
@@ -1103,28 +1338,43 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
             </div>
           </div>
         ) : systemMessage.type === 'ROLE_CHANGED' ? (
-          <div className="max-w-md w-full bg-purple-50/50 dark:bg-purple-950/30 border border-purple-200/80 dark:border-purple-900/60 rounded-2xl p-3 shadow-xs space-y-2 text-center animate-in fade-in duration-200">
-            <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-purple-100 dark:bg-purple-900/60 text-purple-700 dark:text-purple-300 text-[10px] font-bold">
-              <ShieldCheck className="w-3 h-3 text-purple-600" />
-              <span>{systemMessage.newRole === 'admin' ? 'Promoted To Group Admin' : 'Dismissed From Group Admin'}</span>
+          <div className="max-w-md w-full mx-auto bg-gradient-to-b from-purple-50/80 via-white to-purple-50/30 dark:from-purple-950/40 dark:via-neutral-900 dark:to-neutral-900 border border-purple-200/90 dark:border-purple-900/60 rounded-3xl p-4 shadow-sm space-y-3 text-center animate-in fade-in duration-200">
+            {/* Centered Header Badge */}
+            <div className="flex items-center justify-center gap-2">
+              <div className="p-1.5 rounded-full bg-purple-100 dark:bg-purple-900/60 text-purple-600 dark:text-purple-400 shadow-2xs">
+                <ShieldCheck className="w-4 h-4" />
+              </div>
+              <span className="text-xs font-black uppercase tracking-wider text-purple-700 dark:text-purple-300">
+                {systemMessage.newRole === 'admin' ? 'Promoted To Group Admin' : 'Dismissed From Group Admin'}
+              </span>
             </div>
+
             {systemMessage.actorId && systemMessage.targetId ? (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-left pt-0.5">
-                <div className="p-2 rounded-xl bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700">
-                  <span className="text-[10px] font-bold text-neutral-400 uppercase">Updated By (Admin)</span>
-                  <p className="text-xs font-bold text-neutral-900 dark:text-neutral-100 truncate mt-0.5">{systemMessage.actorName}</p>
-                  <div className="mt-1 text-[9px] font-mono text-neutral-500 truncate">ID: {systemMessage.actorId}</div>
-                </div>
-                <div className="p-2 rounded-xl bg-purple-50 dark:bg-purple-900/30 border border-purple-200 dark:border-purple-800">
-                  <span className="text-[10px] font-bold text-purple-600 dark:text-purple-400 uppercase">Member</span>
-                  <p className="text-xs font-bold text-purple-950 dark:text-purple-100 truncate mt-0.5">{systemMessage.targetName}</p>
-                  <div className="mt-1 text-[9px] font-mono text-purple-700 dark:text-purple-300 truncate">ID: {systemMessage.targetId}</div>
-                </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-0.5">
+                {renderSystemUserCard({
+                  title: 'Updated By (Admin)',
+                  roleIcon: <ShieldCheck className="w-3.5 h-3.5 text-purple-600 dark:text-purple-400" />,
+                  name: systemMessage.actorName,
+                  username: systemMessage.actorUsername,
+                  userId: systemMessage.actorId,
+                  theme: 'purple',
+                })}
+                {renderSystemUserCard({
+                  title: systemMessage.newRole === 'admin' ? 'New Group Admin' : 'Member',
+                  roleIcon: <ShieldCheck className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />,
+                  name: systemMessage.targetName,
+                  username: systemMessage.targetUsername,
+                  userId: systemMessage.targetId,
+                  theme: 'blue',
+                })}
               </div>
             ) : (
-              <p className="text-xs font-medium text-neutral-700 dark:text-neutral-300">{systemMessage.rawText}</p>
+              <p className="text-xs font-medium text-neutral-700 dark:text-neutral-300 px-2">
+                {systemMessage.rawText}
+              </p>
             )}
-            <div className="flex items-center justify-center gap-2 text-[10px] text-neutral-400 font-medium">
+
+            <div className="flex items-center justify-center gap-2 text-[10px] text-neutral-400 dark:text-neutral-500 pt-0.5 border-t border-purple-100 dark:border-purple-950/60">
               <span>{formatTime(message.created_at)}</span>
               {onDeleteMessage && (
                 <button
@@ -1138,18 +1388,25 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
             </div>
           </div>
         ) : (
-          <div className="max-w-md w-full bg-blue-50/50 dark:bg-blue-950/30 border border-blue-200/80 dark:border-blue-900/60 rounded-2xl p-3 shadow-xs space-y-1.5 text-center animate-in fade-in duration-200">
-            <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-blue-100 dark:bg-blue-900/60 text-blue-700 dark:text-blue-300 text-[10px] font-bold">
-              <UserPlus className="w-3 h-3 text-blue-600" />
+          <div className="max-w-md w-full mx-auto bg-gradient-to-b from-blue-50/70 via-white to-blue-50/20 dark:from-blue-950/30 dark:via-neutral-900 dark:to-neutral-900 border border-blue-200/80 dark:border-blue-900/60 rounded-3xl p-4 shadow-sm space-y-2 text-center animate-in fade-in duration-200">
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-blue-100 dark:bg-blue-900/60 text-blue-700 dark:text-blue-300 text-xs font-bold">
+              <UserPlus className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
               <span>Group Update</span>
             </div>
-            <p className="text-xs font-medium text-neutral-800 dark:text-neutral-200 px-2">{systemMessage.rawText}</p>
+            <p className="text-xs font-medium text-neutral-800 dark:text-neutral-200 px-2 leading-relaxed">{systemMessage.rawText}</p>
             {systemMessage.actorId && (
-              <p className="text-[10px] text-neutral-500 dark:text-neutral-400 font-mono">
-                Admin ID: {systemMessage.actorId}
-              </p>
+              <div className="pt-1 max-w-xs mx-auto">
+                {renderSystemUserCard({
+                  title: 'Admin ID',
+                  roleIcon: <ShieldCheck className="w-3.5 h-3.5 text-purple-600" />,
+                  name: systemMessage.actorName || 'Admin',
+                  username: systemMessage.actorUsername || 'admin',
+                  userId: systemMessage.actorId,
+                  theme: 'neutral',
+                })}
+              </div>
             )}
-            <div className="flex items-center justify-center gap-2 text-[10px] text-neutral-400 font-medium pt-0.5">
+            <div className="flex items-center justify-center gap-2 text-[10px] text-neutral-400 font-medium pt-1 border-t border-blue-100 dark:border-blue-950/60">
               <span>{formatTime(message.created_at)}</span>
               {onDeleteMessage && (
                 <button

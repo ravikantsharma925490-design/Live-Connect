@@ -282,6 +282,61 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     }, 2000);
   };
 
+  const handleOpenUserProfile = async (
+    userId?: string,
+    fallbackMeta?: { name?: string; username?: string; avatar_url?: string }
+  ) => {
+    if (!userId || !onOpenProfileView) return;
+
+    if (currentUser && currentUser.id === userId) {
+      onOpenProfileView(currentUser);
+      return;
+    }
+
+    if (otherUser && otherUser.id === userId) {
+      onOpenProfileView(otherUser);
+      return;
+    }
+
+    const cached = conversation?.members_meta?.[userId];
+    if (cached) {
+      onOpenProfileView({
+        id: userId,
+        display_name: cached.display_name || fallbackMeta?.name || 'User',
+        username: cached.username || fallbackMeta?.username || 'user',
+        avatar_url: cached.avatar_url || fallbackMeta?.avatar_url || null,
+        bio: cached.bio || 'Hey there! I am using LiveConnect.',
+        is_online: false,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        ...cached,
+      });
+      return;
+    }
+
+    try {
+      const res = await fetch(`/api/users/profile/${encodeURIComponent(userId)}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.profile) {
+          onOpenProfileView(data.profile);
+          return;
+        }
+      }
+    } catch (e) {}
+
+    onOpenProfileView({
+      id: userId,
+      display_name: fallbackMeta?.name || 'User',
+      username: fallbackMeta?.username || 'user',
+      avatar_url: fallbackMeta?.avatar_url || null,
+      bio: 'Hey there! I am using LiveConnect.',
+      is_online: false,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+  };
+
   const currentConvIdRef = useRef<string | null>(null);
 
   // Direct Live Relation Check from backend (only for direct 1-on-1 chats)
@@ -765,11 +820,13 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                       onStartCall={onStartCall}
                       onViewImage={(url, caption) => setViewingImage({ url, caption })}
                       otherUser={otherUser}
+                      conversation={conversation}
                       onReplyMessage={(msgToReply) => setReplyingToMessage(msgToReply)}
                       onPinMessage={(msgToPin) =>
                         setPinnedMessage((prev) => (prev?.id === msgToPin.id ? null : msgToPin))
                       }
                       isPinned={pinnedMessage?.id === msg.id}
+                      onOpenProfileView={onOpenProfileView}
                     />
                   </React.Fragment>
                 );
@@ -827,14 +884,21 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             {/* Admin and Member ID display cards */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-left">
               {/* Admin Who Removed Card */}
-              <div className="p-3 rounded-xl bg-white dark:bg-neutral-850 border border-neutral-200 dark:border-neutral-800 shadow-2xs">
+              <div
+                onClick={() => handleOpenUserProfile(removalDetails?.adminId, { name: removalDetails?.adminName, username: removalDetails?.adminUsername })}
+                className="p-3 rounded-xl bg-white dark:bg-neutral-850 border border-neutral-200 dark:border-neutral-800 shadow-2xs hover:border-purple-400 dark:hover:border-purple-600 transition-all cursor-pointer select-none group/admin"
+                title="Click to view Admin profile"
+              >
                 <div className="flex items-center justify-between text-[10px] font-extrabold uppercase tracking-wider text-purple-700 dark:text-purple-400 mb-1">
                   <span className="flex items-center gap-1.5">
                     <ShieldCheck className="w-3.5 h-3.5 text-purple-600 dark:text-purple-400" />
                     Removed By (Admin)
                   </span>
+                  <span className="text-[9px] font-semibold text-neutral-400 group-hover/admin:text-purple-600 dark:group-hover/admin:text-purple-400 transition-colors">
+                    Profile →
+                  </span>
                 </div>
-                <p className="text-xs font-bold text-neutral-900 dark:text-neutral-100 truncate">
+                <p className="text-xs font-bold text-neutral-900 dark:text-neutral-100 truncate group-hover/admin:text-purple-600 dark:group-hover/admin:text-purple-400 transition-colors">
                   {removalDetails?.adminName || 'Group Admin'}
                 </p>
                 <p className="text-[11px] text-neutral-500 dark:text-neutral-400 font-mono truncate">
@@ -847,7 +911,10 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                   </span>
                   <button
                     type="button"
-                    onClick={() => handleCopyId(removalDetails?.adminId || '', 'admin')}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleCopyId(removalDetails?.adminId || '', 'admin');
+                    }}
                     className="p-1 hover:bg-neutral-200 dark:hover:bg-neutral-700 rounded text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-100 transition-colors shrink-0 cursor-pointer"
                     title="Copy Admin ID"
                   >
@@ -861,14 +928,21 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
               </div>
 
               {/* Removed Member (You) Card */}
-              <div className="p-3 rounded-xl bg-red-50/70 dark:bg-red-950/30 border border-red-200/80 dark:border-red-900/60 shadow-2xs">
+              <div
+                onClick={() => handleOpenUserProfile(removalDetails?.memberId || currentUser?.id, { name: removalDetails?.memberName, username: removalDetails?.memberUsername })}
+                className="p-3 rounded-xl bg-red-50/70 dark:bg-red-950/30 border border-red-200/80 dark:border-red-900/60 shadow-2xs hover:border-red-400 dark:hover:border-red-600 transition-all cursor-pointer select-none group/member"
+                title="Click to view Member profile"
+              >
                 <div className="flex items-center justify-between text-[10px] font-extrabold uppercase tracking-wider text-red-600 dark:text-red-400 mb-1">
                   <span className="flex items-center gap-1.5">
                     <UserMinus className="w-3.5 h-3.5 text-red-600 dark:text-red-400" />
                     Removed Member (You)
                   </span>
+                  <span className="text-[9px] font-semibold text-neutral-400 group-hover/member:text-red-600 dark:group-hover/member:text-red-400 transition-colors">
+                    Profile →
+                  </span>
                 </div>
-                <p className="text-xs font-bold text-red-950 dark:text-red-200 truncate">
+                <p className="text-xs font-bold text-red-950 dark:text-red-200 truncate group-hover/member:text-red-600 dark:group-hover/member:text-red-400 transition-colors">
                   {removalDetails?.memberName || currentUser?.display_name || 'You'}
                 </p>
                 <p className="text-[11px] text-red-700/80 dark:text-red-400/80 font-mono truncate">
@@ -881,7 +955,10 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                   </span>
                   <button
                     type="button"
-                    onClick={() => handleCopyId(removalDetails?.memberId || currentUser?.id || '', 'member')}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleCopyId(removalDetails?.memberId || currentUser?.id || '', 'member');
+                    }}
                     className="p-1 hover:bg-red-200 dark:hover:bg-red-800 rounded text-red-700 dark:text-red-300 transition-colors shrink-0 cursor-pointer"
                     title="Copy Member ID"
                   >

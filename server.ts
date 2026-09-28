@@ -3299,6 +3299,46 @@ app.post('/api/users/search', async (req, res) => {
   }
 });
 
+// Get user profile by ID
+app.get('/api/users/profile/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (!userId) {
+      return res.status(400).json({ error: 'userId is required' });
+    }
+
+    let profile = serverProfilesStore.get(userId);
+
+    if (!profile && serverSupabase) {
+      try {
+        const { data } = await serverSupabase.from('profiles').select('*').eq('id', userId).maybeSingle();
+        if (data) {
+          profile = data;
+          serverProfilesStore.set(userId, data);
+        }
+      } catch (e) {}
+    }
+
+    if (!profile) {
+      for (const [, conv] of serverConversationsStore) {
+        if (conv.members_meta?.[userId]) {
+          profile = conv.members_meta[userId];
+          serverProfilesStore.set(userId, profile);
+          break;
+        }
+      }
+    }
+
+    if (!profile) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    return res.json({ profile });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to fetch user profile' });
+  }
+});
+
 // 3. Create Group Conversation
 app.post('/api/groups/create', async (req, res) => {
   try {
@@ -3327,11 +3367,27 @@ app.post('/api/groups/create', async (req, res) => {
       }
     });
 
+    const creatorDisplayName = creatorProfile?.display_name || creatorProfile?.username || 'Admin';
+    const creatorUsername = creatorProfile?.username || 'admin';
+    const otherMemberIds = allMembers.filter((id) => id !== creatorId);
+
+    let createSysMsgContent = `Group "${name}" was created`;
+    if (otherMemberIds.length > 0) {
+      const addedMembersList = otherMemberIds.map((mId) => {
+        const meta = membersMeta[mId] || serverProfilesStore.get(mId);
+        const dName = (meta?.display_name || meta?.username || 'Member').replace(/[:|;]/g, ' ');
+        const uName = (meta?.username || 'user').replace(/[:|;]/g, ' ');
+        return `${mId}|${dName}|${uName}`;
+      });
+      const membersEncoded = addedMembersList.join(';');
+      createSysMsgContent = `[SYSTEM:MEMBERS_ADDED:${creatorId}:${creatorDisplayName}:${creatorUsername}:${membersEncoded}] 🛡️ Admin ${creatorDisplayName} (@${creatorUsername} • ID: ${creatorId.slice(0, 8)}) created group "${name}" and added ${otherMemberIds.length} member(s)`;
+    }
+
     const sysMsg: ServerMessage = {
       id: generateUUID(),
       conversation_id: groupId,
       sender_id: creatorId,
-      content: `Group "${name}" was created`,
+      content: createSysMsgContent,
       created_at: nowIso,
       updated_at: nowIso,
       is_read: true,
@@ -3587,7 +3643,16 @@ app.post('/api/groups/members/add', async (req, res) => {
       const actorDisplayName = actorProfile?.display_name || actorProfile?.username || 'Admin';
       const actorUsername = actorProfile?.username || 'admin';
       const namesJoined = addedNamesList.length > 0 ? addedNamesList.join(', ') : `${newAdded.length} new member(s)`;
-      const sysMsgContent = `[SYSTEM:MEMBERS_ADDED:${userId}:${actorDisplayName}:${actorUsername}] 🛡️ Admin ${actorDisplayName} (@${actorUsername} • ID: ${userId}) added ${namesJoined} to the group`;
+
+      const addedMembersList = newAdded.map((mId) => {
+        const meta = group.members_meta?.[mId] || serverProfilesStore.get(mId);
+        const dName = (meta?.display_name || meta?.username || 'Member').replace(/[:|;]/g, ' ');
+        const uName = (meta?.username || 'user').replace(/[:|;]/g, ' ');
+        return `${mId}|${dName}|${uName}`;
+      });
+      const membersEncoded = addedMembersList.join(';');
+
+      const sysMsgContent = `[SYSTEM:MEMBERS_ADDED:${userId}:${actorDisplayName}:${actorUsername}:${membersEncoded}] 🛡️ Admin ${actorDisplayName} (@${actorUsername} • ID: ${userId.slice(0, 8)}) added ${namesJoined} to the group`;
 
       const sysMsg: ServerMessage = {
         id: generateUUID(),
