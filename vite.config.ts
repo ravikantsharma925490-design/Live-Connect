@@ -3,7 +3,7 @@ import react from '@vitejs/plugin-react';
 import path from 'path';
 import fs from 'fs';
 import { spawn } from 'child_process';
-import { defineConfig, Plugin } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
 import { createClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
 

@@ -1198,15 +1198,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
             </div>
 
             {systemMessage.actorId && systemMessage.targetId ? (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-0.5">
-                {renderSystemUserCard({
-                  title: 'Removed By (Admin)',
-                  roleIcon: <ShieldCheck className="w-3.5 h-3.5 text-purple-600 dark:text-purple-400" />,
-                  name: systemMessage.actorName,
-                  username: systemMessage.actorUsername,
-                  userId: systemMessage.actorId,
-                  theme: 'purple',
-                })}
+              <div className="flex flex-col items-center justify-center gap-2 max-w-xs mx-auto w-full pt-0.5">
                 {renderSystemUserCard({
                   title: 'Removed Member',
                   roleIcon: <UserMinus className="w-3.5 h-3.5 text-red-600 dark:text-red-400" />,
@@ -1214,6 +1206,14 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
                   username: systemMessage.targetUsername,
                   userId: systemMessage.targetId,
                   theme: 'red',
+                })}
+                {renderSystemUserCard({
+                  title: 'Removed By (Admin)',
+                  roleIcon: <ShieldCheck className="w-3.5 h-3.5 text-purple-600 dark:text-purple-400" />,
+                  name: systemMessage.actorName,
+                  username: systemMessage.actorUsername,
+                  userId: systemMessage.actorId,
+                  theme: 'purple',
                 })}
               </div>
             ) : (
@@ -1350,15 +1350,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
             </div>
 
             {systemMessage.actorId && systemMessage.targetId ? (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-0.5">
-                {renderSystemUserCard({
-                  title: 'Updated By (Admin)',
-                  roleIcon: <ShieldCheck className="w-3.5 h-3.5 text-purple-600 dark:text-purple-400" />,
-                  name: systemMessage.actorName,
-                  username: systemMessage.actorUsername,
-                  userId: systemMessage.actorId,
-                  theme: 'purple',
-                })}
+              <div className="flex flex-col items-center justify-center gap-2 max-w-xs mx-auto w-full pt-0.5">
                 {renderSystemUserCard({
                   title: systemMessage.newRole === 'admin' ? 'New Group Admin' : 'Member',
                   roleIcon: <ShieldCheck className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />,
@@ -1366,6 +1358,14 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
                   username: systemMessage.targetUsername,
                   userId: systemMessage.targetId,
                   theme: 'blue',
+                })}
+                {renderSystemUserCard({
+                  title: 'Updated By (Admin)',
+                  roleIcon: <ShieldCheck className="w-3.5 h-3.5 text-purple-600 dark:text-purple-400" />,
+                  name: systemMessage.actorName,
+                  username: systemMessage.actorUsername,
+                  userId: systemMessage.actorId,
+                  theme: 'purple',
                 })}
               </div>
             ) : (
