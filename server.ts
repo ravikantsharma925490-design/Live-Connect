@@ -3371,7 +3371,7 @@ app.post('/api/groups/create', async (req, res) => {
     const creatorUsername = creatorProfile?.username || 'admin';
     const otherMemberIds = allMembers.filter((id) => id !== creatorId);
 
-    let createSysMsgContent = `Group "${name}" was created`;
+    let createSysMsgContent = `[SYSTEM:GROUP_CREATED:${creatorId}:${creatorDisplayName}:${creatorUsername}:${name}] ${creatorUsername} created this group`;
     if (otherMemberIds.length > 0) {
       const addedMembersList = otherMemberIds.map((mId) => {
         const meta = membersMeta[mId] || serverProfilesStore.get(mId);
@@ -3380,7 +3380,7 @@ app.post('/api/groups/create', async (req, res) => {
         return `${mId}|${dName}|${uName}`;
       });
       const membersEncoded = addedMembersList.join(';');
-      createSysMsgContent = `[SYSTEM:MEMBERS_ADDED:${creatorId}:${creatorDisplayName}:${creatorUsername}:${membersEncoded}] 🛡️ Admin ${creatorDisplayName} (@${creatorUsername} • ID: ${creatorId.slice(0, 8)}) created group "${name}" and added ${otherMemberIds.length} member(s)`;
+      createSysMsgContent = `[SYSTEM:MEMBERS_ADDED:${creatorId}:${creatorDisplayName}:${creatorUsername}:${membersEncoded}] ${creatorUsername} added ${otherMemberIds.length} member(s)`;
     }
 
     const sysMsg: ServerMessage = {
@@ -3652,7 +3652,7 @@ app.post('/api/groups/members/add', async (req, res) => {
       });
       const membersEncoded = addedMembersList.join(';');
 
-      const sysMsgContent = `[SYSTEM:MEMBERS_ADDED:${userId}:${actorDisplayName}:${actorUsername}:${membersEncoded}] 🛡️ Admin ${actorDisplayName} (@${actorUsername} • ID: ${userId.slice(0, 8)}) added ${namesJoined} to the group`;
+      const sysMsgContent = `[SYSTEM:MEMBERS_ADDED:${userId}:${actorDisplayName}:${actorUsername}:${membersEncoded}] ${actorUsername} added ${namesJoined}`;
 
       const sysMsg: ServerMessage = {
         id: generateUUID(),
@@ -3789,8 +3789,8 @@ app.post('/api/groups/members/remove', async (req, res) => {
 
     // Insert rich system notification message into chat showing both Admin ID and Removed Member ID
     const sysMsgContent = isSelfLeaving
-      ? `[SYSTEM:MEMBER_LEFT:${memberId}:${removedDisplayName}:${removedUsername}] ${removedDisplayName} (@${removedUsername} • ID: ${memberId.slice(0, 8)}) left the group`
-      : `[SYSTEM:MEMBER_REMOVED:${actorId}:${actorDisplayName}:${actorUsername}:${memberId}:${removedDisplayName}:${removedUsername}] 🛡️ Admin ${actorDisplayName} (@${actorUsername} • ID: ${actorId.slice(0, 8)}) removed ${removedDisplayName} (@${removedUsername} • ID: ${memberId.slice(0, 8)}) from the group`;
+      ? `[SYSTEM:MEMBER_LEFT:${memberId}:${removedDisplayName}:${removedUsername}] ${removedUsername} left the group`
+      : `[SYSTEM:MEMBER_REMOVED:${actorId}:${actorDisplayName}:${actorUsername}:${memberId}:${removedDisplayName}:${removedUsername}] ${actorUsername} removed ${removedUsername}`;
 
     const sysMsg: ServerMessage = {
       id: generateUUID(),
@@ -3874,8 +3874,8 @@ app.post('/api/groups/members/role', async (req, res) => {
     const actorUsername = actorProfile?.username || 'admin';
 
     const sysMsgContent = role === 'admin'
-      ? `[SYSTEM:ROLE_CHANGED:admin:${actorId}:${actorDisplayName}:${actorUsername}:${memberId}:${targetDisplayName}:${targetUsername}] 🛡️ Admin ${actorDisplayName} (@${actorUsername} • ID: ${actorId.slice(0, 8)}) made ${targetDisplayName} (@${targetUsername} • ID: ${memberId.slice(0, 8)}) a Group Admin`
-      : `[SYSTEM:ROLE_CHANGED:member:${actorId}:${actorDisplayName}:${actorUsername}:${memberId}:${targetDisplayName}:${targetUsername}] 🛡️ Admin ${actorDisplayName} (@${actorUsername} • ID: ${actorId.slice(0, 8)}) dismissed ${targetDisplayName} (@${targetUsername} • ID: ${memberId.slice(0, 8)}) from Group Admin`;
+      ? `[SYSTEM:ROLE_CHANGED:admin:${actorId}:${actorDisplayName}:${actorUsername}:${memberId}:${targetDisplayName}:${targetUsername}] ${actorUsername} made ${targetUsername} a group admin`
+      : `[SYSTEM:ROLE_CHANGED:member:${actorId}:${actorDisplayName}:${actorUsername}:${memberId}:${targetDisplayName}:${targetUsername}] ${actorUsername} dismissed ${targetUsername} from group admin`;
 
     const sysMsg: ServerMessage = {
       id: generateUUID(),
