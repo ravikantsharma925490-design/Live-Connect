@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
-import logoImage from './assets/logo.png';
+import { SplashScreen } from '@/src/components/ui/SplashScreen';
 import { useAuth } from '@/src/hooks/useAuth';
 import { usePresence } from '@/src/hooks/usePresence';
 import { useConversations } from '@/src/hooks/useConversations';
@@ -35,6 +35,9 @@ import { DeleteAccountPage } from '@/src/components/legal/DeleteAccountPage';
 import { OnboardingScreen } from '@/src/components/auth/OnboardingScreen';
 import { BannedScreen } from '@/src/components/auth/BannedScreen';
 import { Profile, Conversation, Message } from '@/src/types';
+
+// Ensures the cinematic launch animation plays strictly once on cold app launch
+let launchSplashCompleted = false;
 
 export default function App() {
   const {
@@ -204,83 +207,42 @@ export default function App() {
     }
   };
 
-  // Splash screen state: runs strictly for full 3.8 seconds on launch
-  const [minSplashDone, setMinSplashDone] = useState(false);
+  // Splash screen state: 0-2600ms 5-phase sequence + 400ms fade-out (3000ms total), only on cold launch
+  const [minSplashDone, setMinSplashDone] = useState(() => launchSplashCompleted);
+  const [splashExiting, setSplashExiting] = useState(false);
+  const [splashMounted, setSplashMounted] = useState(() => !launchSplashCompleted);
 
   useEffect(() => {
+    if (launchSplashCompleted) return;
+    const prefersReduced =
+      typeof window !== 'undefined' &&
+      window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
     const timer = setTimeout(() => {
       setMinSplashDone(true);
-    }, 3800);
+    }, prefersReduced ? 600 : 2600);
     return () => clearTimeout(timer);
   }, []);
 
-  // Loading initial auth or playing full splash screen
-  if (!minSplashDone || authLoading || profileCheckPending) {
-    return (
-      <div 
-        className="min-h-screen-safe w-full flex items-center justify-center bg-black relative overflow-hidden select-none"
-      >
-        <style>{`
-          @keyframes splashGlow {
-            0% { opacity: 0; transform: scale(0.6); filter: blur(20px); }
-            50% { opacity: 0.9; filter: blur(10px); }
-            100% { opacity: 0.6; transform: scale(1.4); filter: blur(30px); }
-          }
-          @keyframes splashLogoIn {
-            0% { opacity: 0; transform: scale(0.6) translateY(10px); }
-            60% { opacity: 1; transform: scale(1.1) translateY(0); }
-            100% { opacity: 1; transform: scale(1) translateY(0); }
-          }
-          @keyframes splashPulse {
-            0%, 100% { opacity: 0.5; }
-            50% { opacity: 1; }
-          }
-          @keyframes splashRingPulse {
-            0% { transform: scale(0.9); opacity: 0.7; }
-            100% { transform: scale(1.6); opacity: 0; }
-          }
-          .splash-glow {
-            animation: splashGlow 2.2s ease-out infinite alternate;
-          }
-          .splash-logo {
-            animation: splashLogoIn 1s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
-          }
-          .splash-ring {
-            animation: splashRingPulse 1.8s ease-out infinite;
-          }
-          .splash-tagline {
-            animation: splashPulse 1.6s ease-in-out infinite;
-            animation-delay: 0.8s;
-            opacity: 0;
-            animation-fill-mode: forwards;
-          }
-        `}</style>
+  useEffect(() => {
+    if (!splashMounted) return;
+    if (minSplashDone && !authLoading && !profileCheckPending) {
+      setSplashExiting(true);
+    }
+  }, [minSplashDone, authLoading, profileCheckPending, splashMounted]);
 
-        <div
-          className="splash-glow absolute w-80 h-80 rounded-full"
-          style={{
-            background: 'radial-gradient(circle, rgba(79,70,229,0.55) 0%, rgba(124,58,237,0.4) 35%, rgba(251,113,133,0.25) 60%, transparent 75%)',
-          }}
-        />
+  useEffect(() => {
+    if (!splashExiting) return;
+    const unmountTimer = setTimeout(() => {
+      launchSplashCompleted = true;
+      setSplashMounted(false);
+    }, 400);
+    return () => clearTimeout(unmountTimer);
+  }, [splashExiting]);
 
-        <div className="relative flex flex-col items-center">
-          <div className="relative flex items-center justify-center">
-            <div className="splash-ring absolute w-40 h-40 rounded-full border-2 border-purple-400/60" />
-            <div className="splash-logo relative w-28 h-28 rounded-full overflow-hidden p-1 bg-gradient-to-tr from-cyan-400 via-purple-500 to-pink-500 shadow-[0_0_40px_rgba(168,85,247,0.75)] flex items-center justify-center">
-              <img
-                src={logoImage}
-                alt="LiveConnect"
-                className="w-full h-full object-cover rounded-full scale-110"
-              />
-            </div>
-          </div>
-          <p className="splash-tagline text-xs font-semibold text-purple-300 tracking-[0.3em] uppercase mt-6">
-            Connecting you now
-          </p>
-        </div>
-      </div>
-    );
-  }
+  const renderContent = () => {
+    if (authLoading || profileCheckPending) {
+      return null;
+    }
 
   if (bannedUntilDate && new Date(bannedUntilDate).getTime() > Date.now()) {
     return <BannedScreen bannedUntil={bannedUntilDate} />;
@@ -823,6 +785,14 @@ export default function App() {
       {/* PWA / Notification Prompt */}
       <PushBanner />
     </div>
+    );
+  };
+
+  return (
+    <>
+      {renderContent()}
+      {splashMounted && <SplashScreen isExiting={splashExiting} />}
+    </>
   );
 }
 

@@ -4,6 +4,7 @@ const config: CapacitorConfig = {
   appId: 'com.liveconnect.app',
   appName: 'LiveConnect',
   webDir: 'dist',
+  backgroundColor: '#03050c',
   server: {
     androidScheme: 'https',
     cleartext: true,
@@ -14,6 +15,7 @@ const config: CapacitorConfig = {
     },
   },
   android: {
+    backgroundColor: '#03050c',
     allowMixedContent: true,
     captureInput: true,
     webContentsDebuggingEnabled: false,

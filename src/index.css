@@ -36,3 +36,281 @@
   min-height: 100dvh;
 }
 
+/* Cinematic App Launch Animation (0 - 3000ms, GPU compositor-only transform & opacity) */
+@keyframes lcSeedLight {
+  0% {
+    opacity: 0;
+    transform: scale(0.08);
+  }
+  42% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  78% {
+    opacity: 0.65;
+    transform: scale(1.7);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(2.25);
+  }
+}
+
+@keyframes lcSeedFlare {
+  0% {
+    opacity: 0;
+    transform: scale(0.2) rotate(0deg);
+  }
+  40% {
+    opacity: 0.95;
+    transform: scale(1.05) rotate(22deg);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.4) rotate(65deg);
+  }
+}
+
+@keyframes lcRingExpand {
+  0% {
+    opacity: 0;
+    transform: scale(0.14);
+  }
+  30% {
+    opacity: 1;
+    transform: scale(0.55);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes lcRingSpin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes lcRingShockwave {
+  0% {
+    opacity: 0.7;
+    transform: scale(0.25);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.52);
+  }
+}
+
+@keyframes lcOrbitFadeIn {
+  0% {
+    opacity: 0;
+    transform: scale(0.75);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes lcOrbitSpinCW {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes lcOrbitSpinCCW {
+  from {
+    transform: rotate(360deg);
+  }
+  to {
+    transform: rotate(0deg);
+  }
+}
+
+@keyframes lcLogoReveal3D {
+  0% {
+    opacity: 0;
+    transform: perspective(950px) scale(0.54) rotateX(18deg) rotateY(-8deg) translateY(10px);
+  }
+  68% {
+    opacity: 1;
+    transform: perspective(950px) scale(1.04) rotateX(-1.5deg) rotateY(1deg) translateY(0);
+  }
+  100% {
+    opacity: 1;
+    transform: perspective(950px) scale(1) rotateX(0deg) rotateY(0deg) translateY(0);
+  }
+}
+
+@keyframes lcLogoGlow {
+  0% {
+    opacity: 0;
+    transform: scale(0.65);
+  }
+  100% {
+    opacity: 0.85;
+    transform: scale(1);
+  }
+}
+
+@keyframes lcLogoSweep {
+  0% {
+    opacity: 0;
+    transform: translateX(-160%) skewX(-22deg);
+  }
+  25% {
+    opacity: 0.85;
+  }
+  75% {
+    opacity: 0.75;
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(240%) skewX(-22deg);
+  }
+}
+
+@keyframes lcWordmarkIn {
+  0% {
+    opacity: 0;
+    transform: translateY(12px) scale(0.93);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes lcHorizonSweep {
+  0% {
+    opacity: 0;
+    transform: scaleX(0.08);
+  }
+  100% {
+    opacity: 1;
+    transform: scaleX(1);
+  }
+}
+
+@keyframes lcFinalBloom {
+  0% {
+    opacity: 0.2;
+    transform: scale(0.92);
+  }
+  55% {
+    opacity: 0.95;
+    transform: scale(1.14);
+  }
+  100% {
+    opacity: 0.72;
+    transform: scale(1.06);
+  }
+}
+
+/* Phase 1: Initial light (0 - 500ms, fades out by 1150ms) */
+.lc-launch-seed {
+  animation: lcSeedLight 1.15s cubic-bezier(0.22, 1, 0.36, 1) 0ms both;
+  will-change: transform, opacity;
+}
+
+.lc-launch-flare {
+  animation: lcSeedFlare 0.95s cubic-bezier(0.22, 1, 0.36, 1) 60ms both;
+  will-change: transform, opacity;
+}
+
+/* Phase 2: Circular neon energy ring & rotating particles (500 - 1200ms) */
+.lc-launch-ring-wrap {
+  animation: lcRingExpand 0.7s cubic-bezier(0.16, 1, 0.3, 1) 0.5s both;
+  will-change: transform, opacity;
+}
+
+.lc-launch-ring-spin {
+  animation: lcRingSpin 3.4s linear 0.5s infinite;
+  will-change: transform;
+}
+
+.lc-launch-shockwave {
+  animation: lcRingShockwave 0.85s cubic-bezier(0.16, 1, 0.3, 1) 0.54s both;
+  will-change: transform, opacity;
+}
+
+.lc-launch-orbit-in {
+  animation: lcOrbitFadeIn 0.6s ease-out 0.52s both;
+  will-change: transform, opacity;
+}
+
+.lc-launch-orbit-cw {
+  animation: lcOrbitSpinCW 6.5s linear infinite;
+  will-change: transform;
+}
+
+.lc-launch-orbit-ccw {
+  animation: lcOrbitSpinCCW 9s linear infinite;
+  will-change: transform;
+}
+
+/* Phase 3: LC logo 3D reveal + light sweep (1200 - 2000ms) */
+.lc-launch-logo {
+  animation: lcLogoReveal3D 0.8s cubic-bezier(0.16, 1, 0.3, 1) 1.2s both;
+  will-change: transform, opacity;
+}
+
+.lc-launch-logo-glow {
+  animation: lcLogoGlow 0.8s ease-out 1.2s both;
+  will-change: transform, opacity;
+}
+
+.lc-launch-sheen {
+  animation: lcLogoSweep 0.68s cubic-bezier(0.25, 1, 0.5, 1) 1.55s both;
+  will-change: transform, opacity;
+}
+
+/* Phase 4: LiveConnect wordmark reveal (2000 - 2400ms) */
+.lc-launch-wordmark {
+  animation: lcWordmarkIn 0.42s cubic-bezier(0.16, 1, 0.3, 1) 2s both;
+  will-change: transform, opacity;
+}
+
+.lc-launch-horizon {
+  animation: lcHorizonSweep 0.36s cubic-bezier(0.16, 1, 0.3, 1) 2.1s both;
+  will-change: transform, opacity;
+}
+
+/* Phase 5: Final neon bloom (2400 - 3000ms) */
+.lc-launch-final-bloom {
+  animation: lcFinalBloom 0.55s cubic-bezier(0.16, 1, 0.3, 1) 2.4s both;
+  will-change: transform, opacity;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lc-launch-seed,
+  .lc-launch-flare,
+  .lc-launch-shockwave {
+    display: none !important;
+  }
+  .lc-launch-ring-wrap,
+  .lc-launch-ring-spin,
+  .lc-launch-orbit-in,
+  .lc-launch-orbit-cw,
+  .lc-launch-orbit-ccw,
+  .lc-launch-logo,
+  .lc-launch-logo-glow,
+  .lc-launch-sheen,
+  .lc-launch-wordmark,
+  .lc-launch-horizon,
+  .lc-launch-final-bloom {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+  }
+}
+
+
