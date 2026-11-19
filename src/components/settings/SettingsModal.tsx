@@ -13,13 +13,13 @@ import {
   Loader2,
 } from 'lucide-react';
 import { cn } from '@/src/lib/utils';
-import { getSupabase } from '@/src/lib/supabase/client';
 import { Profile } from '@/src/types';
+import { isFirebaseSessionActive } from '@/src/lib/firebase/client';
+import { deleteFirebaseAccountDataFs } from '@/src/lib/firebase/services';
 
 interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onOpenConfig?: () => void;
   currentUser?: Profile | null;
   onSignOut?: () => void;
 }
@@ -166,30 +166,33 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setDeleteError(null);
 
     try {
-      const supabase = getSupabase();
-      const sessionData = supabase ? await supabase.auth.getSession() : null;
-      const token = sessionData?.data?.session?.access_token || '';
+      if (currentUser?.id && isFirebaseSessionActive(currentUser.id)) {
+        await deleteFirebaseAccountDataFs(currentUser.id);
+      } else {
+        const token =
+          typeof window !== 'undefined'
+            ? localStorage.getItem('liveconnect_session_token') || ''
+            : '';
 
-      const res = await fetch('/api/account/delete', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        body: JSON.stringify({ userId: currentUser?.id }),
-      });
+        const res = await fetch('/api/account/delete', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({ userId: currentUser?.id }),
+        });
 
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Failed to delete account');
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.error || 'Failed to delete account');
+        }
       }
 
       // Account deleted successfully - clear local storage and sign out
       localStorage.clear();
       if (onSignOut) {
         await onSignOut();
-      } else if (supabase) {
-        await supabase.auth.signOut();
       }
 
       window.location.href = '/';

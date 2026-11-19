@@ -106,7 +106,7 @@ export async function uploadMediaToB2(options: {
 
 /**
  * Replace User Profile Picture in Backblaze B2
- * Uploads new picture -> updates Supabase profile -> deletes old B2 object from cloud
+ * Uploads new picture -> updates user profile -> deletes old B2 object from cloud
  */
 export async function replaceProfilePictureInB2(options: {
   file: File;
@@ -132,7 +132,7 @@ export async function replaceProfilePictureInB2(options: {
     throw new Error('Failed to get B2 media URL.');
   }
 
-  // 3. Update Supabase Profile
+  // 3. Update User Profile
   const updated = await onUpdateProfile({
     avatar_url: uploadRes.url,
     b2_file_id: uploadRes.b2_file_id,
@@ -161,7 +161,7 @@ export async function replaceProfilePictureInB2(options: {
 
 /**
  * Remove User Profile Picture
- * Deletes object from Backblaze B2 -> clears profile picture in Supabase
+ * Deletes object from Backblaze B2 -> clears profile picture in database
  */
 export async function removeProfilePictureFromB2(options: {
   userId: string;
@@ -178,7 +178,7 @@ export async function removeProfilePictureFromB2(options: {
     }
   }
 
-  // 2. Remove profile image reference in Supabase
+  // 2. Remove profile image reference in database
   const updated = await onUpdateProfile({
     avatar_url: null,
     b2_file_id: null,

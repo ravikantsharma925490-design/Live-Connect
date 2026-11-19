@@ -146,7 +146,7 @@ export const DeleteAccountPage: React.FC<DeleteAccountPageProps> = ({ onBack }) 
             <div className="p-4 rounded-2xl bg-neutral-800/40 border border-neutral-700/60 space-y-2">
               <h4 className="font-bold text-amber-400 uppercase text-[10px] tracking-wider">Data Retention Policy</h4>
               <p className="text-neutral-300 leading-relaxed">
-                No personal user data is retained after deletion. Once the deletion process completes, your user identifier is purged completely from our Supabase database and authentication server.
+                No personal user data is retained after deletion. Once the deletion process completes, your user identifier is purged completely from our database and authentication server.
               </p>
             </div>
           </div>

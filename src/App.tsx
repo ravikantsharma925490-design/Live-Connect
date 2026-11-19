@@ -24,7 +24,6 @@ import { AudioCallScreen } from '@/src/components/calls/AudioCallScreen';
 import { VideoCallScreen } from '@/src/components/calls/VideoCallScreen';
 import { ProfileModal } from '@/src/components/profile/ProfileModal';
 import { SettingsModal } from '@/src/components/settings/SettingsModal';
-import { ConfigModal } from '@/src/components/setup/ConfigModal';
 import { NotificationModal } from '@/src/components/notifications/NotificationModal';
 import { LanguageSelectorModal } from '@/src/components/language/LanguageSelectorModal';
 import { Toast } from '@/src/components/ui/Toast';
@@ -47,12 +46,14 @@ export default function App() {
     authError,
     setAuthError,
     signUp,
+    verifySignupOtp,
     signIn,
     signInWithGoogle,
     loginWithTruecaller,
     sendLoginOtp,
     signOut,
     resetPassword,
+    verifyResetPassword,
     updatePassword,
     isPasswordRecovery,
     setIsPasswordRecovery,
@@ -154,7 +155,6 @@ export default function App() {
   const [forwardingMessage, setForwardingMessage] = useState<any>(null);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [isConfigOpen, setIsConfigOpen] = useState(false);
   const [viewingProfile, setViewingProfile] = useState<Profile | null>(null);
 
   // Password Recovery form state
@@ -367,11 +367,14 @@ export default function App() {
       <>
         <AuthPage
           onGoogleSignIn={signInWithGoogle}
+          onEmailSignIn={signIn}
+          onSignUp={signUp}
+          onVerifyOtp={verifySignupOtp}
+          onResetPassword={resetPassword}
+          onVerifyResetPassword={verifyResetPassword}
           authError={authError}
           clearError={() => setAuthError(null)}
-          onOpenConfig={() => setIsConfigOpen(true)}
         />
-        <ConfigModal isOpen={isConfigOpen} onClose={() => setIsConfigOpen(false)} />
         <LanguageSelectorModal />
         {callError && (
           <Toast
@@ -529,7 +532,6 @@ export default function App() {
               setIsProfileOpen(true);
             }}
             onOpenSettingsModal={() => setIsSettingsOpen(true)}
-            onOpenConfigModal={() => setIsConfigOpen(true)}
             onOpenNotifications={() => setIsNotificationOpen(true)}
             unreadNotificationsCount={unreadNotificationsCount}
             onSignOut={signOut}
@@ -759,15 +761,6 @@ export default function App() {
         onClose={() => setIsSettingsOpen(false)}
         currentUser={profile}
         onSignOut={signOut}
-        onOpenConfig={() => {
-          setIsSettingsOpen(false);
-          setIsConfigOpen(true);
-        }}
-      />
-
-      <ConfigModal
-        isOpen={isConfigOpen}
-        onClose={() => setIsConfigOpen(false)}
       />
 
       <LanguageSelectorModal />

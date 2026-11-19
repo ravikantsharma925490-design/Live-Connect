@@ -1,5 +1,22 @@
-import { getSupabase } from '@/src/lib/supabase/client';
- 
+import {
+  collection,
+  doc,
+  query,
+  where,
+  onSnapshot,
+  setDoc,
+  updateDoc,
+  serverTimestamp,
+} from 'firebase/firestore';
+import {
+  db,
+  auth,
+  FIREBASE_CONSTRAINTS,
+  isFirebaseSessionActive,
+  sanitizeOptionalStr,
+} from '@/src/lib/firebase/client';
+import { generateUUID } from '@/src/lib/utils';
+
 export interface WebRTCSessionCallbacks {
   onConnected?: () => void;
   onDisconnected?: () => void;
@@ -7,7 +24,7 @@ export interface WebRTCSessionCallbacks {
   onError?: (error: Error) => void;
   onNetworkQualityChange?: (quality: 'excellent' | 'good' | 'poor', stats: { packetLoss: number; jitter: number; rtt: number }) => void;
 }
- 
+
 export interface SignalingPayload {
   callId: string;
   senderId: string;
@@ -18,7 +35,7 @@ export interface SignalingPayload {
   sdp?: RTCSessionDescriptionInit;
   candidate?: RTCIceCandidateInit;
 }
- 
+
 const GLOBAL_DEFAULT_ICE_SERVERS: RTCConfiguration = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
@@ -48,24 +65,24 @@ const GLOBAL_DEFAULT_ICE_SERVERS: RTCConfiguration = {
   bundlePolicy: 'max-bundle',
   rtcpMuxPolicy: 'require',
 };
- 
+
 let cachedIceConfiguration: RTCConfiguration = GLOBAL_DEFAULT_ICE_SERVERS;
- 
+
 function enhanceMediaSDP(sdpText?: string): string {
   if (!sdpText) return '';
   let sdp = sdpText;
- 
+
   try {
     const opusMatch = sdp.match(/a=rtpmap:(\d+)\s+opus\/48000\/2/i);
     if (opusMatch) {
       const pt = opusMatch[1];
- 
-      sdp = sdp.replace(/m=audio\s+(\d+)\s+([A-Z/]+)\s+(.+)/i, (m, port, proto, pts) => {
+
+      sdp = sdp.replace(/m=audio\s+(\d+)\s+([A-Z/]+)\s+(.+)/i, (_m, port, proto, pts) => {
         const ptList = pts.trim().split(/\s+/);
         const filtered = ptList.filter((p: string) => p !== pt);
         return `m=audio ${port} ${proto} ${pt} ${filtered.join(' ')}`;
       });
- 
+
       const fmtpRegex = new RegExp(`a=fmtp:${pt}\\s+([^\r\n]+)`, 'i');
       if (fmtpRegex.test(sdp)) {
         sdp = sdp.replace(fmtpRegex, (_match, existing) => {
@@ -90,7 +107,7 @@ function enhanceMediaSDP(sdpText?: string): string {
           map.set('maxplaybackrate', '48000');
           map.set('sprop-maxcapturerate', '48000');
           map.set('usedtx', '1');
- 
+
           const formatted = Array.from(map.entries())
             .map(([k, v]) => (v ? `${k}=${v}` : k))
             .join(';');
@@ -104,7 +121,7 @@ function enhanceMediaSDP(sdpText?: string): string {
         );
       }
     }
- 
+
     if (sdp.includes('m=video')) {
       if (!sdp.includes('b=AS:')) {
         sdp = sdp.replace(/(m=video[^\r\n]+(?:\r?\n[^\r\n]+)*?)(c=IN[^\r\n]+)/, '$1$2\r\nb=AS:3500\r\nb=TIAS:3500000');
@@ -113,10 +130,10 @@ function enhanceMediaSDP(sdpText?: string): string {
   } catch (err) {
     console.warn('SDP enhancement notice:', err);
   }
- 
+
   return sdp;
 }
- 
+
 export class WebRTCP2PSession {
   public pc: RTCPeerConnection | null = null;
   public localStream: MediaStream | null = null;
@@ -137,15 +154,13 @@ export class WebRTCP2PSession {
   private processedSignalIds = new Set<string>();
   private pendingCandidates: RTCIceCandidateInit[] = [];
   private broadcastChannel: BroadcastChannel | null = null;
-  private supabaseChannel: any = null;
-  private supabaseChannelReady: boolean = false;
-  private pendingOutgoingSignals: SignalingPayload[] = [];
   private currentDeviceId?: string;
   private targetDeviceId?: string;
- 
+  private firestoreUnsubs: (() => void)[] = [];
+
   private prevPacketsLost: number = 0;
   private prevPacketsReceived: number = 0;
- 
+
   constructor(
     callId: string,
     currentUserId: string,
@@ -162,53 +177,31 @@ export class WebRTCP2PSession {
     this.callbacks = callbacks;
     this.currentDeviceId = currentDeviceId;
     this.targetDeviceId = targetDeviceId;
- 
-    const supabase = getSupabase();
-    this.supabaseChannel = supabase.channel(`call_signals_${callId}`);
- 
-    this.supabaseChannel.on('broadcast', { event: 'webrtc_signal' }, (payload: any) => {
-      if (payload && payload.payload) {
-        const sig = payload.payload as SignalingPayload;
-        if (sig.callId !== this.callId) return;
-        if (sig.senderDeviceId && this.currentDeviceId && sig.senderDeviceId === this.currentDeviceId) return;
-        const sigKey = `sb_${sig.type}_${JSON.stringify(sig.sdp || sig.candidate || {})}`;
-        if (!this.processedSignalIds.has(sigKey)) {
-          this.processedSignalIds.add(sigKey);
-          this.handleIncomingSignal(sig);
-        }
-      }
-    });
- 
-    // IMPORTANT: Supabase realtime broadcast is fire-and-forget — a message sent
-    // before the OTHER side's channel has finished subscribing is lost forever
-    // (this was the root cause of "rings but never connects"). We track our own
-    // ready state here, and separately retry the initial offer below so the call
-    // still connects even if the peer subscribed a moment late.
-    this.supabaseChannel.subscribe((status: string) => {
-      if (status === 'SUBSCRIBED') {
-        this.supabaseChannelReady = true;
-        const queued = [...this.pendingOutgoingSignals];
-        this.pendingOutgoingSignals = [];
-        queued.forEach((sig) => this.dispatchSignal(sig));
-      }
-    });
   }
- 
+
+  private get callerId(): string {
+    return this.isCaller ? this.currentUserId : this.targetUserId;
+  }
+
+  private get calleeId(): string {
+    return this.isCaller ? this.targetUserId : this.currentUserId;
+  }
+
   public async start(localStream: MediaStream, isVideo: boolean): Promise<void> {
     this.localStream = localStream;
     this.isVideo = isVideo;
     this.isClosed = false;
- 
+
     this.initPeerConnection();
     this.startSignalingPolling();
     this.setupNetworkListeners();
- 
+
     if (this.isCaller) {
       await this.createAndSendOffer(false);
       this.startOfferRetry();
     }
   }
- 
+
   private startOfferRetry() {
     if (this.offerRetryInterval) clearInterval(this.offerRetryInterval);
     this.offerRetryCount = 0;
@@ -237,16 +230,16 @@ export class WebRTCP2PSession {
       }
     }, 2000);
   }
- 
+
   private initPeerConnection() {
     if (this.pc) {
       try {
         this.pc.close();
       } catch {}
     }
- 
+
     this.pc = new RTCPeerConnection(cachedIceConfiguration);
- 
+
     if (this.localStream) {
       this.localStream.getTracks().forEach((track) => {
         if (this.pc && this.localStream) {
@@ -277,9 +270,8 @@ export class WebRTCP2PSession {
         }
       });
     }
- 
+
     this.pc.ontrack = (event) => {
-      // Prevent local audio/video tracks from loopbacking as remote tracks
       if (event.track && this.localStream?.getTracks().some((lt) => lt.id === event.track.id)) {
         return;
       }
@@ -301,7 +293,7 @@ export class WebRTCP2PSession {
         this.callbacks.onRemoteTrack?.(event.track, this.remoteStream);
       }
     };
- 
+
     this.pc.onconnectionstatechange = () => {
       if (!this.pc) return;
       const state = this.pc.connectionState;
@@ -315,7 +307,7 @@ export class WebRTCP2PSession {
         this.handleNetworkDisconnection();
       }
     };
- 
+
     this.pc.oniceconnectionstatechange = () => {
       if (!this.pc) return;
       const iceState = this.pc.iceConnectionState;
@@ -325,7 +317,7 @@ export class WebRTCP2PSession {
         this.handleNetworkDisconnection();
       }
     };
- 
+
     this.pc.onicecandidate = (event) => {
       if (event.candidate) {
         this.sendSignal({
@@ -337,10 +329,10 @@ export class WebRTCP2PSession {
         });
       }
     };
- 
+
     this.startNetworkQualityMonitoring();
   }
- 
+
   private async createAndSendOffer(isIceRestart: boolean = false) {
     if (!this.pc) return;
     try {
@@ -349,13 +341,13 @@ export class WebRTCP2PSession {
         offerToReceiveVideo: this.isVideo,
         iceRestart: isIceRestart,
       });
- 
+
       const enhancedSdp = enhanceMediaSDP(offer.sdp);
       const enhancedOffer = new RTCSessionDescription({
         type: offer.type,
         sdp: enhancedSdp || offer.sdp,
       });
- 
+
       await this.pc.setLocalDescription(enhancedOffer);
       await this.sendSignal({
         callId: this.callId,
@@ -369,53 +361,53 @@ export class WebRTCP2PSession {
       this.callbacks.onError?.(err);
     }
   }
- 
+
   private startNetworkQualityMonitoring() {
     if (this.statsInterval) {
       clearInterval(this.statsInterval);
     }
- 
+
     this.statsInterval = setInterval(async () => {
       if (!this.pc || this.isClosed || this.pc.connectionState !== 'connected') return;
- 
+
       try {
         const stats = await this.pc.getStats();
         let currentPacketLossRate = 0;
         let currentJitter = 0;
         let currentRtt = 0;
- 
+
         stats.forEach((report) => {
           if (report.type === 'inbound-rtp' && report.kind === 'audio') {
             const packetsLost = report.packetsLost || 0;
             const packetsReceived = report.packetsReceived || 0;
- 
+
             const deltaLost = Math.max(0, packetsLost - this.prevPacketsLost);
             const deltaReceived = Math.max(0, packetsReceived - this.prevPacketsReceived);
             const totalPackets = deltaLost + deltaReceived;
- 
+
             if (totalPackets > 0) {
               currentPacketLossRate = (deltaLost / totalPackets) * 100;
             }
- 
+
             this.prevPacketsLost = packetsLost;
             this.prevPacketsReceived = packetsReceived;
             currentJitter = (report.jitter || 0) * 1000;
           }
- 
+
           if (report.type === 'candidate-pair' && report.state === 'succeeded') {
             if (typeof report.currentRoundTripTime === 'number') {
               currentRtt = report.currentRoundTripTime * 1000;
             }
           }
         });
- 
+
         let quality: 'excellent' | 'good' | 'poor' = 'excellent';
         if (currentPacketLossRate > 5 || currentRtt > 300 || currentJitter > 60) {
           quality = 'poor';
         } else if (currentPacketLossRate > 2 || currentRtt > 150 || currentJitter > 30) {
           quality = 'good';
         }
- 
+
         if (quality !== this.lastNetworkQuality) {
           this.lastNetworkQuality = quality;
           this.adaptMediaToNetwork(quality);
@@ -428,23 +420,23 @@ export class WebRTCP2PSession {
       } catch {}
     }, 2000);
   }
- 
+
   private adaptMediaToNetwork(quality: 'excellent' | 'good' | 'poor') {
     if (!this.pc) return;
- 
+
     this.pc.getSenders().forEach((sender) => {
       if (!sender.track) return;
- 
+
       try {
         const params = sender.getParameters();
         if (!params.encodings || params.encodings.length === 0) {
           params.encodings = [{}];
         }
- 
+
         if (sender.track.kind === 'audio') {
           params.encodings[0].priority = 'high';
           params.encodings[0].networkPriority = 'high';
- 
+
           if (quality === 'poor') {
             params.encodings[0].maxBitrate = 48000;
           } else {
@@ -473,17 +465,17 @@ export class WebRTCP2PSession {
       } catch {}
     });
   }
- 
+
   private handleNetworkDisconnection() {
     if (this.isClosed || this.isRestartingIce) return;
- 
+
     this.isRestartingIce = true;
     setTimeout(async () => {
       if (this.isClosed || !this.pc) {
         this.isRestartingIce = false;
         return;
       }
- 
+
       const state = this.pc.iceConnectionState;
       if (state === 'disconnected' || state === 'failed') {
         try {
@@ -497,7 +489,7 @@ export class WebRTCP2PSession {
       this.isRestartingIce = false;
     }, 1500);
   }
- 
+
   private setupNetworkListeners() {
     if (typeof window !== 'undefined') {
       const handleOnline = () => {
@@ -505,9 +497,9 @@ export class WebRTCP2PSession {
           this.handleNetworkDisconnection();
         }
       };
- 
+
       window.addEventListener('online', handleOnline);
- 
+
       if (navigator.mediaDevices && typeof navigator.mediaDevices.addEventListener === 'function') {
         navigator.mediaDevices.addEventListener('devicechange', () => {
           if (this.localStream) {
@@ -537,25 +529,7 @@ export class WebRTCP2PSession {
       }
     }
   }
- 
-  private dispatchSignal(payload: SignalingPayload) {
-    if (this.supabaseChannel) {
-      if ((this.supabaseChannel as any).state === 'joined') {
-        this.supabaseChannel
-          .send({
-            type: 'broadcast',
-            event: 'webrtc_signal',
-            payload: payload,
-          })
-          .catch(() => {});
-      } else if (typeof (this.supabaseChannel as any).httpSend === 'function') {
-        (this.supabaseChannel as any)
-          .httpSend('webrtc_signal', payload)
-          .catch(() => {});
-      }
-    }
-  }
- 
+
   private async sendSignal(signal: SignalingPayload) {
     try {
       const payload: SignalingPayload = {
@@ -563,7 +537,7 @@ export class WebRTCP2PSession {
         senderDeviceId: this.currentDeviceId,
         targetDeviceId: this.targetDeviceId,
       };
- 
+
       if (typeof window !== 'undefined' && (window as any).BroadcastChannel) {
         try {
           const bc = new BroadcastChannel(`liveconnect_p2p_signals_${this.callId}`);
@@ -571,38 +545,75 @@ export class WebRTCP2PSession {
           bc.close();
         } catch {}
       }
- 
+
+      if (isFirebaseSessionActive(this.currentUserId)) {
+        if ((signal.type === 'offer' || signal.type === 'ice-restart') && signal.sdp && this.isCaller) {
+          const offerStr = JSON.stringify({
+            type: signal.sdp.type,
+            sdp: signal.sdp.sdp,
+          }).slice(0, FIREBASE_CONSTRAINTS.MAX_SDP_LEN);
+
+          await updateDoc(doc(db, 'calls', this.callId), {
+            offerSdp: offerStr,
+            updatedAt: serverTimestamp(),
+          }).catch(() => {});
+        } else if (signal.type === 'answer' && signal.sdp && !this.isCaller) {
+          const answerStr = JSON.stringify({
+            type: signal.sdp.type,
+            sdp: signal.sdp.sdp,
+          }).slice(0, FIREBASE_CONSTRAINTS.MAX_SDP_LEN);
+
+          await updateDoc(doc(db, 'calls', this.callId), {
+            status: 'connected',
+            answerSdp: answerStr,
+            updatedAt: serverTimestamp(),
+          }).catch(() => {});
+        } else if (signal.type === 'candidate' && signal.candidate) {
+          const candId = `cand_${generateUUID().replace(/-/g, '').slice(0, 20)}`;
+          const candStr = JSON.stringify(signal.candidate).slice(0, FIREBASE_CONSTRAINTS.MAX_CANDIDATE_LEN);
+          await setDoc(doc(db, 'calls', this.callId, 'ice_candidates', candId), {
+            id: candId,
+            callId: this.callId,
+            callerId: this.callerId,
+            calleeId: this.calleeId,
+            senderId: this.currentUserId,
+            sdpMid: sanitizeOptionalStr(signal.candidate.sdpMid, 64),
+            sdpMLineIndex:
+              typeof signal.candidate.sdpMLineIndex === 'number'
+                ? Math.trunc(signal.candidate.sdpMLineIndex)
+                : null,
+            candidate: candStr,
+            createdAt: serverTimestamp(),
+          }).catch(() => {});
+        }
+        return;
+      }
+
       fetch('/api/calls/signal', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       }).catch(() => {});
- 
-      if (this.supabaseChannelReady) {
-        this.dispatchSignal(payload);
-      } else {
-        this.pendingOutgoingSignals.push(payload);
-      }
     } catch {}
   }
- 
+
   public async handleIncomingSignal(signal: SignalingPayload) {
     if (signal.callId !== this.callId) return;
- 
+
     if (signal.senderDeviceId && this.currentDeviceId && signal.senderDeviceId === this.currentDeviceId) {
       return;
     }
     if (!signal.senderDeviceId && signal.senderId === this.currentUserId && !this.targetDeviceId) {
       return;
     }
- 
+
     if (signal.type === 'hangup') {
       this.callbacks.onDisconnected?.();
       return;
     }
- 
+
     if (!this.pc || this.isClosed) return;
- 
+
     try {
       if ((signal.type === 'offer' || signal.type === 'ice-restart') && signal.sdp) {
         if (this.pc.signalingState !== 'stable') {
@@ -645,7 +656,7 @@ export class WebRTCP2PSession {
       console.warn('WebRTC signal handling notice:', err.message);
     }
   }
- 
+
   private async flushPendingCandidates() {
     if (!this.pc || !this.pc.remoteDescription) return;
     const candidates = [...this.pendingCandidates];
@@ -653,11 +664,10 @@ export class WebRTCP2PSession {
     for (const cand of candidates) {
       try {
         await this.pc.addIceCandidate(new RTCIceCandidate(cand));
-      } catch (e) {
-      }
+      } catch {}
     }
   }
- 
+
   private startSignalingPolling() {
     if (typeof window !== 'undefined' && (window as any).BroadcastChannel) {
       try {
@@ -679,7 +689,91 @@ export class WebRTCP2PSession {
         }
       } catch {}
     }
- 
+
+    if (isFirebaseSessionActive(this.currentUserId)) {
+      // 1. Watch call document for offerSdp / answerSdp
+      const unsubCallDoc = onSnapshot(
+        doc(db, 'calls', this.callId),
+        async (snap) => {
+          if (this.isClosed || !this.pc || !snap.exists()) return;
+          const d = snap.data();
+
+          if (!this.isCaller && d.offerSdp) {
+            const sigKey = `fs_offer_${d.offerSdp.length}_${d.offerSdp.slice(0, 64)}`;
+            if (!this.processedSignalIds.has(sigKey)) {
+              this.processedSignalIds.add(sigKey);
+              try {
+                const parsedSdp = JSON.parse(d.offerSdp) as RTCSessionDescriptionInit;
+                await this.handleIncomingSignal({
+                  callId: this.callId,
+                  senderId: this.callerId,
+                  targetId: this.currentUserId,
+                  type: 'offer',
+                  sdp: parsedSdp,
+                });
+              } catch {}
+            }
+          } else if (this.isCaller && d.answerSdp) {
+            const sigKey = `fs_answer_${d.answerSdp.length}_${d.answerSdp.slice(0, 64)}`;
+            if (!this.processedSignalIds.has(sigKey)) {
+              this.processedSignalIds.add(sigKey);
+              try {
+                const parsedSdp = JSON.parse(d.answerSdp) as RTCSessionDescriptionInit;
+                await this.handleIncomingSignal({
+                  callId: this.callId,
+                  senderId: this.calleeId,
+                  targetId: this.currentUserId,
+                  type: 'answer',
+                  sdp: parsedSdp,
+                });
+              } catch {}
+            }
+          }
+        },
+        () => {
+          if (!auth.currentUser) return;
+        }
+      );
+
+      // 2. Watch peer ICE candidates using rule-compliant participant filter
+      const iceQuery = query(
+        collection(db, 'calls', this.callId, 'ice_candidates'),
+        where('callId', '==', this.callId),
+        where(this.isCaller ? 'callerId' : 'calleeId', '==', this.currentUserId)
+      );
+
+      const unsubIce = onSnapshot(
+        iceQuery,
+        async (snap) => {
+          if (this.isClosed || !this.pc) return;
+          for (const change of snap.docChanges()) {
+            if (change.type !== 'added') continue;
+            const d = change.doc.data();
+            if (!d || d.senderId === this.currentUserId) continue;
+            const sigKey = `fs_ice_${change.doc.id}`;
+            if (this.processedSignalIds.has(sigKey)) continue;
+            this.processedSignalIds.add(sigKey);
+            try {
+              const candObj = JSON.parse(d.candidate) as RTCIceCandidateInit;
+              await this.handleIncomingSignal({
+                callId: this.callId,
+                senderId: d.senderId,
+                targetId: this.currentUserId,
+                type: 'candidate',
+                candidate: candObj,
+              });
+            } catch {}
+          }
+        },
+        () => {
+          if (!auth.currentUser) return;
+        }
+      );
+
+      this.firestoreUnsubs.push(unsubCallDoc, unsubIce);
+      return;
+    }
+
     this.pollInterval = setInterval(async () => {
       if (this.isClosed || !this.pc) return;
       try {
@@ -692,7 +786,7 @@ export class WebRTCP2PSession {
             deviceId: this.currentDeviceId,
           }),
         });
- 
+
         if (res.ok) {
           const data = await res.json();
           if (Array.isArray(data.signals)) {
@@ -711,7 +805,7 @@ export class WebRTCP2PSession {
       } catch {}
     }, 350);
   }
- 
+
   public setAudioEnabled(enabled: boolean) {
     if (this.localStream) {
       this.localStream.getAudioTracks().forEach((t) => {
@@ -726,7 +820,7 @@ export class WebRTCP2PSession {
       });
     }
   }
- 
+
   public setVideoEnabled(enabled: boolean) {
     if (this.localStream) {
       this.localStream.getVideoTracks().forEach((t) => {
@@ -741,7 +835,7 @@ export class WebRTCP2PSession {
       });
     }
   }
- 
+
   public async replaceVideoTrack(newTrack: MediaStreamTrack) {
     if (this.pc) {
       const sender = this.pc.getSenders().find((s) => s.track && s.track.kind === 'video');
@@ -754,7 +848,7 @@ export class WebRTCP2PSession {
       }
     }
   }
- 
+
   public async sendHangup() {
     try {
       await this.sendSignal({
@@ -765,9 +859,16 @@ export class WebRTCP2PSession {
       });
     } catch {}
   }
- 
+
   public close() {
     this.isClosed = true;
+    this.firestoreUnsubs.forEach((u) => {
+      try {
+        u();
+      } catch {}
+    });
+    this.firestoreUnsubs = [];
+
     if (this.pollInterval) {
       clearInterval(this.pollInterval);
       this.pollInterval = null;
@@ -786,12 +887,6 @@ export class WebRTCP2PSession {
       } catch {}
       this.broadcastChannel = null;
     }
-    if (this.supabaseChannel) {
-      try {
-        this.supabaseChannel.unsubscribe();
-      } catch {}
-      this.supabaseChannel = null;
-    }
     if (this.pc) {
       this.pc.ontrack = null;
       this.pc.onicecandidate = null;
@@ -803,4 +898,3 @@ export class WebRTCP2PSession {
     this.remoteStream.getTracks().forEach((t) => t.stop());
   }
 }
- 

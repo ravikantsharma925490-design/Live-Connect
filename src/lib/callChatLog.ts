@@ -1,7 +1,9 @@
 import { Profile, CallType, CallStatus } from '@/src/types';
 import { getDeterministicDirectConvId } from '@/src/hooks/useConversations';
 import { generateUUID } from '@/src/lib/utils';
-import { getSupabase } from '@/src/lib/supabase/client';
+import { doc, getDoc } from 'firebase/firestore';
+import { db, auth, isFirebaseSessionActive } from '@/src/lib/firebase/client';
+import { sendMessageToFirestoreFs } from '@/src/lib/firebase/services';
 
 export interface CallLogMessageMeta {
   callId?: string;
@@ -61,7 +63,6 @@ export async function insertCallLogIntoChat({
   const nowIso = new Date().toISOString();
   const msgId = getOrCreateValidMsgUuid(callId);
 
-  // Construct readable status for both parties
   let displayStatus = 'No answer';
   const effectiveMissed = isMissed || status === 'missed' || status === 'rejected' || status === 'cancelled';
   const normalizedStatus = effectiveMissed ? 'missed' : 'ended';
@@ -74,10 +75,8 @@ export async function insertCallLogIntoChat({
     displayStatus = 'Ended';
   }
 
-  // Structured token: [CALL_LOG:audio|video:missed|ended:missed|answered:displayStatus]
   const content = `[CALL_LOG:${callType}:${normalizedStatus}:${effectiveMissed ? 'missed' : 'answered'}:${displayStatus}]`;
 
-  // If we already logged this exact call with this exact content recently, avoid duplicate write
   if (callId) {
     const prevLogged = loggedCallStatus.get(callId);
     if (prevLogged === content) {
@@ -98,23 +97,58 @@ export async function insertCallLogIntoChat({
     is_read: false,
   };
 
-  // 1. Post to Server Message Relay
-  fetch('/api/messages/send', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      message: messageObj,
-      recipientId: callee.id,
-      senderProfile: caller,
-      recipientProfile: callee,
-    }),
-  }).catch(() => {});
+  if (auth.currentUser && isFirebaseSessionActive(auth.currentUser.uid)) {
+    const activeUid = auth.currentUser.uid;
+    if (activeUid === caller.id) {
+      sendMessageToFirestoreFs({
+        messageId: msgId,
+        conversationId,
+        content,
+        senderProfile: caller,
+        isGroup: false,
+        receiverId: callee.id,
+        receiverProfile: callee,
+      }).catch(() => {});
+    } else if (activeUid === callee.id) {
+      // Give caller a moment to insert the canonical log, then write if missing
+      setTimeout(async () => {
+        try {
+          const existing = await getDoc(
+            doc(db, 'users', callee.id, 'inbox', conversationId, 'messages', msgId)
+          ).catch(() => null);
+          if (!existing || !existing.exists()) {
+            await sendMessageToFirestoreFs({
+              messageId: msgId,
+              conversationId,
+              content,
+              senderProfile: callee,
+              isGroup: false,
+              receiverId: caller.id,
+              receiverProfile: caller,
+            }).catch(() => {});
+          }
+        } catch {}
+      }, 700);
+    }
+  } else {
+    // Legacy SQLite Server Message Relay
+    fetch('/api/messages/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: messageObj,
+        recipientId: callee.id,
+        senderProfile: caller,
+        recipientProfile: callee,
+      }),
+    }).catch(() => {});
+  }
 
-  // 2. Cache in local storage for instant reactivity
+  // Cache in local storage for instant reactivity
   try {
     const localCacheKey = `liveconnect_msgs_${conversationId}`;
     const raw = localStorage.getItem(localCacheKey);
-    let existing = raw ? JSON.parse(raw) : [];
+    const existing = raw ? JSON.parse(raw) : [];
     if (Array.isArray(existing)) {
       const idx = existing.findIndex((m) => m.id === msgId);
       if (idx >= 0) {
@@ -126,7 +160,6 @@ export async function insertCallLogIntoChat({
     }
   } catch {}
 
-  // 3. Update conversation caches in localStorage for instant preview update
   [caller.id, callee.id].forEach((uid) => {
     try {
       const convCacheKey = `liveconnect_convs_${uid}`;
@@ -150,43 +183,11 @@ export async function insertCallLogIntoChat({
     } catch {}
   });
 
-  // 4. Dispatch custom event so conversations and chat windows update immediately
   if (typeof window !== 'undefined') {
     window.dispatchEvent(
       new CustomEvent('liveconnect_conversation_message', {
         detail: { conversationId, message: messageObj },
       })
     );
-  }
-
-  // 5. Persist into Supabase database
-  try {
-    const supabase = getSupabase();
-    await supabase.from('conversations').upsert(
-      {
-        id: conversationId,
-        type: 'direct',
-        updated_at: nowIso,
-      },
-      { onConflict: 'id' }
-    );
-
-    await supabase.from('conversation_members').upsert(
-      [
-        { conversation_id: conversationId, user_id: caller.id },
-        { conversation_id: conversationId, user_id: callee.id },
-      ],
-      { onConflict: 'conversation_id,user_id' }
-    );
-
-    await supabase.from('messages').upsert({
-      id: msgId,
-      conversation_id: conversationId,
-      sender_id: caller.id,
-      content,
-      created_at: nowIso,
-    }, { onConflict: 'id' });
-  } catch (err) {
-    console.warn('Call log message save error:', err);
   }
 }

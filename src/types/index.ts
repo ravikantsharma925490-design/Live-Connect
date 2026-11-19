@@ -18,6 +18,21 @@ export type CallStatus =
   | 'cancelled'
   | 'failed';
 
+export interface AuthUser {
+  id: string;
+  email?: string;
+  phone?: string;
+  email_confirmed?: boolean;
+  user_metadata?: Record<string, any>;
+  banned_until?: string | null;
+  created_at?: string;
+}
+
+export interface AuthSession {
+  access_token: string;
+  expires_at?: string;
+}
+
 export interface Profile {
   id: string;
   username: string;
@@ -26,6 +41,11 @@ export interface Profile {
   bio: string | null;
   gender?: string | null;
   country?: string | null;
+  email?: string | null;
+  phone_number?: string | null;
+  cloudinary_public_id?: string | null;
+  b2_file_id?: string | null;
+  b2_file_name?: string | null;
   is_online: boolean;
   last_seen: string;
   created_at: string;

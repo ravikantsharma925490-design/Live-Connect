@@ -10,8 +10,9 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 import { Profile } from '@/src/types';
-import { getSupabase } from '@/src/lib/supabase/client';
 import { cn, getAvatarColor, getInitials } from '@/src/lib/utils';
+import { isFirebaseSessionActive } from '@/src/lib/firebase/client';
+import { fetchMultiplePublicProfilesFs } from '@/src/lib/firebase/services';
 
 interface BlockedUsersModalProps {
   isOpen: boolean;
@@ -35,7 +36,7 @@ export const BlockedUsersModal: React.FC<BlockedUsersModalProps> = ({
   const [userToUnblock, setUserToUnblock] = useState<Profile | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
-  const blockedIdsArray = Array.from(blockedUserIds || []);
+  const blockedIdsArray: string[] = Array.from(blockedUserIds || []).map((id) => String(id));
 
   const fetchBlockedProfiles = useCallback(async () => {
     if (!isOpen || blockedIdsArray.length === 0) {
@@ -45,19 +46,25 @@ export const BlockedUsersModal: React.FC<BlockedUsersModalProps> = ({
     }
 
     setLoading(true);
-    const supabase = getSupabase();
 
     try {
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('*')
-        .in('id', blockedIdsArray);
-
-      if (error) {
-        console.warn('Error loading blocked profiles:', error.message);
-        setBlockedUsers([]);
+      if (isFirebaseSessionActive(currentUserId)) {
+        const profilesMap = await fetchMultiplePublicProfilesFs(blockedIdsArray);
+        setBlockedUsers(Object.values(profilesMap));
       } else {
-        setBlockedUsers((data as Profile[]) || []);
+        const res = await fetch('/api/relations/blocked-profiles', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId: currentUserId, ids: blockedIdsArray }),
+        });
+        const data = await res.json().catch(() => null);
+
+        if (!res.ok) {
+          console.warn('Error loading blocked profiles:', data?.error || res.statusText);
+          setBlockedUsers([]);
+        } else {
+          setBlockedUsers((data?.blockedUsers as Profile[]) || []);
+        }
       }
     } catch (err) {
       console.warn('Failed to fetch blocked users:', err);
@@ -65,7 +72,7 @@ export const BlockedUsersModal: React.FC<BlockedUsersModalProps> = ({
     } finally {
       setLoading(false);
     }
-  }, [isOpen, blockedIdsArray.join(',')]);
+  }, [isOpen, currentUserId, blockedIdsArray.join(',')]);
 
   useEffect(() => {
     if (isOpen) {

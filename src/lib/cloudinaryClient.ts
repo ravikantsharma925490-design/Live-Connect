@@ -126,7 +126,7 @@ export async function deleteCloudinaryAsset(
 
 /**
  * Replace User Profile Picture in Cloudinary
- * Uploads new picture -> updates Supabase profile -> deletes old Cloudinary asset from cloud
+ * Uploads new picture -> updates user profile -> deletes old Cloudinary asset from cloud
  */
 export async function replaceProfilePictureInCloudinary(options: {
   file: File;
@@ -152,7 +152,7 @@ export async function replaceProfilePictureInCloudinary(options: {
     throw new Error('Failed to get Cloudinary media URL.');
   }
 
-  // 3. Update Supabase Profile
+  // 3. Update User Profile
   const updated = await onUpdateProfile({
     avatar_url: uploadRes.url,
     cloudinary_public_id: uploadRes.cloudinary_public_id,

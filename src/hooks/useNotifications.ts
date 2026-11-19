@@ -1,77 +1,88 @@
-import { useState, useEffect, useCallback } from 'react';
-import { getSupabase } from '@/src/lib/supabase/client';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import {
+  collection,
+  doc,
+  query,
+  orderBy,
+  limit,
+  onSnapshot,
+  setDoc,
+  updateDoc,
+  deleteDoc,
+  writeBatch,
+  serverTimestamp,
+} from 'firebase/firestore';
 import { AppNotification, Profile } from '@/src/types';
 import { notificationService } from '@/src/lib/notification-service';
-
-const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-function toUuidOrNull(val?: string | null): string | null {
-  if (!val) return null;
-  return UUID_REGEX.test(val) ? val : null;
-}
+import {
+  db,
+  auth,
+  isFirebaseSessionActive,
+  OperationType,
+  handleFirestoreError,
+  tsToIso,
+  sanitizeStr,
+  sanitizeOptionalStr,
+} from '@/src/lib/firebase/client';
+import { generateUUID } from '@/src/lib/utils';
 
 export function useNotifications(currentUserId?: string) {
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
+  const seenIdsRef = useRef<Set<string>>(new Set());
+  const initialLoadDoneRef = useRef<boolean>(false);
+  const busRef = useRef<BroadcastChannel | null>(null);
 
   const fetchNotifications = useCallback(async () => {
     if (!currentUserId) {
       setNotifications([]);
       setLoading(false);
+      seenIdsRef.current.clear();
+      initialLoadDoneRef.current = false;
       return;
     }
 
-    const supabase = getSupabase();
+    if (isFirebaseSessionActive(currentUserId)) {
+      return;
+    }
 
     try {
-      // 1. Fetch notifications from Supabase
-      const { data, error } = await supabase
-        .from('notifications')
-        .select('*')
-        .eq('user_id', currentUserId)
-        .order('created_at', { ascending: false })
-        .limit(50);
+      const res = await fetch('/api/notifications/list', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: currentUserId }),
+      });
 
-      if (error) {
-        // Fallback to backend API
-        const res = await fetch('/api/notifications/list', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ userId: currentUserId }),
-        });
-        if (res.ok) {
-          const apiData = await res.json();
-          setNotifications(apiData.notifications || []);
-        }
-        return;
-      }
+      if (res.ok) {
+        const apiData = await res.json();
+        const rawNotifs: AppNotification[] = (apiData.notifications || [])
+          .filter((n: any) => n && n.title !== 'LIVE_CALL_SIGNAL')
+          .map((n: any) => ({
+            ...n,
+            is_read: Boolean(n.is_read),
+            actor: n.actor || {
+              id: n.actor_id,
+              display_name: 'User',
+              username: 'user',
+            },
+          }));
 
-      const rawNotifs = (data || []).filter((n: any) => n.title !== 'LIVE_CALL_SIGNAL');
-      const actorIds = Array.from(new Set(rawNotifs.map((n) => n.actor_id)));
-      let profileMap: Record<string, Profile> = {};
-
-      if (actorIds.length > 0) {
-        const { data: profiles } = await supabase
-          .from('profiles')
-          .select('*')
-          .in('id', actorIds);
-
-        if (profiles) {
-          profiles.forEach((p) => {
-            profileMap[p.id] = p;
+        if (initialLoadDoneRef.current) {
+          rawNotifs.forEach((notif) => {
+            if (!seenIdsRef.current.has(notif.id) && !notif.is_read) {
+              notificationService.sendNotification({
+                title: notif.title || 'LiveConnect Notification',
+                body: notif.message || 'You have a new update',
+                tag: `notif-${notif.id}`,
+              });
+            }
           });
         }
+
+        rawNotifs.forEach((n) => seenIdsRef.current.add(n.id));
+        initialLoadDoneRef.current = true;
+        setNotifications(rawNotifs);
       }
-
-      const populated: AppNotification[] = rawNotifs.map((n: any) => ({
-        ...n,
-        actor: profileMap[n.actor_id] || {
-          id: n.actor_id,
-          display_name: 'User',
-          username: 'user',
-        },
-      }));
-
-      setNotifications(populated);
     } catch (err: any) {
       console.warn('Error fetching notifications:', err.message);
     } finally {
@@ -80,116 +91,133 @@ export function useNotifications(currentUserId?: string) {
   }, [currentUserId]);
 
   useEffect(() => {
-    fetchNotifications();
-  }, [fetchNotifications]);
+    seenIdsRef.current.clear();
+    initialLoadDoneRef.current = false;
 
-  // Realtime subscription for incoming notifications
-  useEffect(() => {
-    if (!currentUserId) return;
+    if (!currentUserId) {
+      setNotifications([]);
+      setLoading(false);
+      return;
+    }
 
-    const supabase = getSupabase();
-
-    const channel = supabase
-      .channel(`notifications:${currentUserId}`)
-      .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'notifications',
-          filter: `user_id=eq.${currentUserId}`,
-        },
-        async (payload) => {
-          const newNotif = payload.new as AppNotification;
-          if (newNotif.title === 'LIVE_CALL_SIGNAL') {
-            return; // Handled exclusively by useCall real-time signaling
-          }
-
-          // Fetch actor profile
-          let actorProfile: Profile | undefined;
-          if (newNotif.actor_id) {
-            const { data } = await supabase
-              .from('profiles')
-              .select('*')
-              .eq('id', newNotif.actor_id)
-              .single();
-            actorProfile = data as Profile;
-          }
-
-          const fullNotif: AppNotification = {
-            ...newNotif,
-            actor: actorProfile,
-          };
-
-          // Trigger browser notification banner & sound
-          notificationService.sendNotification({
-            title: fullNotif.title || 'LiveConnect Notification',
-            body: fullNotif.message || 'You have a new update',
-            tag: `notif-${fullNotif.id}`,
+    if (isFirebaseSessionActive(currentUserId)) {
+      const q = query(
+        collection(db, 'users', currentUserId, 'notifications'),
+        orderBy('createdAt', 'desc'),
+        limit(50)
+      );
+      const unsub = onSnapshot(
+        q,
+        (snap) => {
+          const list: AppNotification[] = [];
+          snap.forEach((docSnap) => {
+            const d = docSnap.data();
+            if (!d || d.title === 'LIVE_CALL_SIGNAL') return;
+            const createdAt = tsToIso(d.createdAt);
+            list.push({
+              id: docSnap.id,
+              user_id: d.userId || currentUserId,
+              actor_id: d.actorId || '',
+              type: d.type,
+              title: d.title,
+              message: d.message,
+              reference_id: d.referenceId || null,
+              is_read: Boolean(d.isRead),
+              created_at: createdAt,
+              actor: {
+                id: d.actorId || '',
+                display_name: d.actorDisplayName || d.actorUsername || 'User',
+                username: d.actorUsername || 'user',
+                avatar_url: d.actorAvatarUrl || null,
+                bio: null,
+                is_online: false,
+                last_seen: createdAt,
+                created_at: createdAt,
+                updated_at: createdAt,
+              },
+            });
           });
 
-          setNotifications((prev) => [fullNotif, ...prev.filter((n) => n.id !== fullNotif.id)]);
-        }
-      )
-      .on(
-        'postgres_changes',
-        {
-          event: 'UPDATE',
-          schema: 'public',
-          table: 'notifications',
-          filter: `user_id=eq.${currentUserId}`,
-        },
-        (payload) => {
-          const updated = payload.new as AppNotification;
-          setNotifications((prev) =>
-            prev.map((n) => (n.id === updated.id ? { ...n, ...updated } : n))
-          );
-        }
-      )
-      .on(
-        'postgres_changes',
-        {
-          event: 'DELETE',
-          schema: 'public',
-          table: 'notifications',
-        },
-        (payload) => {
-          const deletedId = (payload.old as any)?.id;
-          if (deletedId) {
-            setNotifications((prev) => prev.filter((n) => n.id !== deletedId));
+          if (initialLoadDoneRef.current) {
+            list.forEach((notif) => {
+              if (!seenIdsRef.current.has(notif.id) && !notif.is_read) {
+                notificationService.sendNotification({
+                  title: notif.title || 'LiveConnect Notification',
+                  body: notif.message || 'You have a new update',
+                  tag: `notif-${notif.id}`,
+                });
+              }
+            });
           }
+
+          list.forEach((n) => seenIdsRef.current.add(n.id));
+          initialLoadDoneRef.current = true;
+          setNotifications(list);
+          setLoading(false);
+        },
+        (err) => {
+          if (!auth.currentUser) return;
+          handleFirestoreError(err, OperationType.LIST, `users/${currentUserId}/notifications`);
         }
-      )
-      .subscribe();
+      );
+
+      return () => {
+        unsub();
+      };
+    }
+
+    fetchNotifications();
+
+    if (typeof BroadcastChannel !== 'undefined') {
+      const bus = new BroadcastChannel('liveconnect_notifications_sync');
+      busRef.current = bus;
+      bus.onmessage = (event) => {
+        if (event.data?.userId === currentUserId || event.data?.refreshAll) {
+          fetchNotifications();
+        }
+      };
+    }
+
+    const pollInterval = setInterval(() => {
+      fetchNotifications();
+    }, 2500);
 
     return () => {
-      supabase.removeChannel(channel);
+      clearInterval(pollInterval);
+      if (busRef.current) {
+        busRef.current.close();
+        busRef.current = null;
+      }
     };
-  }, [currentUserId]);
+  }, [currentUserId, fetchNotifications]);
 
   // Mark single notification as read
   const markAsRead = useCallback(
     async (notificationId: string) => {
       if (!currentUserId || !notificationId) return;
 
-      // Optimistic update
       setNotifications((prev) =>
         prev.map((n) => (n.id === notificationId ? { ...n, is_read: true } : n))
       );
 
-      const supabase = getSupabase();
+      if (isFirebaseSessionActive(currentUserId)) {
+        try {
+          await updateDoc(doc(db, 'users', currentUserId, 'notifications', notificationId), {
+            isRead: true,
+          });
+        } catch (err: any) {
+          console.warn('Error marking Firestore notification read:', err?.message);
+        }
+        return;
+      }
 
       try {
-        fetch('/api/notifications/mark-read', {
+        await fetch('/api/notifications/mark-read', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ userId: currentUserId, notificationId }),
-        }).catch(() => {});
-
-        await supabase
-          .from('notifications')
-          .update({ is_read: true })
-          .eq('id', notificationId);
+        });
+        busRef.current?.postMessage({ userId: currentUserId });
       } catch (err: any) {
         console.warn('Error marking notification read:', err.message);
       }
@@ -201,26 +229,34 @@ export function useNotifications(currentUserId?: string) {
   const markAllAsRead = useCallback(async () => {
     if (!currentUserId) return;
 
-    // Optimistic update
+    const unreadIds = notifications.filter((n) => !n.is_read).map((n) => n.id);
     setNotifications((prev) => prev.map((n) => ({ ...n, is_read: true })));
 
-    const supabase = getSupabase();
+    if (isFirebaseSessionActive(currentUserId)) {
+      if (unreadIds.length === 0) return;
+      try {
+        const batch = writeBatch(db);
+        unreadIds.slice(0, 400).forEach((id) => {
+          batch.update(doc(db, 'users', currentUserId, 'notifications', id), { isRead: true });
+        });
+        await batch.commit();
+      } catch (err: any) {
+        console.warn('Error marking all Firestore notifications read:', err?.message);
+      }
+      return;
+    }
 
     try {
-      fetch('/api/notifications/mark-all-read', {
+      await fetch('/api/notifications/mark-all-read', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userId: currentUserId }),
-      }).catch(() => {});
-
-      await supabase
-        .from('notifications')
-        .update({ is_read: true })
-        .eq('user_id', currentUserId);
+      });
+      busRef.current?.postMessage({ userId: currentUserId });
     } catch (err: any) {
       console.warn('Error marking all notifications read:', err.message);
     }
-  }, [currentUserId]);
+  }, [currentUserId, notifications]);
 
   // Delete a notification
   const deleteNotification = useCallback(
@@ -229,9 +265,22 @@ export function useNotifications(currentUserId?: string) {
 
       setNotifications((prev) => prev.filter((n) => n.id !== notificationId));
 
-      const supabase = getSupabase();
+      if (isFirebaseSessionActive(currentUserId)) {
+        try {
+          await deleteDoc(doc(db, 'users', currentUserId, 'notifications', notificationId));
+        } catch (err: any) {
+          console.warn('Error deleting Firestore notification:', err?.message);
+        }
+        return;
+      }
+
       try {
-        await supabase.from('notifications').delete().eq('id', notificationId);
+        await fetch('/api/notifications/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId: currentUserId, notificationId }),
+        });
+        busRef.current?.postMessage({ userId: currentUserId });
       } catch (err: any) {
         console.warn('Error deleting notification:', err.message);
       }
@@ -239,7 +288,7 @@ export function useNotifications(currentUserId?: string) {
     [currentUserId]
   );
 
-  // Helper to send a notification (e.g. follow, call, etc.)
+  // Helper to send a notification
   const createNotification = useCallback(
     async (params: {
       userId: string;
@@ -250,28 +299,36 @@ export function useNotifications(currentUserId?: string) {
       referenceId?: string;
       actorMeta?: Profile;
     }) => {
-      const supabase = getSupabase();
+      if (auth.currentUser && auth.currentUser.uid === params.actorId) {
+        const notifId = `nf_${generateUUID().replace(/-/g, '').slice(0, 20)}`;
+        try {
+          await setDoc(doc(db, 'users', params.userId, 'notifications', notifId), {
+            id: notifId,
+            userId: params.userId,
+            actorId: params.actorId,
+            actorDisplayName: sanitizeOptionalStr(params.actorMeta?.display_name, 80),
+            actorUsername: sanitizeOptionalStr(params.actorMeta?.username, 32),
+            actorAvatarUrl: sanitizeOptionalStr(params.actorMeta?.avatar_url, 1024),
+            type: params.type,
+            title: sanitizeStr(params.title, 160) || 'LiveConnect Notification',
+            message: sanitizeStr(params.message, 1000) || 'New notification',
+            referenceId: sanitizeOptionalStr(params.referenceId, 128),
+            isRead: false,
+            createdAt: serverTimestamp(),
+          });
+        } catch (err: any) {
+          console.warn('Error creating Firestore notification:', err?.message);
+        }
+        return;
+      }
+
       try {
-        fetch('/api/notifications/create', {
+        await fetch('/api/notifications/create', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(params),
-        }).catch(() => {});
-
-        const sanitizedRefId = toUuidOrNull(params.referenceId);
-        const insertPayload: Record<string, any> = {
-          user_id: params.userId,
-          actor_id: params.actorId,
-          type: params.type,
-          title: params.title,
-          message: params.message,
-          is_read: false,
-        };
-        if (sanitizedRefId) {
-          insertPayload.reference_id = sanitizedRefId;
-        }
-
-        await supabase.from('notifications').insert(insertPayload);
+        });
+        busRef.current?.postMessage({ userId: params.userId });
       } catch (err: any) {
         console.warn('Error creating notification:', err.message);
       }

@@ -395,7 +395,7 @@ export const TermsConditions: React.FC<TermsConditionsProps> = ({
                   The Application relies on third-party service providers to deliver functionality:
                 </p>
                 <ul className="space-y-1.5 list-disc list-inside pl-1 text-xs">
-                  <li><strong>Supabase:</strong> For backend database storage, user authentication, and real-time message &amp; call signal synchronization.</li>
+                  <li><strong>LiveConnect Backend &amp; SQLite Database:</strong> For backend database storage, user authentication, and real-time message &amp; call signal synchronization.</li>
                   <li><strong>WebRTC Standards:</strong> For peer-to-peer 1-to-1 audio and video streaming using browser WebRTC standards.</li>
                 </ul>
                 <p className="text-xs text-neutral-500">

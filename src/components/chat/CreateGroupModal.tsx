@@ -13,6 +13,8 @@ import {
 import { Profile } from '@/src/types';
 import { UserAvatar } from '../ui/UserAvatar';
 import { uploadMediaToServer } from '@/src/lib/mediaUpload';
+import { isFirebaseSessionActive } from '@/src/lib/firebase/client';
+import { searchPublicProfilesFs } from '@/src/lib/firebase/services';
 
 interface CreateGroupModalProps {
   isOpen: boolean;
@@ -64,15 +66,20 @@ export const CreateGroupModal: React.FC<CreateGroupModalProps> = ({
     if (!currentUser?.id) return;
     setLoadingUsers(true);
     try {
-      const res = await fetch('/api/users/search', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: queryStr, userId: currentUser.id }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data.users)) {
-          setAvailableUsers(data.users.filter((u: Profile) => u.id !== currentUser.id));
+      if (isFirebaseSessionActive(currentUser.id)) {
+        const users = await searchPublicProfilesFs(queryStr, currentUser.id);
+        setAvailableUsers(users.filter((u: Profile) => u.id !== currentUser.id));
+      } else {
+        const res = await fetch('/api/users/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: queryStr, userId: currentUser.id }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data.users)) {
+            setAvailableUsers(data.users.filter((u: Profile) => u.id !== currentUser.id));
+          }
         }
       }
     } catch {

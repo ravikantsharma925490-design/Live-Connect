@@ -33,6 +33,12 @@ import { EmptyState } from '../ui/EmptyState';
 import { cn, formatLastSeen, getAvatarColor, getInitials, formatChatDateHeader, isDifferentDay } from '@/src/lib/utils';
 import { UserAvatar } from '../ui/UserAvatar';
 import { useMessages } from '@/src/hooks/useMessages';
+import { isFirebaseSessionActive } from '@/src/lib/firebase/client';
+import {
+  fetchPublicProfileFs,
+  fetchRelationStatusFs,
+  followUserFs,
+} from '@/src/lib/firebase/services';
 
 interface ChatWindowProps {
   conversation: Conversation | null;
@@ -315,12 +321,20 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     }
 
     try {
-      const res = await fetch(`/api/users/profile/${encodeURIComponent(userId)}`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data?.profile) {
-          onOpenProfileView(data.profile);
+      if (isFirebaseSessionActive(currentUser?.id)) {
+        const prof = await fetchPublicProfileFs(userId);
+        if (prof) {
+          onOpenProfileView(prof);
           return;
+        }
+      } else {
+        const res = await fetch(`/api/users/profile/${encodeURIComponent(userId)}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data?.profile) {
+            onOpenProfileView(data.profile);
+            return;
+          }
         }
       }
     } catch (e) {}
@@ -344,19 +358,24 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     if (isGroup || !currentUser?.id || !otherUser?.id || isSelf) return;
     setIsRefreshingStatus(true);
     try {
-      const res = await fetch('/api/relations/status', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId: currentUser.id,
-          targetUserId: otherUser.id,
-          userUsername: currentUser.username,
-          targetUsername: otherUser.username,
-        }),
-      });
-      if (res.ok) {
-        const data = await res.json();
+      if (isFirebaseSessionActive(currentUser.id)) {
+        const data = await fetchRelationStatusFs(currentUser.id, otherUser.id);
         setLiveRelation(data);
+      } else {
+        const res = await fetch('/api/relations/status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            userId: currentUser.id,
+            targetUserId: otherUser.id,
+            userUsername: currentUser.username,
+            targetUsername: otherUser.username,
+          }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setLiveRelation(data);
+        }
       }
     } catch (e) {
       // ignore
@@ -451,30 +470,47 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
       if (onFollow) {
         await onFollow(otherUser);
       }
-      const res = await fetch('/api/relations/follow', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId: currentUser.id,
-          targetUserId: otherUser.id,
-          userMeta: currentUser,
-          targetMeta: otherUser,
-        }),
-      });
-      if (res.ok) {
-        const followData = await res.json();
-        if (followData) {
-          const wasFollowed = Boolean(
-            followData.isFollowedBy ||
-            relationStatus?.isFollowedBy ||
-            liveRelation?.isFollowedBy
-          );
-          setLiveRelation((prev) => ({
-            ...(prev || {}),
-            isFollowing: true,
-            isFollowedBy: wasFollowed,
-            isMutual: Boolean(followData.isMutual || wasFollowed),
-          }));
+      if (isFirebaseSessionActive(currentUser.id)) {
+        const followData = onFollow
+          ? await fetchRelationStatusFs(currentUser.id, otherUser.id)
+          : await followUserFs(currentUser.id, otherUser.id, currentUser);
+        const wasFollowed = Boolean(
+          followData.isFollowedBy ||
+          relationStatus?.isFollowedBy ||
+          liveRelation?.isFollowedBy
+        );
+        setLiveRelation((prev) => ({
+          ...(prev || {}),
+          isFollowing: true,
+          isFollowedBy: wasFollowed,
+          isMutual: Boolean(followData.isMutual || wasFollowed),
+        }));
+      } else {
+        const res = await fetch('/api/relations/follow', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            userId: currentUser.id,
+            targetUserId: otherUser.id,
+            userMeta: currentUser,
+            targetMeta: otherUser,
+          }),
+        });
+        if (res.ok) {
+          const followData = await res.json();
+          if (followData) {
+            const wasFollowed = Boolean(
+              followData.isFollowedBy ||
+              relationStatus?.isFollowedBy ||
+              liveRelation?.isFollowedBy
+            );
+            setLiveRelation((prev) => ({
+              ...(prev || {}),
+              isFollowing: true,
+              isFollowedBy: wasFollowed,
+              isMutual: Boolean(followData.isMutual || wasFollowed),
+            }));
+          }
         }
       }
 

@@ -1,20 +1,44 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { getSupabase } from '@/src/lib/supabase/client';
+import {
+  collection,
+  doc,
+  query,
+  where,
+  limit,
+  onSnapshot,
+  updateDoc,
+  serverTimestamp,
+} from 'firebase/firestore';
 import { Profile } from '@/src/types';
+import {
+  db,
+  auth,
+  isFirebaseSessionActive,
+  OperationType,
+  handleFirestoreError,
+  tsToIso,
+} from '@/src/lib/firebase/client';
 
 export function usePresence(currentUserId?: string) {
   const [onlineUsers, setOnlineUsers] = useState<Record<string, { is_online: boolean; last_seen: string }>>({});
   // Re-evaluation tick every 10 seconds to auto-expire stale heartbeats
   const [, setTick] = useState(0);
+  const presenceBusRef = useRef<BroadcastChannel | null>(null);
 
-  const channelRef = useRef<any>(null);
-
-  // Send offline beacon to server and DB
+  // Send offline beacon
   const sendOfflineStatus = useCallback((userId: string) => {
     if (!userId) return;
     const now = new Date().toISOString();
 
-    // 1. Send keepalive fetch or sendBeacon
+    if (isFirebaseSessionActive(userId)) {
+      updateDoc(doc(db, 'public_profiles', userId), {
+        isOnline: false,
+        lastSeen: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      }).catch(() => {});
+      return;
+    }
+
     try {
       const payload = JSON.stringify({ userId });
       if (typeof navigator !== 'undefined' && navigator.sendBeacon) {
@@ -28,127 +52,166 @@ export function usePresence(currentUserId?: string) {
           keepalive: true,
         }).catch(() => {});
       }
-    } catch (e) {}
+    } catch {
+      // ignore
+    }
 
-    // 2. Direct Supabase DB update
     try {
-      const supabase = getSupabase();
-      supabase
-        .from('profiles')
-        .update({ is_online: false, last_seen: now })
-        .eq('id', userId)
-        .then(() => {});
-    } catch (e) {}
+      presenceBusRef.current?.postMessage({
+        type: 'PRESENCE_UPDATE',
+        userId,
+        is_online: false,
+        last_seen: now,
+      });
+    } catch {
+      // ignore
+    }
   }, []);
 
-  // Send online heartbeat to server and DB
+  // Send online heartbeat
   const sendOnlineHeartbeat = useCallback((userId: string) => {
     if (!userId) return;
     const now = new Date().toISOString();
 
-    // 1. Direct Supabase DB update
-    try {
-      const supabase = getSupabase();
-      supabase
-        .from('profiles')
-        .update({ is_online: true, last_seen: now })
-        .eq('id', userId)
-        .then(() => {});
-    } catch (e) {}
-
-    // 2. Backend sync
-    try {
-      fetch('/api/presence/heartbeat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId }),
+    if (isFirebaseSessionActive(userId)) {
+      updateDoc(doc(db, 'public_profiles', userId), {
+        isOnline: true,
+        lastSeen: serverTimestamp(),
+        updatedAt: serverTimestamp(),
       }).catch(() => {});
-    } catch (e) {}
+    } else {
+      try {
+        fetch('/api/presence/heartbeat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId }),
+        }).catch(() => {});
+      } catch {
+        // ignore
+      }
+    }
+
+    setOnlineUsers((prev) => ({
+      ...prev,
+      [userId]: { is_online: true, last_seen: now },
+    }));
+
+    try {
+      presenceBusRef.current?.postMessage({
+        type: 'PRESENCE_UPDATE',
+        userId,
+        is_online: true,
+        last_seen: now,
+      });
+    } catch {
+      // ignore
+    }
   }, []);
+
+  const fetchOnlinePresence = useCallback(async () => {
+    if (isFirebaseSessionActive(currentUserId)) return;
+    try {
+      const res = await fetch('/api/presence/online');
+      if (!res.ok) return;
+      const data = await res.json();
+      if (Array.isArray(data.users)) {
+        const nextMap: Record<string, { is_online: boolean; last_seen: string }> = {};
+        data.users.forEach((u: any) => {
+          if (u?.id) {
+            nextMap[u.id] = {
+              is_online: Boolean(u.is_online),
+              last_seen: u.last_seen || new Date().toISOString(),
+            };
+          }
+        });
+        if (currentUserId) {
+          nextMap[currentUserId] = {
+            is_online: true,
+            last_seen: new Date().toISOString(),
+          };
+        }
+        setOnlineUsers(nextMap);
+      }
+    } catch {
+      // ignore
+    }
+  }, [currentUserId]);
 
   useEffect(() => {
     if (!currentUserId) return;
 
-    const supabase = getSupabase();
+    const usingFirebase = isFirebaseSessionActive(currentUserId);
+
+    if (typeof BroadcastChannel !== 'undefined') {
+      const bus = new BroadcastChannel('liveconnect_presence_sync');
+      presenceBusRef.current = bus;
+      bus.onmessage = (event) => {
+        const msg = event.data;
+        if (msg?.type === 'PRESENCE_UPDATE' && msg.userId) {
+          setOnlineUsers((prev) => ({
+            ...prev,
+            [msg.userId]: {
+              is_online: Boolean(msg.is_online),
+              last_seen: msg.last_seen || new Date().toISOString(),
+            },
+          }));
+        }
+      };
+    }
 
     // 1. Immediately mark self online
     sendOnlineHeartbeat(currentUserId);
 
-    // 2. Set up Supabase Realtime Presence Channel
-    const channel = supabase.channel('online-presence', {
-      config: {
-        presence: {
-          key: currentUserId,
-        },
-      },
-    });
+    let unsubFirestore: (() => void) | null = null;
+    let pollInterval: any = null;
 
-    channelRef.current = channel;
-
-    channel
-      .on('presence', { event: 'sync' }, () => {
-        const state = channel.presenceState();
-        const newOnlineMap: Record<string, { is_online: boolean; last_seen: string }> = {};
-
-        Object.keys(state).forEach((userId) => {
-          newOnlineMap[userId] = {
-            is_online: true,
-            last_seen: new Date().toISOString(),
-          };
-        });
-
-        // Always ensure current user is marked online in their own view
-        if (currentUserId) {
-          newOnlineMap[currentUserId] = {
-            is_online: true,
-            last_seen: new Date().toISOString(),
-          };
-        }
-
-        setOnlineUsers(newOnlineMap);
-      })
-      .on('presence', { event: 'join' }, ({ key }) => {
-        if (key) {
-          setOnlineUsers((prev) => ({
-            ...prev,
-            [key]: { is_online: true, last_seen: new Date().toISOString() },
-          }));
-        }
-      })
-      .on('presence', { event: 'leave' }, ({ key }) => {
-        if (key) {
-          setOnlineUsers((prev) => ({
-            ...prev,
-            [key]: { is_online: false, last_seen: new Date().toISOString() },
-          }));
-        }
-      })
-      .subscribe(async (status) => {
-        if (status === 'SUBSCRIBED') {
-          await channel.track({
-            user_id: currentUserId,
-            online_at: new Date().toISOString(),
+    if (usingFirebase) {
+      const q = query(
+        collection(db, 'public_profiles'),
+        where('isPublic', '==', true),
+        where('isOnline', '==', true),
+        limit(150)
+      );
+      unsubFirestore = onSnapshot(
+        q,
+        (snap) => {
+          const nextMap: Record<string, { is_online: boolean; last_seen: string }> = {};
+          snap.forEach((docSnap) => {
+            const d = docSnap.data();
+            nextMap[docSnap.id] = {
+              is_online: Boolean(d.isOnline),
+              last_seen: tsToIso(d.lastSeen),
+            };
           });
+          nextMap[currentUserId] = {
+            is_online: true,
+            last_seen: new Date().toISOString(),
+          };
+          setOnlineUsers(nextMap);
+        },
+        (err) => {
+          if (!auth.currentUser) return;
+          handleFirestoreError(err, OperationType.LIST, 'public_profiles');
         }
-      });
+      );
+    } else {
+      fetchOnlinePresence();
+      pollInterval = setInterval(() => {
+        fetchOnlinePresence();
+      }, 8000);
+    }
 
-    // 3. Heartbeat interval every 20 seconds
+    // 2. Heartbeat interval every 20 seconds
     const heartbeatInterval = setInterval(() => {
       sendOnlineHeartbeat(currentUserId);
-      if (channelRef.current) {
-        channelRef.current.track({
-          user_id: currentUserId,
-          online_at: new Date().toISOString(),
-        }).catch(() => {});
-      }
     }, 20000);
 
-    // 4. Tick timer every 10 seconds to auto-expire stale heartbeats
+    // 3. Tick timer every 10 seconds to auto-expire stale heartbeats
     const tickInterval = setInterval(() => {
       setTick((t) => (t + 1) % 10000);
     }, 10000);
 
-    // 5. Browser Lifecycle events (beforeunload, pagehide, visibilitychange)
+    // 4. Browser Lifecycle events
     const handleBeforeUnload = () => {
       sendOfflineStatus(currentUserId);
     };
@@ -156,14 +219,8 @@ export function usePresence(currentUserId?: string) {
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
         sendOnlineHeartbeat(currentUserId);
-        if (channelRef.current) {
-          channelRef.current.track({
-            user_id: currentUserId,
-            online_at: new Date().toISOString(),
-          }).catch(() => {});
-        }
+        if (!usingFirebase) fetchOnlinePresence();
       } else if (document.visibilityState === 'hidden') {
-        // Update last seen
         sendOnlineHeartbeat(currentUserId);
       }
     };
@@ -173,47 +230,42 @@ export function usePresence(currentUserId?: string) {
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
+      if (unsubFirestore) unsubFirestore();
+      if (pollInterval) clearInterval(pollInterval);
       clearInterval(heartbeatInterval);
       clearInterval(tickInterval);
       window.removeEventListener('beforeunload', handleBeforeUnload);
       window.removeEventListener('pagehide', handleBeforeUnload);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
 
-      if (channelRef.current) {
-        channelRef.current.untrack().catch(() => {});
-        supabase.removeChannel(channelRef.current);
+      if (presenceBusRef.current) {
+        presenceBusRef.current.close();
+        presenceBusRef.current = null;
       }
       sendOfflineStatus(currentUserId);
     };
-  }, [currentUserId, sendOnlineHeartbeat, sendOfflineStatus]);
+  }, [currentUserId, sendOnlineHeartbeat, sendOfflineStatus, fetchOnlinePresence]);
 
-  /**
-   * Accurate check if a user is online:
-   * 1. Current user themselves -> ALWAYS true if logged in and active
-   * 2. Realtime presence map entry exists -> Use presence state (true/false)
-   * 3. Database fallback -> ONLY online if `is_online === true` AND `last_seen` was within the last 50 seconds
-   * 4. Everything else -> Strictly FALSE (Offline)
-   */
   const isUserOnline = useCallback(
     (profile?: Profile | null): boolean => {
       if (!profile?.id) return false;
 
-      // 1. Current user is active
       if (currentUserId && profile.id === currentUserId) {
         return true;
       }
 
-      // 2. Realtime presence map check
       const presenceData = onlineUsers[profile.id];
       if (presenceData !== undefined) {
-        return Boolean(presenceData.is_online);
+        if (!presenceData.is_online) return false;
+        const lastSeenMs = new Date(presenceData.last_seen).getTime();
+        if (!isNaN(lastSeenMs) && Date.now() - lastSeenMs < 55 * 1000) {
+          return true;
+        }
       }
 
-      // 3. Strict DB freshness check (Heartbeat interval is 20s; allow max 50s window)
       if (profile.is_online && profile.last_seen) {
         const lastSeenMs = new Date(profile.last_seen).getTime();
-        const now = Date.now();
-        if (!isNaN(lastSeenMs) && now - lastSeenMs < 50 * 1000) {
+        if (!isNaN(lastSeenMs) && Date.now() - lastSeenMs < 50 * 1000) {
           return true;
         }
       }

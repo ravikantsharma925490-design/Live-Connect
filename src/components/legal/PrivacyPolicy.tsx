@@ -250,7 +250,7 @@ export const PrivacyPolicy: React.FC<PrivacyPolicyProps> = ({
               </div>
               <div className="text-xs md:text-sm text-neutral-600 dark:text-neutral-300 leading-relaxed space-y-2.5">
                 <p>
-                  <strong>Text Messaging:</strong> Messages are delivered over encrypted HTTPS/WSS transport connections and stored in our managed PostgreSQL database (Supabase) protected by database-level Row-Level Security (RLS) policies. Messages are queryable only by the authenticated participants of each conversation.
+                  <strong>Text Messaging:</strong> Messages are delivered over encrypted HTTPS/WSS transport connections and stored in our LiveConnect SQLite database protected by strict participant access checks. Messages are queryable only by the authenticated participants of each conversation.
                 </p>
                 <div className="p-3.5 rounded-2xl bg-amber-50/70 dark:bg-amber-950/40 border border-amber-200/80 dark:border-amber-900/60 text-xs text-amber-800 dark:text-amber-200">
                   <p className="font-semibold mb-1">Notice Regarding Encryption:</p>
@@ -296,7 +296,7 @@ export const PrivacyPolicy: React.FC<PrivacyPolicyProps> = ({
               </div>
               <div className="text-xs md:text-sm text-neutral-600 dark:text-neutral-300 leading-relaxed space-y-2.5">
                 <p>
-                  Account credentials, user profiles, conversation memberships, message logs, call history records, and support inquiries are stored in secure cloud backend databases (Supabase PostgreSQL).
+                  Account credentials, user profiles, conversation memberships, message logs, call history records, and support inquiries are stored in our secure LiveConnect SQLite database on our application server.
                 </p>
                 <p>
                   We do not expose database connection secrets, service role keys, or internal infrastructure tokens to client browsers. All public communication relies on authenticated JWT tokens and scoped user privileges.
@@ -479,9 +479,9 @@ export const PrivacyPolicy: React.FC<PrivacyPolicyProps> = ({
                   <div className="p-3.5 rounded-2xl bg-neutral-50 dark:bg-neutral-800/60 border border-neutral-200/80 dark:border-neutral-700/60 flex items-start gap-3">
                     <Database className="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" />
                     <div>
-                      <h4 className="text-xs font-bold text-neutral-900 dark:text-neutral-100">Supabase (PostgreSQL & Realtime)</h4>
+                      <h4 className="text-xs font-bold text-neutral-900 dark:text-neutral-100">LiveConnect Backend &amp; SQLite Database</h4>
                       <p className="text-xs text-neutral-600 dark:text-neutral-400 mt-0.5">
-                        Provides user authentication, database persistence for chats and call history, and WebSockets for real-time message sync.
+                        Provides user authentication, persistent SQLite database storage for chats and call history, and real-time message synchronization.
                       </p>
                     </div>
                   </div>

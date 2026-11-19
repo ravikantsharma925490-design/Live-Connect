@@ -1,5 +1,15 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { getSupabase } from '@/src/lib/supabase/client';
+import {
+  collection,
+  doc,
+  getDoc,
+  setDoc,
+  updateDoc,
+  query,
+  where,
+  onSnapshot,
+  serverTimestamp,
+} from 'firebase/firestore';
 import { WebRTCP2PSession } from '@/src/lib/webrtc/p2p-session';
 import { audioTones } from '@/src/lib/audio-tones';
 import { notificationService } from '@/src/lib/notification-service';
@@ -7,7 +17,18 @@ import { Call, CallType, Profile, ActiveCallState, ConnectionState } from '@/src
 import { recordCallInHistory, updateCallInHistory } from './useCallHistory';
 import { insertCallLogIntoChat, formatCallDurationText } from '@/src/lib/callChatLog';
 import { admobService } from '@/src/lib/admob/admob-service';
-import { getClientDeviceId } from '@/src/lib/utils';
+import { getClientDeviceId, generateUUID } from '@/src/lib/utils';
+import {
+  db,
+  auth,
+  isFirebaseSessionActive,
+  OperationType,
+  handleFirestoreError,
+  tsToIso,
+  sanitizeStr,
+  sanitizeOptionalStr,
+} from '@/src/lib/firebase/client';
+import { fetchPublicProfileFs, fetchRelationStatusFs } from '@/src/lib/firebase/services';
 
 function createFallbackProfile(id: string, name = 'Caller'): Profile {
   return {
@@ -34,13 +55,29 @@ function generateCallUUID(): string {
   });
 }
 
+const TERMINAL_CALL_STATUSES = ['ended', 'rejected', 'cancelled', 'missed', 'failed'];
+
+async function safeUpdateFirestoreCall(callId: string, patch: Record<string, any>): Promise<void> {
+  try {
+    const callRef = doc(db, 'calls', callId);
+    const snap = await getDoc(callRef);
+    if (!snap.exists()) return;
+    if (TERMINAL_CALL_STATUSES.includes(snap.data()?.status)) return;
+    await updateDoc(callRef, {
+      ...patch,
+      updatedAt: serverTimestamp(),
+    });
+  } catch {
+    // Silent guard against concurrent terminal transitions
+  }
+}
+
 // Studio Voice Audio Constraints with Multi-Browser Acoustic Echo Cancellation (AEC)
 export const HD_CALL_AUDIO_CONSTRAINTS: MediaTrackConstraints = {
   echoCancellation: { ideal: true },
   noiseSuppression: { ideal: true },
   autoGainControl: { ideal: true },
   channelCount: { ideal: 1 },
-  // Chromium & WebKit specific AEC / AGC / Noise Suppression flags
   googEchoCancellation: true,
   googEchoCancellation2: true,
   googAutoGainControl: true,
@@ -50,22 +87,19 @@ export const HD_CALL_AUDIO_CONSTRAINTS: MediaTrackConstraints = {
   googAudioMirroring: false,
 } as any;
 
-// High Definition (1080p / 720p 30fps) Video Constraints (Mobile-safe ideal parameters)
+// High Definition (720p 30fps) Video Constraints (Mobile-safe ideal parameters)
 export const HD_CALL_VIDEO_CONSTRAINTS: MediaTrackConstraints = {
   facingMode: 'user',
   width: { ideal: 1280 },
   height: { ideal: 720 },
 };
 
-export function useCall(
-  currentUser?: Profile | null
-) {
+export function useCall(currentUser?: Profile | null) {
   const [incomingCall, setIncomingCall] = useState<Call | null>(null);
   const [activeCallState, setActiveCallState] = useState<ActiveCallState | null>(null);
   const [connectionState, setConnectionState] = useState<ConnectionState>(ConnectionState.Disconnected);
   const [callError, setCallError] = useState<string | null>(null);
 
-  // Keep references to prevent unstable function recreations
   const currentUserRef = useRef<Profile | null | undefined>(currentUser);
   currentUserRef.current = currentUser;
 
@@ -80,7 +114,6 @@ export function useCall(
   const answeredCallIdsRef = useRef<Set<string>>(new Set<string>());
   const connectingCallIdRef = useRef<string | null>(null);
 
-  const sessionRef = useRef<any>(null);
   const p2pSessionRef = useRef<WebRTCP2PSession | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const durationIntervalRef = useRef<any>(null);
@@ -91,12 +124,10 @@ export function useCall(
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
   const remoteStreamRef = useRef<MediaStream | null>(null);
 
-  // Initialize AdMob on mount for Android Capacitor platform
   useEffect(() => {
     admobService.initialize().catch(() => {});
   }, []);
 
-  // Clean up timers
   const clearCallTimers = useCallback(() => {
     if (durationIntervalRef.current) {
       clearInterval(durationIntervalRef.current);
@@ -108,34 +139,32 @@ export function useCall(
     }
   }, []);
 
-  // Stop all media tracks and teardown session
   const cleanupMediaSession = useCallback(async () => {
     clearCallTimers();
     audioTones.stop();
     isAnsweringRef.current = false;
     connectingCallIdRef.current = null;
 
-    // Close WebRTC P2P session
     if (p2pSessionRef.current) {
       try {
         p2pSessionRef.current.close();
-      } catch (e) {}
+      } catch {
+        // ignore
+      }
       p2pSessionRef.current = null;
     }
 
-    // Stop local media stream
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((track) => {
         try {
           track.stop();
-        } catch (e) {
+        } catch {
           // ignore
         }
       });
       localStreamRef.current = null;
     }
 
-    // Reset video refs
     if (localVideoRef.current) {
       localVideoRef.current.srcObject = null;
     }
@@ -153,20 +182,17 @@ export function useCall(
     setConnectionState(ConnectionState.Disconnected);
   }, [clearCallTimers]);
 
-  // Request local camera and microphone stream with studio HD voice processing and High-Definition video
   const acquireLocalMedia = async (isVideo: boolean) => {
     try {
       if (typeof navigator !== 'undefined' && navigator.mediaDevices?.getUserMedia) {
         let stream: MediaStream;
         try {
-          // Priority 1: Full HD 1080p / 720p 60fps/30fps Video with studio audio
           stream = await navigator.mediaDevices.getUserMedia({
             audio: HD_CALL_AUDIO_CONSTRAINTS,
             video: isVideo ? HD_CALL_VIDEO_CONSTRAINTS : false,
           });
-        } catch (mediaErr) {
+        } catch {
           try {
-            // Priority 2: 720p HD Video fallback with standard noise cancellation and echo cancellation
             stream = await navigator.mediaDevices.getUserMedia({
               audio: {
                 echoCancellation: true,
@@ -177,10 +203,11 @@ export function useCall(
                 googNoiseSuppression: true,
                 googHighpassFilter: true,
               } as any,
-              video: isVideo ? { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } } : false,
+              video: isVideo
+                ? { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } }
+                : false,
             });
           } catch {
-            // Priority 3: Basic standard video fallback with echo cancellation
             stream = await navigator.mediaDevices.getUserMedia({
               audio: {
                 echoCancellation: true,
@@ -207,7 +234,6 @@ export function useCall(
 
         localStreamRef.current = stream;
 
-        // Attach local preview to video element
         if (isVideo && localVideoRef.current) {
           localVideoRef.current.srcObject = stream;
           localVideoRef.current.play().catch(() => {});
@@ -217,141 +243,241 @@ export function useCall(
     } catch (err: any) {
       console.warn('Could not acquire local camera/mic stream:', err);
       if (err?.name === 'NotAllowedError' || err?.name === 'PermissionDeniedError') {
-        setCallError('Microphone permission is required. Please allow microphone access in your browser to make or receive calls.');
+        setCallError(
+          'Microphone permission is required. Please allow microphone access in your browser to make or receive calls.'
+        );
       }
-      // Fallback silent stream to prevent WebRTC handshake failure
       try {
         const stream = new MediaStream();
         localStreamRef.current = stream;
         return stream;
-      } catch {}
+      } catch {
+        // ignore
+      }
     }
     return null;
   };
 
   // Connect to Direct WebRTC 1-to-1 P2P Media Session
-  const connectToCallRoom = useCallback(
-    async (call: Call, isVideo: boolean) => {
-      try {
-        const user = currentUserRef.current;
-        if (!user) return;
-        setCallError(null);
+  const connectToCallRoom = useCallback(async (call: Call, isVideo: boolean) => {
+    try {
+      const user = currentUserRef.current;
+      if (!user) return;
+      setCallError(null);
 
-        // Ensure local media is initialized
-        if (!localStreamRef.current) {
-          await acquireLocalMedia(isVideo);
-        }
-        if (!localStreamRef.current) {
-          localStreamRef.current = new MediaStream();
-        }
+      if (!localStreamRef.current) {
+        await acquireLocalMedia(isVideo);
+      }
+      if (!localStreamRef.current) {
+        localStreamRef.current = new MediaStream();
+      }
 
-        // Start call duration counter if not already running
-        if (!durationIntervalRef.current) {
-          const startTime = Date.now();
-          durationIntervalRef.current = setInterval(() => {
-            setActiveCallState((prev) => {
-              if (!prev) return null;
-              const newDuration = Math.floor((Date.now() - startTime) / 1000);
+      if (!durationIntervalRef.current) {
+        const startTime = Date.now();
+        durationIntervalRef.current = setInterval(() => {
+          setActiveCallState((prev) => {
+            if (!prev) return null;
+            const newDuration = Math.floor((Date.now() - startTime) / 1000);
+            return {
+              ...prev,
+              durationSeconds: newDuration,
+            };
+          });
+        }, 1000);
+      }
 
-              return {
-                ...prev,
-                durationSeconds: newDuration,
-              };
-            });
-          }, 1000);
-        }
-
-        // Establish Direct WebRTC P2P Call (1-to-1 HD encrypted audio/video)
-        if (localStreamRef.current) {
-          if (p2pSessionRef.current) {
-            setConnectionState(ConnectionState.Connected);
-            audioTones.playConnectedSound();
-            return;
-          }
-          const peerId = call.caller_id === user.id ? call.callee_id : call.caller_id;
-          const isCaller = call.caller_id === user.id;
-          const targetDeviceId = isCaller ? call.calleeDeviceId : call.callerDeviceId;
-          const currentDeviceId = getClientDeviceId();
-
-          const p2p = new WebRTCP2PSession(
-            call.id,
-            user.id,
-            peerId,
-            isCaller,
-            {
-              onConnected: () => {
-                setConnectionState(ConnectionState.Connected);
-                audioTones.playConnectedSound();
-              },
-              onDisconnected: () => {
-                setConnectionState(ConnectionState.Disconnected);
-              },
-              onRemoteTrack: (track, stream) => {
-                remoteStreamRef.current = stream;
-                if (typeof window !== 'undefined') {
-                  (window as any).__liveconnect_active_remote_stream = stream;
-                }
-                if (track.kind === 'video' && remoteVideoRef.current) {
-                  // Attach ONLY video tracks to video element and strictly force muted
-                  const videoTracks = stream.getVideoTracks();
-                  if (videoTracks.length > 0) {
-                    const videoStream = new MediaStream(videoTracks);
-                    if (remoteVideoRef.current.srcObject !== videoStream) {
-                      remoteVideoRef.current.srcObject = videoStream;
-                    }
-                  }
-                  remoteVideoRef.current.muted = true;
-                  remoteVideoRef.current.defaultMuted = true;
-                  remoteVideoRef.current.play().catch(() => {});
-                }
-                if (track.kind === 'audio' && remoteAudioRef.current) {
-                  // Attach ONLY audio tracks to dedicated audio element
-                  const audioTracks = stream.getAudioTracks();
-                  if (audioTracks.length > 0) {
-                    const audioStream = new MediaStream(audioTracks);
-                    if (remoteAudioRef.current.srcObject !== audioStream) {
-                      remoteAudioRef.current.srcObject = audioStream;
-                    }
-                  }
-                  remoteAudioRef.current.volume = 1.0;
-                  remoteAudioRef.current.play().catch(() => {});
-                }
-              },
-              onError: (err) => {
-                console.warn('WebRTC P2P notice:', err.message);
-              },
-              onNetworkQualityChange: (quality) => {
-                setActiveCallState((prev) => prev ? { ...prev, networkQuality: quality } : null);
-              },
-            },
-            currentDeviceId,
-            targetDeviceId
-          );
-
-          p2pSessionRef.current = p2p;
-          await p2p.start(localStreamRef.current, isVideo);
+      if (localStreamRef.current) {
+        if (p2pSessionRef.current) {
           setConnectionState(ConnectionState.Connected);
           audioTones.playConnectedSound();
+          return;
         }
-      } catch (err: any) {
-        console.error('Call connection setup error:', err);
-        setCallError(err.message || 'Could not connect to call');
-      }
-    },
-    [cleanupMediaSession]
-  );
+        const peerId = call.caller_id === user.id ? call.callee_id : call.caller_id;
+        const isCaller = call.caller_id === user.id;
+        const targetDeviceId = isCaller ? call.calleeDeviceId : call.callerDeviceId;
+        const currentDeviceId = getClientDeviceId();
 
-  // Subscribe to realtime calls, broadcast bus, & poll server signaling relay
+        const p2p = new WebRTCP2PSession(
+          call.id,
+          user.id,
+          peerId,
+          isCaller,
+          {
+            onConnected: () => {
+              setConnectionState(ConnectionState.Connected);
+              audioTones.playConnectedSound();
+            },
+            onDisconnected: () => {
+              setConnectionState(ConnectionState.Disconnected);
+            },
+            onRemoteTrack: (track, stream) => {
+              remoteStreamRef.current = stream;
+              if (typeof window !== 'undefined') {
+                (window as any).__liveconnect_active_remote_stream = stream;
+              }
+              if (track.kind === 'video' && remoteVideoRef.current) {
+                const videoTracks = stream.getVideoTracks();
+                if (videoTracks.length > 0) {
+                  const videoStream = new MediaStream(videoTracks);
+                  if (remoteVideoRef.current.srcObject !== videoStream) {
+                    remoteVideoRef.current.srcObject = videoStream;
+                  }
+                }
+                remoteVideoRef.current.muted = true;
+                remoteVideoRef.current.defaultMuted = true;
+                remoteVideoRef.current.play().catch(() => {});
+              }
+              if (track.kind === 'audio' && remoteAudioRef.current) {
+                const audioTracks = stream.getAudioTracks();
+                if (audioTracks.length > 0) {
+                  const audioStream = new MediaStream(audioTracks);
+                  if (remoteAudioRef.current.srcObject !== audioStream) {
+                    remoteAudioRef.current.srcObject = audioStream;
+                  }
+                }
+                remoteAudioRef.current.volume = 1.0;
+                remoteAudioRef.current.play().catch(() => {});
+              }
+            },
+            onError: (err) => {
+              console.warn('WebRTC P2P notice:', err.message);
+            },
+            onNetworkQualityChange: (quality) => {
+              setActiveCallState((prev) => (prev ? { ...prev, networkQuality: quality } : null));
+            },
+          },
+          currentDeviceId,
+          targetDeviceId
+        );
+
+        p2pSessionRef.current = p2p;
+        await p2p.start(localStreamRef.current, isVideo);
+        setConnectionState(ConnectionState.Connected);
+        audioTones.playConnectedSound();
+      }
+    } catch (err: any) {
+      console.error('Call connection setup error:', err);
+      setCallError(err.message || 'Could not connect to call');
+    }
+  }, []);
+
+  // Subscribe to incoming calls (Firestore real-time when signed in with Firebase; BroadcastChannel + polling otherwise)
   useEffect(() => {
     if (!currentUser?.id) return;
 
-    // Handle cross-tab call signals (from BroadcastChannel or localStorage)
+    if (isFirebaseSessionActive(currentUser.id)) {
+      const incomingQuery = query(
+        collection(db, 'calls'),
+        where('calleeId', '==', currentUser.id),
+        where('status', 'in', ['calling', 'ringing'])
+      );
+
+      const unsubIncoming = onSnapshot(
+        incomingQuery,
+        async (snap) => {
+          if (activeCallStateRef.current) return;
+
+          const now = Date.now();
+          let matchedCall: Call | null = null;
+
+          for (const docSnap of snap.docs) {
+            const d = docSnap.data();
+            if (!d) continue;
+            if (answeredCallIdsRef.current.has(docSnap.id) || isAnsweringRef.current) continue;
+            if (d.callerDeviceId && d.callerDeviceId === getClientDeviceId()) continue;
+
+            const createdIso = tsToIso(d.createdAt);
+            const ageMs = now - new Date(createdIso).getTime();
+            if (ageMs > 60000) continue;
+
+            const callerProf =
+              (await fetchPublicProfileFs(d.callerId).catch(() => null)) ||
+              ({
+                id: d.callerId,
+                username: d.callerUsername || 'user',
+                display_name: d.callerDisplayName || d.callerUsername || 'Caller',
+                avatar_url: d.callerAvatarUrl || null,
+                bio: null,
+                is_online: true,
+                last_seen: createdIso,
+                created_at: createdIso,
+                updated_at: createdIso,
+              } as Profile);
+
+            matchedCall = {
+              id: docSnap.id,
+              caller_id: d.callerId,
+              callee_id: d.calleeId,
+              callerDeviceId: d.callerDeviceId,
+              calleeDeviceId: d.calleeDeviceId,
+              call_type: d.callType,
+              status: d.status,
+              room_name: d.roomName,
+              started_at: createdIso,
+              answered_at: d.answeredAt ? tsToIso(d.answeredAt) : null,
+              ended_at: d.endedAt ? tsToIso(d.endedAt) : null,
+              created_at: createdIso,
+              updated_at: tsToIso(d.updatedAt),
+              caller: callerProf,
+            };
+            break;
+          }
+
+          if (matchedCall) {
+            const currentIncoming = incomingCallRef.current;
+            if (!currentIncoming || currentIncoming.id !== matchedCall.id) {
+              incomingCallReceivedAtRef.current = Date.now();
+              setIncomingCall(matchedCall);
+
+              recordCallInHistory(currentUser.id, {
+                ...matchedCall,
+                peer: matchedCall.caller || createFallbackProfile(matchedCall.caller_id, 'Caller'),
+                direction: 'incoming',
+                isMissed: false,
+                durationFormatted: 'Ringing...',
+              });
+
+              const isCallSoundEnabled = localStorage.getItem('liveconnect_perm_call_sound') !== 'false';
+              if (isCallSoundEnabled) {
+                audioTones.startIncomingRingtone();
+              }
+
+              const callerName = matchedCall.caller?.display_name || 'Someone';
+              notificationService.sendNotification({
+                title: `Incoming ${matchedCall.call_type === 'video' ? 'Video' : 'Voice'} Call`,
+                body: `${callerName} is calling you on LiveConnect...`,
+                icon: matchedCall.caller?.avatar_url || '/favicon.ico',
+                tag: `call-${matchedCall.id}`,
+              });
+
+              if (matchedCall.status === 'calling') {
+                safeUpdateFirestoreCall(matchedCall.id, { status: 'ringing' });
+              }
+            }
+          }
+        },
+        (err) => {
+          if (!auth.currentUser) return;
+          handleFirestoreError(err, OperationType.LIST, 'calls');
+        }
+      );
+
+      return () => {
+        unsubIncoming();
+      };
+    }
+
     const handleSignal = async (data: any) => {
       if (!data || !data.type) return;
 
       if (data.type === 'CALL_RINGING') {
         const incoming = data.call as Call;
-        if (incoming && incoming.callee_id === currentUser.id && !activeCallStateRef.current) {
+        if (
+          incoming &&
+          incoming.callee_id === currentUser.id &&
+          !activeCallStateRef.current &&
+          incoming.callerDeviceId !== getClientDeviceId()
+        ) {
           const callerProfile = data.callerMeta || incoming.caller;
           const fullCall: Call = {
             ...incoming,
@@ -360,7 +486,6 @@ export function useCall(
           incomingCallReceivedAtRef.current = Date.now();
           setIncomingCall(fullCall);
 
-          // Record incoming call in call history
           const fallbackPeer = createFallbackProfile(incoming.caller_id, 'Caller');
           recordCallInHistory(currentUser.id, {
             ...fullCall,
@@ -374,6 +499,14 @@ export function useCall(
           if (isCallSoundEnabled) {
             audioTones.startIncomingRingtone();
           }
+
+          const callerName = callerProfile?.display_name || 'Someone';
+          notificationService.sendNotification({
+            title: `Incoming ${incoming.call_type === 'video' ? 'Video' : 'Voice'} Call`,
+            body: `${callerName} is calling you on LiveConnect...`,
+            icon: callerProfile?.avatar_url || '/favicon.ico',
+            tag: `call-${incoming.id}`,
+          });
         }
       } else if (data.type === 'CALL_ACCEPTED') {
         const currentActive = activeCallStateRef.current;
@@ -407,10 +540,15 @@ export function useCall(
           });
         }
         if (activeCallStateRef.current && activeCallStateRef.current.call.id === data.callId) {
-          const wasConnected = activeCallStateRef.current.status === 'connected' || (activeCallStateRef.current.durationSeconds || 0) > 0;
+          const wasConnected =
+            activeCallStateRef.current.status === 'connected' ||
+            (activeCallStateRef.current.durationSeconds || 0) > 0;
           const callId = data.callId;
           audioTones.playCallEndedSound();
-          const durationSecs = typeof data.duration === 'number' ? data.duration : (activeCallStateRef.current.durationSeconds || 0);
+          const durationSecs =
+            typeof data.duration === 'number'
+              ? data.duration
+              : activeCallStateRef.current.durationSeconds || 0;
           const durationFormatted = formatCallDurationText(durationSecs);
           await cleanupMediaSession();
           setActiveCallState(null);
@@ -420,7 +558,6 @@ export function useCall(
             durationFormatted: durationFormatted || 'Call ended',
           });
 
-          // Trigger AdMob Interstitial Ad (Android only, completed calls only, at most once per call session)
           if (wasConnected) {
             admobService.showPostCallInterstitial(callId, true).catch(() => {});
           }
@@ -428,14 +565,12 @@ export function useCall(
       }
     };
 
-    // 0a. Setup BroadcastChannel for 0ms cross-tab signaling in the same browser session
     if (typeof BroadcastChannel !== 'undefined') {
       const bus = new BroadcastChannel('liveconnect_calls_bus');
       callBusRef.current = bus;
       bus.onmessage = (event) => handleSignal(event.data);
     }
 
-    // 0b. Storage event listener fallback for cross-tab sync
     const handleStorageEvent = (e: StorageEvent) => {
       if (e.key === 'liveconnect_cross_tab_call_signal' && e.newValue) {
         try {
@@ -450,187 +585,11 @@ export function useCall(
       window.addEventListener('storage', handleStorageEvent);
     }
 
-    const supabase = getSupabase();
-
-    // 1. Supabase Realtime Channel
-    const handleIncomingCallRealtime = async (newCall: Call) => {
-      // Avoid ringing ourselves if cross-device self-call
-      if (newCall.callerDeviceId && newCall.callerDeviceId === getClientDeviceId()) return;
-      if (activeCallStateRef.current?.call.id === newCall.id) return;
-
-      if (newCall.status === 'calling' || newCall.status === 'ringing') {
-        // Fetch caller profile
-        const { data: callerProfile } = await supabase
-          .from('profiles')
-          .select('*')
-          .eq('id', newCall.caller_id)
-          .single();
-
-        const callWithCaller: Call = {
-          ...newCall,
-          caller: (callerProfile as Profile) || undefined,
-        };
-
-        incomingCallReceivedAtRef.current = Date.now();
-        setIncomingCall(callWithCaller);
-
-        // Record incoming call in call history
-        const fallbackPeer = createFallbackProfile(newCall.caller_id, 'Caller');
-        recordCallInHistory(currentUser.id, {
-          ...callWithCaller,
-          peer: (callerProfile as Profile) || fallbackPeer,
-          direction: 'incoming',
-          isMissed: false,
-          durationFormatted: 'Ringing...',
-        });
-
-        // Play ringtone if user hasn't muted call ringtones
-        const isCallSoundEnabled = localStorage.getItem('liveconnect_perm_call_sound') !== 'false';
-        if (isCallSoundEnabled) {
-          audioTones.startIncomingRingtone();
-        }
-
-        // Dispatch push notification
-        const callerName = callerProfile?.display_name || 'Someone';
-        notificationService.sendNotification({
-          title: `Incoming ${newCall.call_type === 'video' ? 'Video' : 'Voice'} Call`,
-          body: `${callerName} is calling you on LiveConnect...`,
-          icon: callerProfile?.avatar_url || '/favicon.ico',
-          tag: `call-${newCall.id}`,
-        });
-
-        // Update call status to ringing
-        supabase
-          .from('calls')
-          .update({ status: 'ringing' })
-          .eq('id', newCall.id)
-          .then(() => {});
-
-        fetch('/api/calls/action', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ callId: newCall.id, action: 'ring', userId: currentUser.id }),
-        }).catch(() => {});
-      }
-    };
-
-    const handleCallActionRealtime = async (updatedCall: Partial<Call>) => {
-      if (!updatedCall.id || !updatedCall.status) return;
-      const currentIncoming = incomingCallRef.current;
-      const currentActive = activeCallStateRef.current;
-
-      // If incoming call was cancelled or missed
-      if (currentIncoming && currentIncoming.id === updatedCall.id) {
-        if (['cancelled', 'ended', 'missed', 'rejected'].includes(updatedCall.status)) {
-          audioTones.stop();
-          setIncomingCall(null);
-          updateCallInHistory(currentUser.id, updatedCall.id, {
-            status: updatedCall.status,
-            ended_at: updatedCall.ended_at || new Date().toISOString(),
-          });
-        }
-      }
-
-      // If active call status changed
-      if (currentActive && currentActive.call.id === updatedCall.id) {
-        if ((updatedCall.status === 'accepted' || updatedCall.status === 'connected') && currentActive.status !== 'connected') {
-          audioTones.stop();
-          audioTones.playConnectedSound();
-          // Clear auto-cancel timeout since call was accepted
-          if (callTimeoutRef.current) {
-            clearTimeout(callTimeoutRef.current);
-            callTimeoutRef.current = null;
-          }
-
-          if (updatedCall.calleeDeviceId) {
-            currentActive.call.calleeDeviceId = updatedCall.calleeDeviceId;
-          }
-
-          const nextActive = { ...currentActive, status: 'connected' as const };
-          activeCallStateRef.current = nextActive;
-          setActiveCallState(nextActive);
-          updateCallInHistory(currentUser.id, updatedCall.id, {
-            status: 'accepted',
-            answered_at: new Date().toISOString(),
-            durationFormatted: 'Connected',
-          });
-
-          // Connect caller to room
-          if (currentActive.isCaller) {
-            await connectToCallRoom({ ...currentActive.call, ...updatedCall } as Call, currentActive.call.call_type === 'video');
-          }
-        } else if (['rejected', 'ended', 'cancelled', 'failed', 'missed'].includes(updatedCall.status)) {
-          const wasConnected = currentActive.status === 'connected' || (currentActive.durationSeconds || 0) > 0;
-          const callId = updatedCall.id;
-          audioTones.playCallEndedSound();
-          await cleanupMediaSession();
-          setActiveCallState(null);
-          updateCallInHistory(currentUser.id, updatedCall.id, {
-            status: updatedCall.status,
-            ended_at: updatedCall.ended_at || new Date().toISOString(),
-          });
-
-          // Trigger AdMob Interstitial Ad (Android only, completed calls only, at most once per call session)
-          if (wasConnected && updatedCall.status === 'ended') {
-            admobService.showPostCallInterstitial(callId, true).catch(() => {});
-          }
-        }
-      }
-    };
-
-    const channel = supabase
-      .channel(`calls_channel_${currentUser.id}`)
-      .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'calls',
-          filter: `callee_id=eq.${currentUser.id}`,
-        },
-        async (payload) => {
-          handleIncomingCallRealtime(payload.new as Call);
-        }
-      )
-      .on(
-        'broadcast',
-        { event: 'incoming_call' },
-        (payload) => {
-          handleIncomingCallRealtime(payload.payload as Call);
-        }
-      )
-      .on(
-        'postgres_changes',
-        {
-          event: 'UPDATE',
-          schema: 'public',
-          table: 'calls',
-        },
-        async (payload) => {
-          handleCallActionRealtime(payload.new as Call);
-        }
-      )
-      .on(
-        'broadcast',
-        { event: 'call_action' },
-        (payload) => {
-          const { callId, action, status, calleeDeviceId } = payload.payload;
-          handleCallActionRealtime({
-             id: callId,
-             status,
-             calleeDeviceId
-          } as Partial<Call>);
-        }
-      )
-      .subscribe();
-
-    // 2. High-reliability Polling for incoming calls (every 300ms for instant cross-device notification)
     const incomingPollInterval = setInterval(async () => {
-      if (activeCallStateRef.current) return; // already in active call
+      if (activeCallStateRef.current) return;
       try {
         let foundCall: Call | null = null;
 
-        // Try server signaling relay first with device identification
         const res = await fetch('/api/calls/incoming', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -648,42 +607,13 @@ export function useCall(
           }
         }
 
-        // Direct DB fallback query if not found yet
-        if (!foundCall) {
-          const seventyFiveSecsAgo = new Date(Date.now() - 75000).toISOString();
-          const { data: dbCalls } = await supabase
-            .from('calls')
-            .select('*')
-            .eq('callee_id', currentUser.id)
-            .in('status', ['calling', 'ringing'])
-            .gte('created_at', seventyFiveSecsAgo)
-            .order('created_at', { ascending: false })
-            .limit(1);
-
-          if (Array.isArray(dbCalls) && dbCalls.length > 0) {
-            const dbCall = dbCalls[0] as Call;
-            const { data: callerP } = await supabase
-              .from('profiles')
-              .select('*')
-              .eq('id', dbCall.caller_id)
-              .single();
-
-            foundCall = {
-              ...dbCall,
-              caller: (callerP as Profile) || undefined,
-            };
-          }
-        }
-
         if (foundCall) {
-          // If already answering or already answered this call, skip
           if (answeredCallIdsRef.current.has(foundCall.id) || isAnsweringRef.current) return;
           const currentIncoming = incomingCallRef.current;
           if (!currentIncoming || currentIncoming.id !== foundCall.id) {
             incomingCallReceivedAtRef.current = Date.now();
             setIncomingCall(foundCall);
 
-            // Record incoming call in call history
             const fallbackPeer = createFallbackProfile(foundCall.caller_id, 'Caller');
             recordCallInHistory(currentUser.id, {
               ...foundCall,
@@ -698,6 +628,14 @@ export function useCall(
               audioTones.startIncomingRingtone();
             }
 
+            const callerName = foundCall.caller?.display_name || 'Someone';
+            notificationService.sendNotification({
+              title: `Incoming ${foundCall.call_type === 'video' ? 'Video' : 'Voice'} Call`,
+              body: `${callerName} is calling you on LiveConnect...`,
+              icon: foundCall.caller?.avatar_url || '/favicon.ico',
+              tag: `call-${foundCall.id}`,
+            });
+
             fetch('/api/calls/action', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -705,7 +643,6 @@ export function useCall(
             }).catch(() => {});
           }
         } else if (incomingCallRef.current) {
-          // If ringing for more than 45s without answer, auto-dismiss and record as missed
           if (Date.now() - incomingCallReceivedAtRef.current > 45000) {
             const timedOutCallId = incomingCallRef.current.id;
             audioTones.stop();
@@ -719,7 +656,6 @@ export function useCall(
             return;
           }
 
-          // Check if existing incoming call was cancelled / ended by caller
           const statusRes = await fetch('/api/calls/status', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -744,14 +680,13 @@ export function useCall(
             }
           }
         }
-      } catch (e) {
+      } catch {
         // network polling fallback
       }
-    }, 200);
+    }, 250);
 
     return () => {
       clearInterval(incomingPollInterval);
-      supabase.removeChannel(channel);
       if (typeof window !== 'undefined') {
         window.removeEventListener('storage', handleStorageEvent);
       }
@@ -760,14 +695,136 @@ export function useCall(
         callBusRef.current = null;
       }
     };
-  }, [currentUser?.id, connectToCallRoom, cleanupMediaSession]);
+  }, [currentUser?.id, currentUser?.username, connectToCallRoom, cleanupMediaSession]);
 
-  // Active call status monitor (monitors when caller/callee accepts, ends, rejects, or cancels)
+  // Monitor an incoming ringing call doc under Firebase so cancellation/timeout dismisses modal instantly
+  useEffect(() => {
+    if (!incomingCall?.id || !currentUser?.id || !isFirebaseSessionActive(currentUser.id)) return;
+
+    const incomingId = incomingCall.id;
+    const unsub = onSnapshot(
+      doc(db, 'calls', incomingId),
+      (snap) => {
+        if (!snap.exists()) return;
+        const d = snap.data();
+        if (TERMINAL_CALL_STATUSES.includes(d.status)) {
+          audioTones.stop();
+          audioTones.playCallEndedSound();
+          setIncomingCall(null);
+          updateCallInHistory(currentUser.id, incomingId, {
+            status: d.status,
+            isMissed: d.status !== 'ended',
+            ended_at: new Date().toISOString(),
+            durationFormatted: d.status === 'rejected' ? 'Declined' : 'Missed',
+          });
+        }
+      },
+      () => {}
+    );
+
+    const expireTimer = setTimeout(() => {
+      if (incomingCallRef.current?.id === incomingId) {
+        audioTones.stop();
+        setIncomingCall(null);
+        updateCallInHistory(currentUser.id, incomingId, {
+          status: 'missed',
+          isMissed: true,
+          ended_at: new Date().toISOString(),
+          durationFormatted: 'Missed',
+        });
+      }
+    }, 45000);
+
+    return () => {
+      unsub();
+      clearTimeout(expireTimer);
+    };
+  }, [incomingCall?.id, currentUser?.id]);
+
+  // Active call status monitor
   useEffect(() => {
     if (!activeCallState?.call?.id) return;
 
     const callId = activeCallState.call.id;
     const isCaller = activeCallState.isCaller;
+
+    if (currentUser?.id && isFirebaseSessionActive(currentUser.id)) {
+      const unsub = onSnapshot(
+        doc(db, 'calls', callId),
+        async (snap) => {
+          if (!snap.exists()) return;
+          const d = snap.data();
+          const currentActive = activeCallStateRef.current;
+          if (!currentActive || currentActive.call.id !== callId) return;
+
+          if ((d.status === 'accepted' || d.status === 'connected') && currentActive.status !== 'connected') {
+            audioTones.stop();
+            audioTones.playConnectedSound();
+            if (callTimeoutRef.current) {
+              clearTimeout(callTimeoutRef.current);
+              callTimeoutRef.current = null;
+            }
+            if (d.calleeDeviceId) {
+              currentActive.call.calleeDeviceId = d.calleeDeviceId;
+            }
+            const nextActive = { ...currentActive, status: 'connected' as const };
+            activeCallStateRef.current = nextActive;
+            setActiveCallState(nextActive);
+            updateCallInHistory(currentUser.id, callId, {
+              status: 'accepted',
+              answered_at: new Date().toISOString(),
+              durationFormatted: 'Connected',
+            });
+            if (isCaller) {
+              await connectToCallRoom(currentActive.call, currentActive.call.call_type === 'video');
+            }
+          } else if (TERMINAL_CALL_STATUSES.includes(d.status)) {
+            const wasConnected =
+              currentActive.status === 'connected' || (currentActive.durationSeconds || 0) > 0;
+            audioTones.playCallEndedSound();
+            await cleanupMediaSession();
+            setActiveCallState(null);
+
+            const isMissedStatus = ['rejected', 'cancelled', 'missed'].includes(d.status);
+            const durationSecs = currentActive?.durationSeconds || 0;
+            const durationFormatted = isMissedStatus
+              ? 'No answer'
+              : formatCallDurationText(durationSecs) || 'Call ended';
+
+            updateCallInHistory(currentUser.id, callId, {
+              status: d.status,
+              isMissed: isMissedStatus,
+              ended_at: new Date().toISOString(),
+              durationFormatted,
+            });
+
+            if (currentActive?.peer) {
+              insertCallLogIntoChat({
+                callId,
+                caller: currentActive.isCaller ? currentUser : currentActive.peer,
+                callee: currentActive.isCaller ? currentActive.peer : currentUser,
+                callType: currentActive.call.call_type,
+                status: d.status,
+                isMissed: isMissedStatus,
+                durationFormatted,
+              }).catch(() => {});
+            }
+
+            if (wasConnected && d.status === 'ended') {
+              admobService.showPostCallInterstitial(callId, true).catch(() => {});
+            }
+          }
+        },
+        (err) => {
+          if (!auth.currentUser) return;
+          handleFirestoreError(err, OperationType.GET, `calls/${callId}`);
+        }
+      );
+
+      return () => {
+        unsub();
+      };
+    }
 
     const statusInterval = setInterval(async () => {
       try {
@@ -776,25 +833,8 @@ export function useCall(
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ callId }),
         });
-        let data: any = null;
-        if (res.ok) {
-          data = await res.json();
-        }
-
-        // Direct Supabase fallback if status is not final or accepted yet
-        if (!data || (!['accepted', 'connected', 'rejected', 'ended', 'cancelled', 'missed'].includes(data?.status))) {
-          try {
-            const supabase = getSupabase();
-            const { data: dbRow } = await supabase
-              .from('calls')
-              .select('status, answered_at, ended_at')
-              .eq('id', callId)
-              .maybeSingle();
-            if (dbRow && dbRow.status && dbRow.status !== 'calling' && dbRow.status !== 'ringing') {
-              data = { exists: true, status: dbRow.status, call: { status: dbRow.status, answered_at: dbRow.answered_at, ended_at: dbRow.ended_at } };
-            }
-          } catch {}
-        }
+        if (!res.ok) return;
+        const data = await res.json();
 
         if (data) {
           const currentActive = activeCallStateRef.current;
@@ -823,12 +863,14 @@ export function useCall(
                 await connectToCallRoom(currentActive.call, currentActive.call.call_type === 'video');
               }
             } else if (data.exists && ['rejected', 'ended', 'cancelled', 'missed'].includes(data.status)) {
-              const wasConnected = currentActive.status === 'connected' || (currentActive.durationSeconds || 0) > 0;
+              const wasConnected =
+                currentActive.status === 'connected' || (currentActive.durationSeconds || 0) > 0;
               audioTones.playCallEndedSound();
               cleanupMediaSession();
               setActiveCallState(null);
               if (currentUser?.id) {
-                const isMissedStatus = data.status === 'rejected' || data.status === 'cancelled' || data.status === 'missed';
+                const isMissedStatus =
+                  data.status === 'rejected' || data.status === 'cancelled' || data.status === 'missed';
                 const durationSecs = currentActive?.durationSeconds || 0;
                 const durationFormatted = isMissedStatus
                   ? 'No answer'
@@ -853,7 +895,6 @@ export function useCall(
                   }).catch(() => {});
                 }
 
-                // Trigger AdMob Interstitial Ad (Android only, completed calls only, at most once per call session)
                 if (wasConnected && data.status === 'ended') {
                   admobService.showPostCallInterstitial(callId, true).catch(() => {});
                 }
@@ -861,15 +902,15 @@ export function useCall(
             }
           }
         }
-      } catch (e) {
+      } catch {
         // ignore
       }
-    }, 200);
+    }, 250);
 
     return () => {
       clearInterval(statusInterval);
     };
-  }, [activeCallState?.call?.id, activeCallState?.isCaller, connectToCallRoom, cleanupMediaSession, currentUser?.id]);
+  }, [activeCallState?.call?.id, activeCallState?.isCaller, connectToCallRoom, cleanupMediaSession, currentUser]);
 
   // Initiate an Outgoing Audio or Video Call
   const startCall = async (peer: Profile, callType: CallType) => {
@@ -889,28 +930,39 @@ export function useCall(
       display_name: peer?.display_name || peer?.username || 'User',
     };
 
-    const supabase = getSupabase();
     const callId = generateCallUUID();
     const roomName = `room_${callId.replace(/-/g, '').substring(0, 16)}`;
+    const callerDeviceId = getClientDeviceId();
 
     try {
+      if (isFirebaseSessionActive(currentUser.id)) {
+        const rel = await fetchRelationStatusFs(currentUser.id, calleeId);
+        if (rel.isBlocked) {
+          setCallError('Calling is unavailable because one of you has blocked the other.');
+          return;
+        }
+        if (!rel.isMutual) {
+          setCallError('Follow each other to start calling.');
+          return;
+        }
+      }
+
       const newCall: Call = {
         id: callId,
         caller_id: currentUser.id,
         callee_id: calleeId,
-        callerDeviceId: getClientDeviceId(),
+        callerDeviceId,
         call_type: callType,
         status: 'calling',
         room_name: roomName,
         caller: currentUser,
-        started_at: null,
+        started_at: new Date().toISOString(),
         answered_at: null,
         ended_at: null,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };
 
-      // 1. Immediately open Call UI (0ms delay)
       setActiveCallState({
         call: newCall,
         peer: peerProfile,
@@ -922,10 +974,8 @@ export function useCall(
         durationSeconds: 0,
       });
 
-      // 2. Play ringback tone immediately
       audioTones.startRingbackTone();
 
-      // 3. Record in local call history immediately
       recordCallInHistory(currentUser.id, {
         ...newCall,
         peer: peerProfile,
@@ -934,93 +984,116 @@ export function useCall(
         durationFormatted: 'Calling...',
       });
 
-      // 4. Broadcast on local bus & storage for instant multi-tab sync
-      callBusRef.current?.postMessage({
-        type: 'CALL_RINGING',
-        call: newCall,
-        callerMeta: currentUser,
-      });
+      if (isFirebaseSessionActive(currentUser.id)) {
+        await setDoc(doc(db, 'calls', callId), {
+          id: callId,
+          callerId: currentUser.id,
+          calleeId,
+          callerDeviceId: sanitizeOptionalStr(callerDeviceId, 128),
+          callerDisplayName: sanitizeOptionalStr(currentUser.display_name, 80),
+          callerUsername: sanitizeOptionalStr(currentUser.username, 32),
+          callerAvatarUrl: sanitizeOptionalStr(currentUser.avatar_url, 1024),
+          calleeDisplayName: sanitizeOptionalStr(peerProfile.display_name, 80),
+          calleeUsername: sanitizeOptionalStr(peerProfile.username, 32),
+          calleeAvatarUrl: sanitizeOptionalStr(peerProfile.avatar_url, 1024),
+          callType,
+          status: 'calling',
+          roomName,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
 
-      if (typeof window !== 'undefined') {
-        try {
-          localStorage.setItem(
-            'liveconnect_cross_tab_call_signal',
-            JSON.stringify({
-              type: 'CALL_RINGING',
-              call: newCall,
-              callerMeta: currentUser,
-              _t: Date.now(),
-            })
-          );
-        } catch {
-          // ignore
-        }
-      }
-
-      // 5. Create call record in Supabase & Server Relay in parallel
-      Promise.resolve(
-        supabase
-          .from('calls')
-          .insert({
-            id: newCall.id,
-            caller_id: currentUser.id,
-            callee_id: peer.id,
-            call_type: callType,
-            status: 'calling',
-            room_name: roomName,
-          })
-          .select()
-      ).catch(() => {});
-
-      fetch('/api/calls/create', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+        // Dispatch incoming call notification
+        const notifId = `nc_${generateUUID().replace(/-/g, '').slice(0, 20)}`;
+        const callerName = currentUser.display_name || currentUser.username || 'Someone';
+        setDoc(doc(db, 'users', calleeId, 'notifications', notifId), {
+          id: notifId,
+          userId: calleeId,
+          actorId: currentUser.id,
+          actorDisplayName: sanitizeOptionalStr(currentUser.display_name, 80),
+          actorUsername: sanitizeOptionalStr(currentUser.username, 32),
+          actorAvatarUrl: sanitizeOptionalStr(currentUser.avatar_url, 1024),
+          type: callType === 'video' ? 'call_video' : 'call_audio',
+          title: `Incoming ${callType === 'video' ? 'Video' : 'Voice'} Call`,
+          message: sanitizeStr(`${callerName} is calling you on LiveConnect.`, 1000),
+          referenceId: callId,
+          isRead: false,
+          createdAt: serverTimestamp(),
+        }).catch(() => {});
+      } else {
+        callBusRef.current?.postMessage({
+          type: 'CALL_RINGING',
           call: newCall,
           callerMeta: currentUser,
-        }),
-      })
-        .then(async (res) => {
-          if (res.status === 403) {
-            const errData = await res.json().catch(() => ({}));
-            audioTones.stop();
-            if (callTimeoutRef.current) {
-              clearTimeout(callTimeoutRef.current);
-            }
-            cleanupMediaSession().catch(() => {});
-            setActiveCallState(null);
-            setCallError(errData.error || 'Follow each other to start calling.');
+        });
+
+        if (typeof window !== 'undefined') {
+          try {
+            localStorage.setItem(
+              'liveconnect_cross_tab_call_signal',
+              JSON.stringify({
+                type: 'CALL_RINGING',
+                call: newCall,
+                callerMeta: currentUser,
+                _t: Date.now(),
+              })
+            );
+          } catch {
+            // ignore
           }
+        }
+
+        fetch('/api/calls/create', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            call: newCall,
+            callerMeta: currentUser,
+          }),
         })
-        .catch(() => {});
+          .then(async (res) => {
+            if (res.status === 403) {
+              const errData = await res.json().catch(() => ({}));
+              audioTones.stop();
+              if (callTimeoutRef.current) {
+                clearTimeout(callTimeoutRef.current);
+              }
+              cleanupMediaSession().catch(() => {});
+              setActiveCallState(null);
+              setCallError(errData.error || 'Follow each other to start calling.');
+            }
+          })
+          .catch(() => {});
+      }
 
-      supabase.from('call_participants').insert({
-        call_id: newCall.id,
-        user_id: currentUser.id,
-      }).then(() => {});
-
-      // 6. Acquire local media stream in parallel (does not block UI or signaling)
       acquireLocalMedia(callType === 'video').catch((e) => {
         console.warn('Camera/mic access in background notice:', e);
       });
 
-      // Auto-cancel call if not answered within 45 seconds
       if (callTimeoutRef.current) {
         clearTimeout(callTimeoutRef.current);
       }
       callTimeoutRef.current = setTimeout(async () => {
         audioTones.playCallEndedSound();
 
-        callBusRef.current?.postMessage({
-          type: 'CALL_CANCELLED',
-          callId: newCall.id,
-        });
+        if (isFirebaseSessionActive(currentUser.id)) {
+          await safeUpdateFirestoreCall(newCall.id, {
+            status: 'missed',
+            endedBy: currentUser.id,
+            endedAt: serverTimestamp(),
+          });
+        } else {
+          callBusRef.current?.postMessage({
+            type: 'CALL_CANCELLED',
+            callId: newCall.id,
+          });
 
-        fetch('/api/calls/action', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ callId: newCall.id, action: 'cancel', userId: currentUser.id }),
-        }).catch(() => {});
+          fetch('/api/calls/action', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ callId: newCall.id, action: 'cancel', userId: currentUser.id }),
+          }).catch(() => {});
+        }
 
         updateCallInHistory(currentUser.id, newCall.id, {
           status: 'missed',
@@ -1039,10 +1112,6 @@ export function useCall(
           durationFormatted: 'No answer',
         }).catch(() => {});
 
-        await supabase
-          .from('calls')
-          .update({ status: 'missed', ended_at: new Date().toISOString() })
-          .eq('id', newCall.id);
         await cleanupMediaSession();
         setActiveCallState(null);
       }, 45000);
@@ -1061,24 +1130,24 @@ export function useCall(
     isAnsweringRef.current = true;
     answeredCallIdsRef.current.add(callToAnswer.id);
 
-    // 1. Immediately dismiss incoming call modal and stop ringtones
     setIncomingCall(null);
     incomingCallRef.current = null;
     audioTones.stop();
 
-    const peer = callToAnswer.caller || ({
-      id: callToAnswer.caller_id,
-      username: 'Caller',
-      display_name: 'Caller',
-      avatar_url: null,
-      bio: null,
-      is_online: true,
-      last_seen: new Date().toISOString(),
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    } as Profile);
+    const peer =
+      callToAnswer.caller ||
+      ({
+        id: callToAnswer.caller_id,
+        username: 'Caller',
+        display_name: 'Caller',
+        avatar_url: null,
+        bio: null,
+        is_online: true,
+        last_seen: new Date().toISOString(),
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      } as Profile);
 
-    // 2. Immediately transition into active call screen (0ms delay)
     const initialActiveState: ActiveCallState = {
       call: callToAnswer,
       peer,
@@ -1092,19 +1161,8 @@ export function useCall(
     setActiveCallState(initialActiveState);
     activeCallStateRef.current = initialActiveState;
 
-    // 3. Immediately broadcast call acceptance to caller across tabs
-    callBusRef.current?.postMessage({
-      type: 'CALL_ACCEPTED',
-      callId: callToAnswer.id,
-    });
-    if (typeof window !== 'undefined') {
-      try {
-        localStorage.setItem(
-          'liveconnect_cross_tab_call_signal',
-          JSON.stringify({ type: 'CALL_ACCEPTED', callId: callToAnswer.id, _t: Date.now() })
-        );
-      } catch {}
-    }
+    const calleeDeviceId = getClientDeviceId();
+    callToAnswer.calleeDeviceId = calleeDeviceId;
 
     updateCallInHistory(currentUser.id, callToAnswer.id, {
       status: 'accepted',
@@ -1112,38 +1170,41 @@ export function useCall(
       durationFormatted: 'Connected',
     });
 
-    // 4. Notify backend & Supabase immediately in parallel
-    const calleeDeviceId = getClientDeviceId();
-    callToAnswer.calleeDeviceId = calleeDeviceId;
-
-    fetch('/api/calls/action', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        callId: callToAnswer.id,
-        action: 'accept',
-        userId: currentUser.id,
-        calleeDeviceId,
-      }),
-    }).catch(() => {});
-
-    const supabase = getSupabase();
-    supabase
-      .from('calls')
-      .update({
+    if (isFirebaseSessionActive(currentUser.id)) {
+      await safeUpdateFirestoreCall(callToAnswer.id, {
         status: 'accepted',
-        answered_at: new Date().toISOString(),
-      })
-      .eq('id', callToAnswer.id)
-      .then(() => {});
+        calleeDeviceId: sanitizeOptionalStr(calleeDeviceId, 128),
+        answeredAt: serverTimestamp(),
+      });
+    } else {
+      callBusRef.current?.postMessage({
+        type: 'CALL_ACCEPTED',
+        callId: callToAnswer.id,
+      });
+      if (typeof window !== 'undefined') {
+        try {
+          localStorage.setItem(
+            'liveconnect_cross_tab_call_signal',
+            JSON.stringify({ type: 'CALL_ACCEPTED', callId: callToAnswer.id, _t: Date.now() })
+          );
+        } catch {
+          // ignore
+        }
+      }
 
-    supabase.from('call_participants').insert({
-      call_id: callToAnswer.id,
-      user_id: currentUser.id,
-    }).then(() => {});
+      fetch('/api/calls/action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          callId: callToAnswer.id,
+          action: 'accept',
+          userId: currentUser.id,
+          calleeDeviceId,
+        }),
+      }).catch(() => {});
+    }
 
     try {
-      // 5. Acquire local media & connect callee to room
       await acquireLocalMedia(callToAnswer.call_type === 'video');
       await connectToCallRoom(callToAnswer, callToAnswer.call_type === 'video');
     } catch (err: any) {
@@ -1163,17 +1224,33 @@ export function useCall(
     audioTones.stop();
     audioTones.playCallEndedSound();
 
-    callBusRef.current?.postMessage({
-      type: 'CALL_REJECTED',
-      callId: callToReject.id,
-    });
-    if (typeof window !== 'undefined') {
-      try {
-        localStorage.setItem(
-          'liveconnect_cross_tab_call_signal',
-          JSON.stringify({ type: 'CALL_REJECTED', callId: callToReject.id, _t: Date.now() })
-        );
-      } catch {}
+    if (currentUser?.id && isFirebaseSessionActive(currentUser.id)) {
+      await safeUpdateFirestoreCall(callToReject.id, {
+        status: 'rejected',
+        endedBy: currentUser.id,
+        endedAt: serverTimestamp(),
+      });
+    } else {
+      callBusRef.current?.postMessage({
+        type: 'CALL_REJECTED',
+        callId: callToReject.id,
+      });
+      if (typeof window !== 'undefined') {
+        try {
+          localStorage.setItem(
+            'liveconnect_cross_tab_call_signal',
+            JSON.stringify({ type: 'CALL_REJECTED', callId: callToReject.id, _t: Date.now() })
+          );
+        } catch {
+          // ignore
+        }
+      }
+
+      fetch('/api/calls/action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ callId: callToReject.id, action: 'reject', userId: currentUser?.id }),
+      }).catch(() => {});
     }
 
     if (currentUser?.id) {
@@ -1184,7 +1261,6 @@ export function useCall(
         durationFormatted: 'No answer',
       });
 
-      // Insert Call Log into Chat
       if (callToReject.caller) {
         insertCallLogIntoChat({
           callId: callToReject.id,
@@ -1197,21 +1273,6 @@ export function useCall(
         }).catch(() => {});
       }
     }
-
-    fetch('/api/calls/action', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ callId: callToReject.id, action: 'reject', userId: currentUser?.id }),
-    }).catch(() => {});
-
-    const supabase = getSupabase();
-    await supabase
-      .from('calls')
-      .update({
-        status: 'rejected',
-        ended_at: new Date().toISOString(),
-      })
-      .eq('id', callToReject.id);
   };
 
   // Cancel outgoing call before it is answered
@@ -1220,7 +1281,6 @@ export function useCall(
     if (!currentActive) return;
     const callToCancel = currentActive.call;
 
-    // Immediately teardown UI and sound
     setActiveCallState(null);
     audioTones.stop();
     audioTones.playCallEndedSound();
@@ -1231,17 +1291,33 @@ export function useCall(
 
     cleanupMediaSession();
 
-    callBusRef.current?.postMessage({
-      type: 'CALL_CANCELLED',
-      callId: callToCancel.id,
-    });
-    if (typeof window !== 'undefined') {
-      try {
-        localStorage.setItem(
-          'liveconnect_cross_tab_call_signal',
-          JSON.stringify({ type: 'CALL_CANCELLED', callId: callToCancel.id, _t: Date.now() })
-        );
-      } catch {}
+    if (currentUser?.id && isFirebaseSessionActive(currentUser.id)) {
+      await safeUpdateFirestoreCall(callToCancel.id, {
+        status: 'cancelled',
+        endedBy: currentUser.id,
+        endedAt: serverTimestamp(),
+      });
+    } else {
+      callBusRef.current?.postMessage({
+        type: 'CALL_CANCELLED',
+        callId: callToCancel.id,
+      });
+      if (typeof window !== 'undefined') {
+        try {
+          localStorage.setItem(
+            'liveconnect_cross_tab_call_signal',
+            JSON.stringify({ type: 'CALL_CANCELLED', callId: callToCancel.id, _t: Date.now() })
+          );
+        } catch {
+          // ignore
+        }
+      }
+
+      fetch('/api/calls/action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ callId: callToCancel.id, action: 'cancel', userId: currentUser?.id }),
+      }).catch(() => {});
     }
 
     if (currentUser?.id) {
@@ -1264,22 +1340,6 @@ export function useCall(
         }).catch(() => {});
       }
     }
-
-    fetch('/api/calls/action', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ callId: callToCancel.id, action: 'cancel', userId: currentUser?.id }),
-    }).catch(() => {});
-
-    const supabase = getSupabase();
-    supabase
-      .from('calls')
-      .update({
-        status: 'cancelled',
-        ended_at: new Date().toISOString(),
-      })
-      .eq('id', callToCancel.id)
-      .then(() => {});
   };
 
   // End an active call
@@ -1288,10 +1348,10 @@ export function useCall(
     if (!currentActive) return;
     const callToEnd = currentActive.call;
     const callDuration = currentActive.durationSeconds || 0;
-    const isAnswered = callDuration > 0 || currentActive.status === 'connected' || connectionState === ConnectionState.Connected;
+    const isAnswered =
+      callDuration > 0 || currentActive.status === 'connected' || connectionState === ConnectionState.Connected;
     const isMissed = !isAnswered;
 
-    // Immediately teardown UI and sound
     setActiveCallState(null);
     audioTones.stop();
     audioTones.playCallEndedSound();
@@ -1302,22 +1362,38 @@ export function useCall(
 
     cleanupMediaSession();
 
-    callBusRef.current?.postMessage({
-      type: 'CALL_ENDED',
-      callId: callToEnd.id,
-      duration: callDuration,
-    });
-    if (typeof window !== 'undefined') {
-      try {
-        localStorage.setItem(
-          'liveconnect_cross_tab_call_signal',
-          JSON.stringify({ type: 'CALL_ENDED', callId: callToEnd.id, duration: callDuration, _t: Date.now() })
-        );
-      } catch {}
+    if (currentUser?.id && isFirebaseSessionActive(currentUser.id)) {
+      await safeUpdateFirestoreCall(callToEnd.id, {
+        status: isMissed ? 'missed' : 'ended',
+        endedBy: currentUser.id,
+        endedAt: serverTimestamp(),
+      });
+    } else {
+      callBusRef.current?.postMessage({
+        type: 'CALL_ENDED',
+        callId: callToEnd.id,
+        duration: callDuration,
+      });
+      if (typeof window !== 'undefined') {
+        try {
+          localStorage.setItem(
+            'liveconnect_cross_tab_call_signal',
+            JSON.stringify({ type: 'CALL_ENDED', callId: callToEnd.id, duration: callDuration, _t: Date.now() })
+          );
+        } catch {
+          // ignore
+        }
+      }
+
+      fetch('/api/calls/action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ callId: callToEnd.id, action: 'end', userId: currentUser?.id }),
+      }).catch(() => {});
     }
 
     if (currentUser?.id) {
-      const durationFormatted = isAnswered ? (formatCallDurationText(callDuration) || 'Ended') : 'No answer';
+      const durationFormatted = isAnswered ? formatCallDurationText(callDuration) || 'Ended' : 'No answer';
 
       updateCallInHistory(currentUser.id, callToEnd.id, {
         status: isMissed ? 'missed' : 'ended',
@@ -1339,51 +1415,22 @@ export function useCall(
       }
     }
 
-    fetch('/api/calls/action', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ callId: callToEnd.id, action: 'end', userId: currentUser?.id }),
-    }).catch(() => {});
-
-    const supabase = getSupabase();
-    supabase
-      .from('calls')
-      .update({
-        status: 'ended',
-        ended_at: new Date().toISOString(),
-      })
-      .eq('id', callToEnd.id)
-      .then(() => {});
-
-    // Update participant left_at
-    if (currentUser?.id) {
-      supabase
-        .from('call_participants')
-        .update({ left_at: new Date().toISOString() })
-        .eq('call_id', callToEnd.id)
-        .eq('user_id', currentUser.id)
-        .then(() => {});
-    }
-
-    // Trigger AdMob Interstitial Ad (Android only, completed calls only, at most once per call session)
     if (isAnswered) {
       admobService.showPostCallInterstitial(callToEnd.id, true).catch(() => {});
     }
   };
 
-  // Toggle local audio / microphone (works in calling and connected state)
+  // Toggle local audio / microphone
   const toggleMicrophone = async () => {
     const currentState = activeCallStateRef.current?.localAudioEnabled ?? activeCallState?.localAudioEnabled ?? true;
     const newState = !currentState;
 
-    // Toggle all tracks in local stream
     if (localStreamRef.current) {
       localStreamRef.current.getAudioTracks().forEach((track) => {
         track.enabled = newState;
       });
     }
 
-    // Toggle WebRTC P2P senders and stream
     if (p2pSessionRef.current) {
       p2pSessionRef.current.setAudioEnabled(newState);
     }
@@ -1391,12 +1438,11 @@ export function useCall(
     setActiveCallState((prev) => (prev ? { ...prev, localAudioEnabled: newState } : null));
   };
 
-  // Toggle local video / camera (works in calling and connected state)
+  // Toggle local video / camera
   const toggleCamera = async () => {
     const currentState = activeCallStateRef.current?.localVideoEnabled ?? activeCallState?.localVideoEnabled ?? true;
     const newState = !currentState;
 
-    // Toggle local video tracks
     if (localStreamRef.current) {
       localStreamRef.current.getVideoTracks().forEach((track) => {
         track.enabled = newState;
@@ -1418,7 +1464,6 @@ export function useCall(
       const isFront = activeCallState.isFrontCamera ?? true;
       const newFacingMode = isFront ? 'environment' : 'user';
 
-      // Stop previous video tracks
       localStreamRef.current.getVideoTracks().forEach((track) => track.stop());
 
       let newStream: MediaStream;
@@ -1441,18 +1486,15 @@ export function useCall(
 
       const newVideoTrack = newStream.getVideoTracks()[0];
       if (newVideoTrack) {
-        // Replace in local stream
         localStreamRef.current.removeTrack(localStreamRef.current.getVideoTracks()[0]);
         localStreamRef.current.addTrack(newVideoTrack);
 
-        // Update local video element with video track only
         if (localVideoRef.current) {
           localVideoRef.current.muted = true;
           localVideoRef.current.defaultMuted = true;
           localVideoRef.current.srcObject = new MediaStream([newVideoTrack]);
         }
 
-        // Update WebRTC peer track
         if (p2pSessionRef.current) {
           await p2pSessionRef.current.replaceVideoTrack(newVideoTrack);
         }
@@ -1464,7 +1506,6 @@ export function useCall(
     }
   };
 
-  // Ensure local video stream is attached to local video element once rendered (video tracks ONLY, strictly muted)
   useEffect(() => {
     if (
       activeCallState &&
@@ -1485,14 +1526,12 @@ export function useCall(
     }
   }, [activeCallState?.call.id, activeCallState?.call.call_type, activeCallState?.localVideoEnabled]);
 
-  // Ensure remote audio and video streams are attached to elements as soon as they mount or connection changes
   useEffect(() => {
     if (!activeCallState) return;
 
     const stream = remoteStreamRef.current || p2pSessionRef.current?.remoteStream;
     if (!stream) return;
 
-    // Attach remote audio element for crystal clear voice playback (Audio tracks ONLY)
     if (remoteAudioRef.current) {
       const audioTracks = stream.getAudioTracks();
       if (audioTracks.length > 0) {
@@ -1505,11 +1544,7 @@ export function useCall(
       }
     }
 
-    // Attach remote video element (Video tracks ONLY, strictly muted)
-    if (
-      activeCallState.call.call_type === 'video' &&
-      remoteVideoRef.current
-    ) {
+    if (activeCallState.call.call_type === 'video' && remoteVideoRef.current) {
       const videoTracks = stream.getVideoTracks();
       if (videoTracks.length > 0) {
         remoteVideoRef.current.muted = true;

@@ -1,0 +1,332 @@
+{
+  "entities": {
+    "PublicProfile": {
+      "title": "PublicProfile",
+      "description": "Publicly discoverable non-PII user profile for LiveConnect search and messaging headers.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "username": { "type": "string", "minLength": 3, "maxLength": 32, "pattern": "^[a-z0-9_]+$" },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "avatarUrl": { "type": "string", "maxLength": 1024 },
+        "bio": { "type": "string", "maxLength": 300 },
+        "gender": { "type": "string", "maxLength": 32 },
+        "country": { "type": "string", "maxLength": 64 },
+        "isOnline": { "type": "boolean" },
+        "isPublic": { "type": "boolean" },
+        "lastSeen": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "username", "displayName", "isOnline", "isPublic", "lastSeen", "createdAt", "updatedAt"]
+    },
+    "UsernameClaim": {
+      "title": "UsernameClaim",
+      "description": "Enforces globally unique lowercase usernames mapped to owner UID.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "username": { "type": "string", "minLength": 3, "maxLength": 32, "pattern": "^[a-z0-9_]+$" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "username", "createdAt"]
+    },
+    "PrivateUserInfo": {
+      "title": "PrivateUserInfo",
+      "description": "Strictly isolated PII and account role/moderation metadata accessible only to owner and admins.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "maxLength": 254 },
+        "phoneNumber": { "type": "string", "maxLength": 32 },
+        "role": { "type": "string", "enum": ["user", "admin"] },
+        "bannedUntil": { "type": "string", "maxLength": 64 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "role", "createdAt", "updatedAt"]
+    },
+    "FollowRelation": {
+      "title": "FollowRelation",
+      "description": "Directed follow link between followerId and followingId for mutual follow gating.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 3, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "followerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "followingId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "followerId", "followingId", "createdAt"]
+    },
+    "BlockRelation": {
+      "title": "BlockRelation",
+      "description": "Directed block record preventing calls and direct messages between two users.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 3, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "blockerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "blockedId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "reason": { "type": "string", "maxLength": 300 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "blockerId", "blockedId", "createdAt"]
+    },
+    "Conversation": {
+      "title": "Conversation",
+      "description": "Authoritative direct or group conversation metadata.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "type": { "type": "string", "enum": ["direct", "group"] },
+        "name": { "type": "string", "maxLength": 100 },
+        "description": { "type": "string", "maxLength": 500 },
+        "avatarUrl": { "type": "string", "maxLength": 1024 },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "memberRoles": { "type": "object" },
+        "removedMembers": { "type": "object" },
+        "pinnedMessageId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "type", "ownerId", "memberRoles", "createdAt", "updatedAt"]
+    },
+    "ConversationMember": {
+      "title": "ConversationMember",
+      "description": "Master Gate membership subcollection record for a conversation.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "conversationId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "role": { "type": "string", "enum": ["admin", "member"] },
+        "displayName": { "type": "string", "maxLength": 80 },
+        "username": { "type": "string", "maxLength": 32 },
+        "avatarUrl": { "type": "string", "maxLength": 1024 },
+        "joinedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "conversationId", "role", "joinedAt"]
+    },
+    "UserInboxItem": {
+      "title": "UserInboxItem",
+      "description": "Per-user conversation list entry enabling private owner-scoped conversation listing.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "type": { "type": "string", "enum": ["direct", "group"] },
+        "otherMemberId": { "type": "string", "maxLength": 128 },
+        "otherDisplayName": { "type": "string", "maxLength": 80 },
+        "otherUsername": { "type": "string", "maxLength": 32 },
+        "otherAvatarUrl": { "type": "string", "maxLength": 1024 },
+        "name": { "type": "string", "maxLength": 100 },
+        "description": { "type": "string", "maxLength": 500 },
+        "avatarUrl": { "type": "string", "maxLength": 1024 },
+        "groupOwnerId": { "type": "string", "maxLength": 128 },
+        "myRole": { "type": "string", "enum": ["admin", "member"] },
+        "lastMessageId": { "type": "string", "maxLength": 128 },
+        "lastMessageContent": { "type": "string", "maxLength": 4000 },
+        "lastMessageSenderId": { "type": "string", "maxLength": 128 },
+        "lastMessageAt": { "type": "string", "format": "date-time" },
+        "unreadCount": { "type": "number" },
+        "isRemoved": { "type": "boolean" },
+        "removalAdminName": { "type": "string", "maxLength": 80 },
+        "removalAdminUsername": { "type": "string", "maxLength": 32 },
+        "removedAt": { "type": "string", "maxLength": 64 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "ownerId", "type", "unreadCount", "createdAt", "updatedAt"]
+    },
+    "InboxMessage": {
+      "title": "InboxMessage",
+      "description": "Chat message stored in each active participant's inbox subcollection.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "conversationId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "senderId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "senderDisplayName": { "type": "string", "maxLength": 80 },
+        "senderUsername": { "type": "string", "maxLength": 32 },
+        "senderAvatarUrl": { "type": "string", "maxLength": 1024 },
+        "content": { "type": "string", "minLength": 1, "maxLength": 8000 },
+        "replyToMessageId": { "type": "string", "maxLength": 128 },
+        "reactions": { "type": "object" },
+        "mentions": { "type": "array" },
+        "mediaType": { "type": "string", "maxLength": 32 },
+        "cloudinaryPublicId": { "type": "string", "maxLength": 256 },
+        "b2FileId": { "type": "string", "maxLength": 256 },
+        "b2FileName": { "type": "string", "maxLength": 256 },
+        "isRead": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "conversationId", "senderId", "content", "isRead", "createdAt", "updatedAt"]
+    },
+    "TypingStatus": {
+      "title": "TypingStatus",
+      "description": "Ephemeral typing indicator document for a conversation member.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "conversationId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "expiresAt": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "conversationId", "expiresAt", "updatedAt"]
+    },
+    "CallSession": {
+      "title": "CallSession",
+      "description": "1-to-1 WebRTC audio/video call signaling state and history record.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "callerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "calleeId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "callerDeviceId": { "type": "string", "maxLength": 128 },
+        "calleeDeviceId": { "type": "string", "maxLength": 128 },
+        "callerDisplayName": { "type": "string", "maxLength": 80 },
+        "callerUsername": { "type": "string", "maxLength": 32 },
+        "callerAvatarUrl": { "type": "string", "maxLength": 1024 },
+        "calleeDisplayName": { "type": "string", "maxLength": 80 },
+        "calleeUsername": { "type": "string", "maxLength": 32 },
+        "calleeAvatarUrl": { "type": "string", "maxLength": 1024 },
+        "callType": { "type": "string", "enum": ["audio", "video"] },
+        "status": {
+          "type": "string",
+          "enum": ["calling", "ringing", "accepted", "rejected", "connected", "ended", "missed", "cancelled", "failed"]
+        },
+        "roomName": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "offerSdp": { "type": "string", "maxLength": 20000 },
+        "answerSdp": { "type": "string", "maxLength": 20000 },
+        "endedBy": { "type": "string", "maxLength": 128 },
+        "answeredAt": { "type": "string", "format": "date-time" },
+        "endedAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "callerId", "calleeId", "callType", "status", "roomName", "createdAt", "updatedAt"]
+    },
+    "IceCandidate": {
+      "title": "IceCandidate",
+      "description": "WebRTC ICE candidate exchanged between caller and callee.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "callId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "callerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "calleeId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "senderId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "sdpMid": { "type": "string", "maxLength": 64 },
+        "sdpMLineIndex": { "type": "number" },
+        "candidate": { "type": "string", "maxLength": 2048 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "callId", "callerId", "calleeId", "senderId", "candidate", "createdAt"]
+    },
+    "DeletedCallMarker": {
+      "title": "DeletedCallMarker",
+      "description": "Per-user marker hiding a deleted call from call history.",
+      "type": "object",
+      "properties": {
+        "callId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "deletedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["callId", "deletedAt"]
+    },
+    "AppNotification": {
+      "title": "AppNotification",
+      "description": "User-scoped notification item for follows, messages, and missed calls.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "actorId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "actorDisplayName": { "type": "string", "maxLength": 80 },
+        "actorUsername": { "type": "string", "maxLength": 32 },
+        "actorAvatarUrl": { "type": "string", "maxLength": 1024 },
+        "type": { "type": "string", "enum": ["follow", "follow_back", "message", "call_audio", "call_video"] },
+        "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "referenceId": { "type": "string", "maxLength": 128 },
+        "isRead": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "actorId", "type", "title", "message", "isRead", "createdAt"]
+    },
+    "ProblemReport": {
+      "title": "ProblemReport",
+      "description": "Bug or abuse report submitted by a verified user.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "category": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 3000 },
+        "status": { "type": "string", "enum": ["submitted", "reviewed", "resolved"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "category", "description", "status", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/public_profiles/{userId}": {
+      "schema": { "$ref": "#/entities/PublicProfile" },
+      "description": "Non-PII user directory for LiveConnect search and online presence."
+    },
+    "/usernames/{usernameLower}": {
+      "schema": { "$ref": "#/entities/UsernameClaim" },
+      "description": "Unique lowercase username claims."
+    },
+    "/users/{userId}/private/{docId}": {
+      "schema": { "$ref": "#/entities/PrivateUserInfo" },
+      "description": "Private PII and role document (docId='info') readable only by owner or admin."
+    },
+    "/follows/{followId}": {
+      "schema": { "$ref": "#/entities/FollowRelation" },
+      "description": "Follow links keyed by {followerId}_{followingId}."
+    },
+    "/blocks/{blockId}": {
+      "schema": { "$ref": "#/entities/BlockRelation" },
+      "description": "Block links keyed by {blockerId}_{blockedId}."
+    },
+    "/conversations/{conversationId}": {
+      "schema": { "$ref": "#/entities/Conversation" },
+      "description": "Authoritative conversation metadata for direct and group chats."
+    },
+    "/conversations/{conversationId}/members/{memberId}": {
+      "schema": { "$ref": "#/entities/ConversationMember" },
+      "description": "Master Gate membership subcollection for each conversation."
+    },
+    "/conversations/{conversationId}/typing/{userId}": {
+      "schema": { "$ref": "#/entities/TypingStatus" },
+      "description": "Real-time typing indicator documents per member."
+    },
+    "/users/{userId}/inbox/{conversationId}": {
+      "schema": { "$ref": "#/entities/UserInboxItem" },
+      "description": "Owner-scoped conversation summary and unread counter."
+    },
+    "/users/{userId}/inbox/{conversationId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/InboxMessage" },
+      "description": "Owner-scoped message history for each conversation."
+    },
+    "/calls/{callId}": {
+      "schema": { "$ref": "#/entities/CallSession" },
+      "description": "1-to-1 WebRTC call signaling and call history."
+    },
+    "/calls/{callId}/ice_candidates/{candidateId}": {
+      "schema": { "$ref": "#/entities/IceCandidate" },
+      "description": "1-to-1 WebRTC ICE candidate exchange."
+    },
+    "/users/{userId}/deleted_calls/{callId}": {
+      "schema": { "$ref": "#/entities/DeletedCallMarker" },
+      "description": "Per-user deleted call history markers."
+    },
+    "/users/{userId}/notifications/{notificationId}": {
+      "schema": { "$ref": "#/entities/AppNotification" },
+      "description": "Per-user notifications."
+    },
+    "/problem_reports/{reportId}": {
+      "schema": { "$ref": "#/entities/ProblemReport" },
+      "description": "Support & problem reports."
+    }
+  }
+}

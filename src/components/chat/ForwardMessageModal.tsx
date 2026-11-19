@@ -2,6 +2,8 @@ import React, { useState } from 'react';
 import { Share2, X, Send, Users, Check, Loader2 } from 'lucide-react';
 import { Conversation, Message, Profile } from '@/src/types';
 import { UserAvatar } from '../ui/UserAvatar';
+import { isFirebaseSessionActive } from '@/src/lib/firebase/client';
+import { sendMessageToFirestoreFs } from '@/src/lib/firebase/services';
 
 interface ForwardMessageModalProps {
   isOpen: boolean;
@@ -38,25 +40,37 @@ export const ForwardMessageModal: React.FC<ForwardMessageModalProps> = ({
     try {
       const forwardedContent = messageToForward.content;
 
-      const res = await fetch('/api/messages/send', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: {
-            id: `fw-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
-            conversation_id: targetConv.id,
-            sender_id: currentUser.id,
-            content: forwardedContent,
-            created_at: new Date().toISOString(),
-          },
-          recipientId: targetConv.type === 'direct' ? targetConv.other_member?.id : undefined,
+      if (isFirebaseSessionActive(currentUser.id)) {
+        await sendMessageToFirestoreFs({
+          conversationId: targetConv.id,
+          content: forwardedContent,
           senderProfile: currentUser,
-        }),
-      });
+          isGroup: targetConv.type === 'group',
+          receiverId: targetConv.type === 'direct' ? targetConv.other_member?.id : undefined,
+          receiverProfile: targetConv.type === 'direct' ? targetConv.other_member : undefined,
+          groupName: targetConv.name || null,
+        });
+      } else {
+        const res = await fetch('/api/messages/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: {
+              id: `fw-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
+              conversation_id: targetConv.id,
+              sender_id: currentUser.id,
+              content: forwardedContent,
+              created_at: new Date().toISOString(),
+            },
+            recipientId: targetConv.type === 'direct' ? targetConv.other_member?.id : undefined,
+            senderProfile: currentUser,
+          }),
+        });
 
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || 'Failed to forward message');
+        if (!res.ok) {
+          const data = await res.json();
+          throw new Error(data.error || 'Failed to forward message');
+        }
       }
 
       setDone(true);

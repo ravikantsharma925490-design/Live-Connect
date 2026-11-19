@@ -31,7 +31,6 @@ interface ProfileTabProps {
   onUnblockUser?: (userId: string) => Promise<boolean | void>;
   onEditProfile: () => void;
   onOpenSettingsModal: () => void;
-  onOpenConfigModal: () => void;
   onOpenNotifications?: () => void;
   unreadNotificationsCount?: number;
   onSignOut: () => void;
@@ -51,7 +50,6 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
   onUnblockUser,
   onEditProfile,
   onOpenSettingsModal,
-  onOpenConfigModal,
   onOpenNotifications,
   unreadNotificationsCount = 0,
   onSignOut,

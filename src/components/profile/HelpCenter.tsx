@@ -22,9 +22,10 @@ import {
 } from 'lucide-react';
 import { cn } from '@/src/lib/utils';
 import { Profile } from '@/src/types';
-import { getSupabase } from '@/src/lib/supabase/client';
 import { PrivacyPolicy } from '../legal/PrivacyPolicy';
 import { TermsConditions } from '../legal/TermsConditions';
+import { isFirebaseSessionActive } from '@/src/lib/firebase/client';
+import { submitProblemReportFs } from '@/src/lib/firebase/services';
 
 interface HelpCenterProps {
   currentUser?: Profile | null;
@@ -195,32 +196,32 @@ export const HelpCenter: React.FC<HelpCenterProps> = ({
     if (!reportDetails.trim() || isSubmittingReport) return;
 
     setIsSubmittingReport(true);
-    const supabase = getSupabase();
     let generatedReportId = `rep_${Date.now().toString(36)}`;
 
     try {
-      // 1. Insert into Supabase table 'problem_reports'
-      const { data, error } = await supabase
-        .from('problem_reports')
-        .insert([
-          {
-            user_id: currentUser?.id || null,
+      if (currentUser?.id && isFirebaseSessionActive(currentUser.id)) {
+        generatedReportId = await submitProblemReportFs(
+          currentUser.id,
+          reportCategory,
+          reportDetails.trim()
+        );
+      } else {
+        const res = await fetch('/api/reports/create', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            userId: currentUser?.id || null,
             category: reportCategory,
             description: reportDetails.trim(),
-            status: 'open',
-            created_at: new Date().toISOString(),
-          },
-        ])
-        .select();
-
-      if (data && data[0]?.id) {
-        generatedReportId = data[0].id;
-      }
-      if (error) {
-        console.warn('Note: problem_reports table insert notice:', error.message);
+          }),
+        });
+        const data = await res.json().catch(() => null);
+        if (data?.reportId) {
+          generatedReportId = data.reportId;
+        }
       }
     } catch (err) {
-      console.warn('Report submission Supabase notice:', err);
+      console.warn('Report submission notice:', err);
     } finally {
       setIsSubmittingReport(false);
       setLastReportId(generatedReportId);
@@ -238,33 +239,33 @@ export const HelpCenter: React.FC<HelpCenterProps> = ({
     if (!supportSubject.trim() || !supportMessage.trim() || isSubmittingSupport) return;
 
     setIsSubmittingSupport(true);
-    const supabase = getSupabase();
     let generatedReportId = `sup_${Date.now().toString(36)}`;
 
     try {
-      // Insert into Supabase table 'problem_reports' with category 'support_inquiry'
       const combinedDescription = `[Subject]: ${supportSubject.trim()}\n\n[Message]: ${supportMessage.trim()}`;
-      const { data, error } = await supabase
-        .from('problem_reports')
-        .insert([
-          {
-            user_id: currentUser?.id || null,
+      if (currentUser?.id && isFirebaseSessionActive(currentUser.id)) {
+        generatedReportId = await submitProblemReportFs(
+          currentUser.id,
+          'support_inquiry',
+          combinedDescription
+        );
+      } else {
+        const res = await fetch('/api/reports/create', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            userId: currentUser?.id || null,
             category: 'support_inquiry',
             description: combinedDescription,
-            status: 'open',
-            created_at: new Date().toISOString(),
-          },
-        ])
-        .select();
-
-      if (data && data[0]?.id) {
-        generatedReportId = data[0].id;
-      }
-      if (error) {
-        console.warn('Note: problem_reports table insert notice:', error.message);
+          }),
+        });
+        const data = await res.json().catch(() => null);
+        if (data?.reportId) {
+          generatedReportId = data.reportId;
+        }
       }
     } catch (err) {
-      console.warn('Support submission Supabase notice:', err);
+      console.warn('Support submission notice:', err);
     } finally {
       setIsSubmittingSupport(false);
       setLastSupportReportId(generatedReportId);
@@ -442,7 +443,7 @@ export const HelpCenter: React.FC<HelpCenterProps> = ({
                     ⚡ Instant Real-Time Delivery
                   </h4>
                   <p>
-                    All messages are synchronized in real time via Supabase PostgreSQL Realtime channels. When a recipient opens your chat, unread message badges update automatically.
+                    All messages are synchronized in real time via the LiveConnect server and persisted safely in the database. When a recipient opens your chat, unread message badges update automatically.
                   </p>
                 </div>
 
@@ -649,7 +650,7 @@ export const HelpCenter: React.FC<HelpCenterProps> = ({
                 <div className="flex items-center justify-between p-3 rounded-2xl bg-rose-50/50 dark:bg-rose-950/30 border border-rose-200/60 dark:border-rose-900/40 text-xs">
                   <div className="flex items-center gap-2 text-rose-700 dark:text-rose-300">
                     <Database className="w-4 h-4 text-emerald-500" />
-                    <span className="font-semibold">Direct Supabase Database Sync</span>
+                    <span className="font-semibold">Direct LiveConnect Database Sync</span>
                   </div>
                   <span className="text-[11px] font-mono text-neutral-500 bg-white dark:bg-neutral-900 px-2 py-0.5 rounded-full border border-neutral-200 dark:border-neutral-800">
                     table: problem_reports
@@ -662,10 +663,10 @@ export const HelpCenter: React.FC<HelpCenterProps> = ({
                       <CheckCircle2 className="w-5 h-5 shrink-0 text-emerald-500" />
                       <div>
                         <h4 className="font-bold text-sm text-neutral-900 dark:text-neutral-100">
-                          Problem Report Saved in Supabase!
+                          Problem Report Saved!
                         </h4>
                         <p className="text-neutral-600 dark:text-neutral-300 mt-0.5">
-                          Your issue has been recorded directly to the Supabase database. Our team will investigate.
+                          Your issue has been recorded directly to the LiveConnect database. Our team will investigate.
                         </p>
                       </div>
                     </div>
@@ -728,12 +729,12 @@ export const HelpCenter: React.FC<HelpCenterProps> = ({
                       {isSubmittingReport ? (
                         <>
                           <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          <span>Saving to Supabase...</span>
+                          <span>Saving Report...</span>
                         </>
                       ) : (
                         <>
                           <Send className="w-3.5 h-3.5" />
-                          <span>Submit to Supabase</span>
+                          <span>Submit Report</span>
                         </>
                       )}
                     </button>
@@ -805,7 +806,7 @@ export const HelpCenter: React.FC<HelpCenterProps> = ({
                       <CheckCircle2 className="w-5 h-5 shrink-0 text-emerald-500" />
                       <div>
                         <h4 className="font-bold text-sm text-neutral-900 dark:text-neutral-100">
-                          Support Inquiry Saved in Supabase!
+                          Support Inquiry Saved!
                         </h4>
                         <p className="text-neutral-600 dark:text-neutral-300 mt-0.5">
                           Your message has been safely stored in the database. Our team will review your inquiry.
@@ -868,12 +869,12 @@ export const HelpCenter: React.FC<HelpCenterProps> = ({
                       {isSubmittingSupport ? (
                         <>
                           <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          <span>Saving to Supabase...</span>
+                          <span>Sending Inquiry...</span>
                         </>
                       ) : (
                         <>
                           <Send className="w-3.5 h-3.5" />
-                          <span>Submit to Supabase</span>
+                          <span>Submit Inquiry</span>
                         </>
                       )}
                     </button>

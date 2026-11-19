@@ -2,6 +2,8 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Message, Profile, CallType, Conversation } from '@/src/types';
 import { cn, formatTime, parseDate, getAvatarColor, getInitials } from '@/src/lib/utils';
 import { UserAvatar } from '../ui/UserAvatar';
+import { auth } from '@/src/lib/firebase/client';
+import { fetchPublicProfileFs } from '@/src/lib/firebase/services';
 import {
   Check,
   CheckCheck,
@@ -827,12 +829,20 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
     }
 
     try {
-      const res = await fetch(`/api/users/profile/${encodeURIComponent(userId)}`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data?.profile) {
-          onOpenProfileView(data.profile);
+      if (auth.currentUser) {
+        const prof = await fetchPublicProfileFs(userId);
+        if (prof) {
+          onOpenProfileView(prof);
           return;
+        }
+      } else {
+        const res = await fetch(`/api/users/profile/${encodeURIComponent(userId)}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data?.profile) {
+            onOpenProfileView(data.profile);
+            return;
+          }
         }
       }
     } catch (e) {}

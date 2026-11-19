@@ -21,6 +21,16 @@ import { Conversation, Profile } from '@/src/types';
 import { UserAvatar } from '../ui/UserAvatar';
 import { uploadMediaToServer } from '@/src/lib/mediaUpload';
 import { recordDeletedConvId } from '@/src/hooks/useConversations';
+import { isFirebaseSessionActive } from '@/src/lib/firebase/client';
+import {
+  fetchGroupDetailsFs,
+  updateGroupInfoFs,
+  removeGroupMemberFs,
+  updateGroupMemberRoleFs,
+  deleteGroupFs,
+  searchPublicProfilesFs,
+  addGroupMembersFs,
+} from '@/src/lib/firebase/services';
 
 interface GroupProfileModalProps {
   isOpen: boolean;
@@ -83,23 +93,36 @@ export const GroupProfileModal: React.FC<GroupProfileModalProps> = ({
       setConfirmDeleteGroup(false);
       setConfirmLeaveGroup(false);
 
-      fetch('/api/groups/details', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ conversationId: conversation.id }),
-      })
-        .then((res) => res.json())
-        .then((data) => {
-          if (data?.success && data?.conversation) {
-            setLocalGroup(data.conversation);
-            setName(data.conversation.name || '');
-            setDescription(data.conversation.description || '');
-            setAvatarUrl(data.conversation.avatar_url || '');
-          }
+      if (isFirebaseSessionActive(currentUser?.id)) {
+        fetchGroupDetailsFs(conversation.id)
+          .then((conv) => {
+            if (conv) {
+              setLocalGroup(conv);
+              setName(conv.name || '');
+              setDescription(conv.description || '');
+              setAvatarUrl(conv.avatar_url || '');
+            }
+          })
+          .catch(() => {});
+      } else {
+        fetch('/api/groups/details', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ conversationId: conversation.id }),
         })
-        .catch(() => {});
+          .then((res) => res.json())
+          .then((data) => {
+            if (data?.success && data?.conversation) {
+              setLocalGroup(data.conversation);
+              setName(data.conversation.name || '');
+              setDescription(data.conversation.description || '');
+              setAvatarUrl(data.conversation.avatar_url || '');
+            }
+          })
+          .catch(() => {});
+      }
     }
-  }, [isOpen, conversation?.id]);
+  }, [isOpen, conversation?.id, currentUser?.id]);
 
   if (!isOpen || !localGroup || localGroup.type !== 'group') return null;
 
@@ -138,31 +161,47 @@ export const GroupProfileModal: React.FC<GroupProfileModalProps> = ({
     setError(null);
 
     try {
-      const res = await fetch('/api/groups/update', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          conversationId: localGroup.id,
-          userId: currentUserId,
+      if (isFirebaseSessionActive(currentUserId)) {
+        const updatedConv = await updateGroupInfoFs(localGroup.id, {
           name: name.trim(),
           description: description.trim(),
-          avatarUrl,
-        }),
-      });
-
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Failed to update group');
-      }
-
-      setIsEditing(false);
-      if (data.conversation) {
-        setLocalGroup(data.conversation);
-        onGroupUpdated(data.conversation);
+          avatarUrl: avatarUrl || null,
+        });
+        setIsEditing(false);
+        if (updatedConv) {
+          setLocalGroup(updatedConv);
+          onGroupUpdated(updatedConv);
+        } else {
+          onGroupUpdated();
+        }
+        showToast('success', 'Group profile updated successfully!');
       } else {
-        onGroupUpdated();
+        const res = await fetch('/api/groups/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            conversationId: localGroup.id,
+            userId: currentUserId,
+            name: name.trim(),
+            description: description.trim(),
+            avatarUrl,
+          }),
+        });
+
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.error || 'Failed to update group');
+        }
+
+        setIsEditing(false);
+        if (data.conversation) {
+          setLocalGroup(data.conversation);
+          onGroupUpdated(data.conversation);
+        } else {
+          onGroupUpdated();
+        }
+        showToast('success', 'Group profile updated successfully!');
       }
-      showToast('success', 'Group profile updated successfully!');
     } catch (err: any) {
       setError(err.message || 'Error updating group');
     } finally {
@@ -209,29 +248,40 @@ export const GroupProfileModal: React.FC<GroupProfileModalProps> = ({
     setConfirmRemoveTarget(null);
 
     try {
-      const res = await fetch('/api/groups/members/remove', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          conversationId: localGroup.id,
-          actorId: currentUserId,
-          memberId,
-        }),
-      });
+      if (isFirebaseSessionActive(currentUserId) && currentUser) {
+        const updatedConv =
+          (await removeGroupMemberFs(localGroup.id, currentUser, memberId)) || {
+            ...localGroup,
+            member_ids: localGroup.member_ids?.filter((id) => id !== memberId),
+          };
+        setLocalGroup(updatedConv);
+        onGroupUpdated(updatedConv);
+        showToast('success', 'Member removed from group successfully.');
+      } else {
+        const res = await fetch('/api/groups/members/remove', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            conversationId: localGroup.id,
+            actorId: currentUserId,
+            memberId,
+          }),
+        });
 
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Failed to remove member');
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.error || 'Failed to remove member');
+        }
+
+        const updatedConv = data.conversation || {
+          ...localGroup,
+          member_ids: localGroup.member_ids?.filter((id) => id !== memberId),
+        };
+
+        setLocalGroup(updatedConv);
+        onGroupUpdated(updatedConv);
+        showToast('success', 'Member removed from group successfully.');
       }
-
-      const updatedConv = data.conversation || {
-        ...localGroup,
-        member_ids: localGroup.member_ids?.filter((id) => id !== memberId),
-      };
-
-      setLocalGroup(updatedConv);
-      onGroupUpdated(updatedConv);
-      showToast('success', 'Member removed from group successfully.');
     } catch (err: any) {
       setError(err.message || 'Error removing member');
       showToast('error', err.message || 'Error removing member');
@@ -246,38 +296,57 @@ export const GroupProfileModal: React.FC<GroupProfileModalProps> = ({
     setConfirmRoleTarget(null);
 
     try {
-      const res = await fetch('/api/groups/members/role', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          conversationId: localGroup.id,
-          actorId: currentUserId,
-          memberId,
-          role: targetRole,
-        }),
-      });
+      if (isFirebaseSessionActive(currentUserId)) {
+        const updatedConv =
+          (await updateGroupMemberRoleFs(localGroup.id, memberId, targetRole)) || {
+            ...localGroup,
+            member_roles: {
+              ...(localGroup.member_roles || {}),
+              [memberId]: targetRole,
+            },
+          };
+        setLocalGroup(updatedConv);
+        onGroupUpdated(updatedConv);
+        showToast(
+          'success',
+          targetRole === 'admin'
+            ? 'Member promoted to Group Admin successfully.'
+            : 'Admin privileges removed successfully.'
+        );
+      } else {
+        const res = await fetch('/api/groups/members/role', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            conversationId: localGroup.id,
+            actorId: currentUserId,
+            memberId,
+            role: targetRole,
+          }),
+        });
 
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Failed to change role');
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.error || 'Failed to change role');
+        }
+
+        const updatedConv = data.conversation || {
+          ...localGroup,
+          member_roles: {
+            ...(localGroup.member_roles || {}),
+            [memberId]: targetRole,
+          },
+        };
+
+        setLocalGroup(updatedConv);
+        onGroupUpdated(updatedConv);
+        showToast(
+          'success',
+          targetRole === 'admin'
+            ? 'Member promoted to Group Admin successfully.'
+            : 'Admin privileges removed successfully.'
+        );
       }
-
-      const updatedConv = data.conversation || {
-        ...localGroup,
-        member_roles: {
-          ...(localGroup.member_roles || {}),
-          [memberId]: targetRole,
-        },
-      };
-
-      setLocalGroup(updatedConv);
-      onGroupUpdated(updatedConv);
-      showToast(
-        'success',
-        targetRole === 'admin'
-          ? 'Member promoted to Group Admin successfully.'
-          : 'Admin privileges removed successfully.'
-      );
     } catch (err: any) {
       setError(err.message || 'Error changing role');
       showToast('error', err.message || 'Error changing role');
@@ -300,19 +369,23 @@ export const GroupProfileModal: React.FC<GroupProfileModalProps> = ({
         } catch (e) {}
       }
 
-      const res = await fetch('/api/groups/members/remove', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          conversationId: localGroup.id,
-          actorId: currentUserId,
-          memberId: currentUserId,
-        }),
-      });
+      if (isFirebaseSessionActive(currentUserId) && currentUser) {
+        await removeGroupMemberFs(localGroup.id, currentUser, currentUserId);
+      } else {
+        const res = await fetch('/api/groups/members/remove', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            conversationId: localGroup.id,
+            actorId: currentUserId,
+            memberId: currentUserId,
+          }),
+        });
 
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || 'Failed to leave group');
+        if (!res.ok) {
+          const data = await res.json();
+          throw new Error(data.error || 'Failed to leave group');
+        }
       }
 
       onGroupDeleted();
@@ -329,18 +402,22 @@ export const GroupProfileModal: React.FC<GroupProfileModalProps> = ({
     setConfirmDeleteGroup(false);
 
     try {
-      const res = await fetch('/api/groups/delete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          conversationId: localGroup.id,
-          actorId: currentUserId,
-        }),
-      });
+      if (isFirebaseSessionActive(currentUserId)) {
+        await deleteGroupFs(localGroup.id);
+      } else {
+        const res = await fetch('/api/groups/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            conversationId: localGroup.id,
+            actorId: currentUserId,
+          }),
+        });
 
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || 'Failed to delete group');
+        if (!res.ok) {
+          const data = await res.json();
+          throw new Error(data.error || 'Failed to delete group');
+        }
       }
 
       onGroupDeleted();
@@ -357,16 +434,22 @@ export const GroupProfileModal: React.FC<GroupProfileModalProps> = ({
     setShowAddMembers(true);
 
     try {
-      const res = await fetch('/api/users/search', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query, userId: currentUserId }),
-      });
-      const data = await res.json();
-      if (data?.users) {
-        // Exclude existing members
-        const filtered = data.users.filter((u: Profile) => !memberIds.includes(u.id));
+      if (isFirebaseSessionActive(currentUserId)) {
+        const users = await searchPublicProfilesFs(query, currentUserId);
+        const filtered = users.filter((u: Profile) => !memberIds.includes(u.id));
         setAvailableUsers(filtered);
+      } else {
+        const res = await fetch('/api/users/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query, userId: currentUserId }),
+        });
+        const data = await res.json();
+        if (data?.users) {
+          // Exclude existing members
+          const filtered = data.users.filter((u: Profile) => !memberIds.includes(u.id));
+          setAvailableUsers(filtered);
+        }
       }
     } catch {
       // ignore
@@ -388,33 +471,52 @@ export const GroupProfileModal: React.FC<GroupProfileModalProps> = ({
     });
 
     try {
-      const res = await fetch('/api/groups/members/add', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          conversationId: localGroup.id,
-          userId: currentUserId,
-          memberIds: selectedNewUsers,
-          profilesMap,
-        }),
-      });
-
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Failed to add members');
-      }
-
-      setShowAddMembers(false);
-      setSelectedNewUsers([]);
-      setSearchQuery('');
-
-      if (data.conversation) {
-        setLocalGroup(data.conversation);
-        onGroupUpdated(data.conversation);
+      if (isFirebaseSessionActive(currentUserId) && currentUser) {
+        const updatedConv = await addGroupMembersFs(
+          localGroup.id,
+          currentUser,
+          selectedNewUsers,
+          profilesMap
+        );
+        setShowAddMembers(false);
+        setSelectedNewUsers([]);
+        setSearchQuery('');
+        if (updatedConv) {
+          setLocalGroup(updatedConv);
+          onGroupUpdated(updatedConv);
+        } else {
+          onGroupUpdated();
+        }
+        showToast('success', `${selectedNewUsers.length} member(s) added to group!`);
       } else {
-        onGroupUpdated();
+        const res = await fetch('/api/groups/members/add', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            conversationId: localGroup.id,
+            userId: currentUserId,
+            memberIds: selectedNewUsers,
+            profilesMap,
+          }),
+        });
+
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.error || 'Failed to add members');
+        }
+
+        setShowAddMembers(false);
+        setSelectedNewUsers([]);
+        setSearchQuery('');
+
+        if (data.conversation) {
+          setLocalGroup(data.conversation);
+          onGroupUpdated(data.conversation);
+        } else {
+          onGroupUpdated();
+        }
+        showToast('success', `${selectedNewUsers.length} member(s) added to group!`);
       }
-      showToast('success', `${selectedNewUsers.length} member(s) added to group!`);
     } catch (err: any) {
       setError(err.message || 'Error adding members');
     } finally {

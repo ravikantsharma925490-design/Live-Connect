@@ -1,6 +1,25 @@
-import { useState, useEffect, useCallback } from 'react';
-import { getSupabase } from '@/src/lib/supabase/client';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import {
+  collection,
+  doc,
+  query,
+  where,
+  limit,
+  onSnapshot,
+  setDoc,
+  writeBatch,
+  serverTimestamp,
+} from 'firebase/firestore';
 import { Call, Profile } from '@/src/types';
+import {
+  db,
+  auth,
+  isFirebaseSessionActive,
+  OperationType,
+  handleFirestoreError,
+  tsToIso,
+} from '@/src/lib/firebase/client';
+import { fetchMultiplePublicProfilesFs } from '@/src/lib/firebase/services';
 
 export interface CallHistoryItem extends Call {
   peer: Profile;
@@ -69,7 +88,7 @@ export function loadLocalCallHistory(userId?: string): CallHistoryItem[] {
       const parsed = JSON.parse(raw) as CallHistoryItem[];
       return cleanAndDeduplicateCallHistory(parsed);
     }
-  } catch (e) {
+  } catch {
     // ignore
   }
   return [];
@@ -81,7 +100,7 @@ export function saveLocalCallHistory(userId: string | undefined, history: CallHi
     const clean = cleanAndDeduplicateCallHistory(history);
     localStorage.setItem(getLocalHistoryCacheKey(userId), JSON.stringify(clean));
     window.dispatchEvent(new CustomEvent('liveconnect_call_history_updated', { detail: { userId } }));
-  } catch (e) {
+  } catch {
     // ignore
   }
 }
@@ -102,7 +121,6 @@ export function recordCallInHistory(userId: string | undefined, callItem: CallHi
   } else {
     updated = [callItem, ...current];
   }
-  // Keep max 100 entries
   if (updated.length > 100) {
     updated = updated.slice(0, 100);
   }
@@ -121,7 +139,6 @@ export function updateCallInHistory(
     const updated = [...current];
     const item = { ...updated[existingIdx], ...updates };
 
-    // Recalculate duration formatting if applicable
     if (item.answered_at && item.ended_at) {
       const start = new Date(item.answered_at).getTime();
       const end = new Date(item.ended_at).getTime();
@@ -155,7 +172,11 @@ export function useCallHistory(currentUserId?: string) {
   );
   const [missedCount, setMissedCount] = useState<number>(0);
 
-  // Read last viewed call history timestamp from local storage
+  const peerProfilesCacheRef = useRef<Record<string, Profile>>({});
+  const outgoingDocsRef = useRef<Record<string, Record<string, any>>>({});
+  const incomingDocsRef = useRef<Record<string, Record<string, any>>>({});
+  const deletedIdsRef = useRef<Set<string>>(new Set());
+
   const getLastViewedTimestamp = useCallback(() => {
     if (typeof window === 'undefined' || !currentUserId) return 0;
     const stored = localStorage.getItem(`liveconnect_calls_last_viewed_${currentUserId}`);
@@ -228,93 +249,74 @@ export function useCallHistory(currentUserId?: string) {
     [currentUserId]
   );
 
-  const fetchHistory = useCallback(async () => {
-    if (!currentUserId) {
-      setHistory([]);
-      setMissedCount(0);
-      setLoading(false);
-      return;
-    }
-
+  const rebuildFirestoreCallHistory = useCallback(async () => {
+    if (!currentUserId) return;
     const lastViewed = getLastViewedTimestamp();
-    const localList = loadLocalCallHistory(currentUserId);
-    const combinedMap = new Map<string, CallHistoryItem>();
+    const mergedRaw = new Map<string, Record<string, any>>();
 
-    // 1. Seed with local storage
-    localList.forEach((c) => {
-      if (c.id) combinedMap.set(c.id, c);
+    Object.entries(outgoingDocsRef.current).forEach(([id, data]) => {
+      if (!deletedIdsRef.current.has(id) && data && typeof data === 'object') {
+        mergedRaw.set(id, { id, ...(data as Record<string, any>) });
+      }
+    });
+    Object.entries(incomingDocsRef.current).forEach(([id, data]) => {
+      if (!deletedIdsRef.current.has(id) && data && typeof data === 'object') {
+        mergedRaw.set(id, { id, ...(data as Record<string, any>) });
+      }
     });
 
-    // 2. Fetch from Server Relay Store
-    try {
-      const srvRes = await fetch('/api/calls/history', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId: currentUserId }),
-      });
-
-      if (srvRes.ok) {
-        const srvData = await srvRes.json();
-        if (Array.isArray(srvData.calls)) {
-          srvData.calls.forEach((c: any) => {
-            const { item } = formatRawCall(c, lastViewed);
-            combinedMap.set(item.id, item);
-          });
-        }
+    const missingPeerIds = new Set<string>();
+    mergedRaw.forEach((d) => {
+      const peerId = d.callerId === currentUserId ? d.calleeId : d.callerId;
+      if (peerId && !peerProfilesCacheRef.current[peerId]) {
+        missingPeerIds.add(peerId);
       }
-    } catch (e) {
-      // server relay fallback
+    });
+
+    if (missingPeerIds.size > 0) {
+      const fetched = await fetchMultiplePublicProfilesFs(Array.from(missingPeerIds));
+      Object.assign(peerProfilesCacheRef.current, fetched);
     }
 
-    // 3. Fetch from Supabase Table
-    try {
-      const supabase = getSupabase();
-      const { data: dbCalls } = await supabase
-        .from('calls')
-        .select('*')
-        .or(`caller_id.eq.${currentUserId},callee_id.eq.${currentUserId}`)
-        .order('created_at', { ascending: false })
-        .limit(50);
+    const items: CallHistoryItem[] = [];
+    mergedRaw.forEach((d, id) => {
+      const isOutgoing = d.callerId === currentUserId;
+      const peerId = isOutgoing ? d.calleeId : d.callerId;
+      const cachedPeer = peerProfilesCacheRef.current[peerId];
+      const createdAt = tsToIso(d.createdAt);
 
-      if (Array.isArray(dbCalls) && dbCalls.length > 0) {
-        // Collect peer user IDs needed
-        const missingUserIds = new Set<string>();
-        dbCalls.forEach((call) => {
-          const peerId = call.caller_id === currentUserId ? call.callee_id : call.caller_id;
-          if (peerId && !combinedMap.get(call.id)?.peer?.display_name) {
-            missingUserIds.add(peerId);
-          }
-        });
+      const fallbackPeer: Profile = cachedPeer || {
+        id: peerId,
+        username: (isOutgoing ? d.calleeUsername : d.callerUsername) || 'user',
+        display_name: (isOutgoing ? d.calleeDisplayName : d.callerDisplayName) || 'Contact',
+        avatar_url: (isOutgoing ? d.calleeAvatarUrl : d.callerAvatarUrl) || null,
+        bio: null,
+        is_online: false,
+        last_seen: createdAt,
+        created_at: createdAt,
+        updated_at: createdAt,
+      };
 
-        const profileLookup = new Map<string, Profile>();
-        if (missingUserIds.size > 0) {
-          const { data: profiles } = await supabase
-            .from('profiles')
-            .select('*')
-            .in('id', Array.from(missingUserIds));
-          if (Array.isArray(profiles)) {
-            profiles.forEach((p: Profile) => profileLookup.set(p.id, p));
-          }
-        }
+      const rawCall = {
+        id,
+        caller_id: d.callerId,
+        callee_id: d.calleeId,
+        call_type: d.callType,
+        status: d.status,
+        room_name: d.roomName,
+        started_at: createdAt,
+        answered_at: d.answeredAt ? tsToIso(d.answeredAt) : null,
+        ended_at: d.endedAt ? tsToIso(d.endedAt) : null,
+        created_at: createdAt,
+        updated_at: tsToIso(d.updatedAt),
+        peer: fallbackPeer,
+      };
 
-        dbCalls.forEach((call) => {
-          const peerId = call.caller_id === currentUserId ? call.callee_id : call.caller_id;
-          const peerProfile = profileLookup.get(peerId);
-          const rawWithPeer = {
-            ...call,
-            peer: peerProfile || combinedMap.get(call.id)?.peer,
-          };
-          const { item } = formatRawCall(rawWithPeer, lastViewed);
-          combinedMap.set(item.id, item);
-        });
-      }
-    } catch (dbErr) {
-      // db fallback
-    }
+      const { item } = formatRawCall(rawCall, lastViewed);
+      items.push(item);
+    });
 
-    // 4. Sort and calculate missed count
-    const sorted = cleanAndDeduplicateCallHistory(Array.from(combinedMap.values()));
-
+    const sorted = cleanAndDeduplicateCallHistory(items);
     let missed = 0;
     sorted.forEach((item) => {
       const callCreatedAt = new Date(item.created_at || 0).getTime();
@@ -329,21 +331,101 @@ export function useCallHistory(currentUserId?: string) {
     setLoading(false);
   }, [currentUserId, formatRawCall, getLastViewedTimestamp]);
 
+  const fetchHistory = useCallback(async () => {
+    if (!currentUserId) {
+      setHistory([]);
+      setMissedCount(0);
+      setLoading(false);
+      return;
+    }
+
+    if (isFirebaseSessionActive(currentUserId)) {
+      await rebuildFirestoreCallHistory();
+      return;
+    }
+
+    const lastViewed = getLastViewedTimestamp();
+    const localList = loadLocalCallHistory(currentUserId);
+    const combinedMap = new Map<string, CallHistoryItem>();
+
+    localList.forEach((c) => {
+      if (c.id) combinedMap.set(c.id, c);
+    });
+
+    try {
+      const srvRes = await fetch('/api/calls/history', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: currentUserId }),
+      });
+
+      if (srvRes.ok) {
+        const srvData = await srvRes.json();
+        if (Array.isArray(srvData.calls)) {
+          const serverMap = new Map<string, CallHistoryItem>();
+          srvData.calls.forEach((c: any) => {
+            const { item } = formatRawCall(c, lastViewed);
+            serverMap.set(item.id, item);
+          });
+
+          const mergedMap = new Map<string, CallHistoryItem>(serverMap);
+          localList.forEach((localItem) => {
+            if (!mergedMap.has(localItem.id)) {
+              const ageMs = Date.now() - new Date(localItem.created_at || 0).getTime();
+              if (ageMs < 30000) {
+                mergedMap.set(localItem.id, localItem);
+              }
+            }
+          });
+          combinedMap.clear();
+          mergedMap.forEach((v, k) => combinedMap.set(k, v));
+        }
+      }
+    } catch {
+      // server fallback uses local cache
+    }
+
+    const sorted = cleanAndDeduplicateCallHistory(Array.from(combinedMap.values()));
+
+    let missed = 0;
+    sorted.forEach((item) => {
+      const callCreatedAt = new Date(item.created_at || 0).getTime();
+      if (item.isMissed && callCreatedAt > lastViewed) {
+        missed += 1;
+      }
+    });
+
+    setHistory(sorted);
+    setMissedCount(missed);
+    saveLocalCallHistory(currentUserId, sorted);
+    setLoading(false);
+  }, [currentUserId, formatRawCall, getLastViewedTimestamp, rebuildFirestoreCallHistory]);
+
   // Delete a single call history record
   const deleteCall = async (callId: string): Promise<boolean> => {
     if (!callId || !currentUserId) return false;
-    const supabase = getSupabase();
 
     try {
-      // 1. Instantly remove from local state
       setHistory((prev) => {
         const next = prev.filter((c) => c.id !== callId);
         saveLocalCallHistory(currentUserId, next);
         return next;
       });
 
-      // 2. Delete from Supabase Database
-      await supabase.from('calls').delete().eq('id', callId);
+      if (isFirebaseSessionActive(currentUserId)) {
+        deletedIdsRef.current.add(callId);
+        await setDoc(doc(db, 'users', currentUserId, 'deleted_calls', callId), {
+          callId,
+          deletedAt: serverTimestamp(),
+        });
+        return true;
+      }
+
+      await fetch('/api/calls/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ callId, userId: currentUserId }),
+      });
 
       return true;
     } catch (err: any) {
@@ -355,19 +437,34 @@ export function useCallHistory(currentUserId?: string) {
   // Clear all call history records for the current user
   const clearAllHistory = async (): Promise<boolean> => {
     if (!currentUserId) return false;
-    const supabase = getSupabase();
+
+    const callIdsToClear = history.map((c) => c.id).filter(Boolean);
 
     try {
-      // 1. Instantly clear local state
       setHistory([]);
       setMissedCount(0);
       saveLocalCallHistory(currentUserId, []);
 
-      // 2. Delete from Supabase Database
-      await supabase
-        .from('calls')
-        .delete()
-        .or(`caller_id.eq.${currentUserId},callee_id.eq.${currentUserId}`);
+      if (isFirebaseSessionActive(currentUserId)) {
+        callIdsToClear.forEach((id) => deletedIdsRef.current.add(id));
+        for (let i = 0; i < callIdsToClear.length; i += 400) {
+          const batch = writeBatch(db);
+          callIdsToClear.slice(i, i + 400).forEach((callId) => {
+            batch.set(doc(db, 'users', currentUserId, 'deleted_calls', callId), {
+              callId,
+              deletedAt: serverTimestamp(),
+            });
+          });
+          await batch.commit();
+        }
+        return true;
+      }
+
+      await fetch('/api/calls/clear', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: currentUserId }),
+      });
 
       return true;
     } catch (err: any) {
@@ -377,12 +474,69 @@ export function useCallHistory(currentUserId?: string) {
   };
 
   useEffect(() => {
+    if (!currentUserId) {
+      setHistory([]);
+      setMissedCount(0);
+      setLoading(false);
+      return;
+    }
+
+    if (isFirebaseSessionActive(currentUserId)) {
+      const unsubOut = onSnapshot(
+        query(collection(db, 'calls'), where('callerId', '==', currentUserId), limit(60)),
+        (snap) => {
+          const next: Record<string, Record<string, any>> = {};
+          snap.forEach((d) => {
+            next[d.id] = d.data();
+          });
+          outgoingDocsRef.current = next;
+          void rebuildFirestoreCallHistory();
+        },
+        (err) => {
+          if (!auth.currentUser) return;
+          handleFirestoreError(err, OperationType.LIST, 'calls');
+        }
+      );
+
+      const unsubIn = onSnapshot(
+        query(collection(db, 'calls'), where('calleeId', '==', currentUserId), limit(60)),
+        (snap) => {
+          const next: Record<string, Record<string, any>> = {};
+          snap.forEach((d) => {
+            next[d.id] = d.data();
+          });
+          incomingDocsRef.current = next;
+          void rebuildFirestoreCallHistory();
+        },
+        (err) => {
+          if (!auth.currentUser) return;
+          handleFirestoreError(err, OperationType.LIST, 'calls');
+        }
+      );
+
+      const unsubDel = onSnapshot(
+        collection(db, 'users', currentUserId, 'deleted_calls'),
+        (snap) => {
+          const nextDel = new Set<string>();
+          snap.forEach((d) => nextDel.add(d.id));
+          deletedIdsRef.current = nextDel;
+          void rebuildFirestoreCallHistory();
+        },
+        (err) => {
+          if (!auth.currentUser) return;
+          handleFirestoreError(err, OperationType.LIST, `users/${currentUserId}/deleted_calls`);
+        }
+      );
+
+      return () => {
+        unsubOut();
+        unsubIn();
+        unsubDel();
+      };
+    }
+
     fetchHistory();
 
-    if (!currentUserId) return;
-    const supabase = getSupabase();
-
-    // 1. Listen for local history updates (cross-component & storage events)
     const handleLocalUpdate = () => {
       const local = loadLocalCallHistory(currentUserId);
       setHistory(local);
@@ -406,34 +560,16 @@ export function useCallHistory(currentUserId?: string) {
     };
     window.addEventListener('storage', handleStorage);
 
-    // 2. Subscribe to realtime Postgres changes
-    const channel = supabase
-      .channel(`call_history:${currentUserId}`)
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'calls',
-        },
-        () => {
-          fetchHistory();
-        }
-      )
-      .subscribe();
-
-    // 3. Polling interval to auto-sync unanswered/new calls without user having to reload
     const pollTimer = setInterval(() => {
       fetchHistory();
-    }, 3000);
+    }, 2500);
 
     return () => {
       clearInterval(pollTimer);
       window.removeEventListener('liveconnect_call_history_updated', handleLocalUpdate);
       window.removeEventListener('storage', handleStorage);
-      supabase.removeChannel(channel);
     };
-  }, [currentUserId, fetchHistory, getLastViewedTimestamp]);
+  }, [currentUserId, fetchHistory, getLastViewedTimestamp, rebuildFirestoreCallHistory]);
 
   return {
     history,
