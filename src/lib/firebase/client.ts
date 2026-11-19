@@ -12,8 +12,14 @@ import {
 } from 'firebase/firestore';
 import firebaseConfig from '@/firebase-applet-config.json';
 
+const resolvedFirebaseConfig = {
+  ...firebaseConfig,
+  databaseURL: 'https://gen-lang-client-0538154845-default-rtdb.asia-southeast1.firebasedatabase.app',
+};
+
 // Initialize Firebase App singleton
-const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
+export const app =
+  getApps().length > 0 ? getApp() : initializeApp(resolvedFirebaseConfig);
 
 // Connect to the specific provisioned Firestore database ID
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);

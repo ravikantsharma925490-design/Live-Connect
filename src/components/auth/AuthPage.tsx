@@ -10,6 +10,7 @@ import {
   KeyRound,
   Eye,
   EyeOff,
+  ExternalLink,
 } from 'lucide-react';
 import { useLanguage } from '@/src/lib/LanguageContext';
 import { TermsAgreementModal } from '@/src/components/legal/TermsAgreementModal';
@@ -49,6 +50,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
   const [mode, setMode] = useState<AuthMode>('signin');
   const [loading, setLoading] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
+  const [popupBlocked, setPopupBlocked] = useState(false);
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
 
   // Form states
@@ -94,6 +96,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
   const switchMode = (next: AuthMode) => {
     clearError();
     setLocalError(null);
+    setPopupBlocked(false);
     setInfoMessage(null);
     setMode(next);
   };
@@ -101,6 +104,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
   const handleGoogleAuth = async () => {
     clearError();
     setLocalError(null);
+    setPopupBlocked(false);
     setInfoMessage(null);
 
     if (!agreedTerms) {
@@ -111,11 +115,22 @@ export const AuthPage: React.FC<AuthPageProps> = ({
     setLoading(true);
     try {
       if (onGoogleSignIn) {
-        await onGoogleSignIn();
+        const res = await onGoogleSignIn();
+        if (res && res.success === false) {
+          if (res.popupBlocked) {
+            setPopupBlocked(true);
+          }
+          setLocalError(
+            res.error || 'Google Sign-in could not be completed. You can also sign in with Email & Password.'
+          );
+        }
       }
     } catch (err: any) {
-      console.error('[Google Auth Error]:', err);
-      setLocalError(err.message || 'Google Sign-in failed. You can also sign in with Email & Password.');
+      const msg = err?.message || 'Google Sign-in failed. You can also sign in with Email & Password.';
+      if (msg.toLowerCase().includes('pop-up') || msg.toLowerCase().includes('popup')) {
+        setPopupBlocked(true);
+      }
+      setLocalError(msg);
     } finally {
       setLoading(false);
     }
@@ -328,8 +343,21 @@ export const AuthPage: React.FC<AuthPageProps> = ({
 
         {/* Error Messages Banner */}
         {activeError && (
-          <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300 text-xs leading-relaxed">
+          <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300 text-xs leading-relaxed space-y-2">
             <div className="font-semibold">{activeError}</div>
+            {popupBlocked && typeof window !== 'undefined' && (
+              <div className="pt-1 flex flex-wrap items-center gap-2">
+                <a
+                  href={window.location.href}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white text-neutral-900 hover:bg-neutral-100 font-bold text-[11px] transition-colors"
+                >
+                  <span>Open in New Tab to Sign In</span>
+                  <ExternalLink className="w-3 h-3" />
+                </a>
+              </div>
+            )}
           </div>
         )}
 

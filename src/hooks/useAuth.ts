@@ -2,6 +2,8 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   onAuthStateChanged,
   signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
   signOut as firebaseSignOut,
   User as FirebaseUser,
 } from 'firebase/auth';
@@ -351,6 +353,18 @@ export function useAuth() {
       setLoading(false);
     }, 1500);
 
+    getRedirectResult(auth)
+      .then((res) => {
+        if (res?.user) {
+          void resolveFirebaseUser(res.user);
+        }
+      })
+      .catch((err: any) => {
+        if (err?.code && err.code !== 'auth/no-auth-event') {
+          setAuthError(err.message || 'Google sign-in redirect did not complete.');
+        }
+      });
+
     const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
       clearTimeout(safetyTimer);
       if (fbUser) {
@@ -588,14 +602,34 @@ export function useAuth() {
         return { success: true, user: result.user };
       } catch (err: any) {
         const code = err?.code || '';
-        let msg = err?.message || 'Failed to sign in with Google.';
-        if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
-          msg = 'Google sign-in popup was cancelled.';
-        } else if (code === 'auth/popup-blocked') {
-          msg = 'Pop-up was blocked by your browser. Please allow pop-ups and try again.';
+        const isInIframe = typeof window !== 'undefined' && window.self !== window.top;
+
+        if (code === 'auth/popup-blocked') {
+          if (!isInIframe) {
+            try {
+              await signInWithRedirect(auth, googleProvider);
+              return { success: true, redirected: true };
+            } catch (redirectErr: any) {
+              const redirectMsg = redirectErr?.message || 'Google sign-in redirect failed.';
+              setAuthError(redirectMsg);
+              return { success: false, code, popupBlocked: true, error: redirectMsg };
+            }
+          }
+          const msg =
+            'Pop-up was blocked by your browser. Please allow pop-ups for this site or open LiveConnect in a new tab.';
+          setAuthError(msg);
+          return { success: false, code, popupBlocked: true, error: msg };
         }
+
+        if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+          const msg = 'Google sign-in pop-up was closed before completing sign-in.';
+          setAuthError(msg);
+          return { success: false, code, cancelled: true, error: msg };
+        }
+
+        const msg = err?.message || 'Failed to sign in with Google.';
         setAuthError(msg);
-        throw new Error(msg);
+        return { success: false, code, error: msg };
       }
     }
 
