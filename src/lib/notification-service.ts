@@ -116,8 +116,8 @@ class NotificationService {
         if (this.swRegistration && 'showNotification' in this.swRegistration) {
           await this.swRegistration.showNotification(payload.title, {
             body: payload.body,
-            icon: payload.icon || '/favicon.ico',
-            badge: '/favicon.ico',
+            icon: payload.icon || '/icon.svg',
+            badge: '/icon.svg',
             tag: payload.tag || 'liveconnect-notification',
             data: payload.data,
           });
@@ -127,7 +127,7 @@ class NotificationService {
         // Fallback to standard new Notification
         const n = new Notification(payload.title, {
           body: payload.body,
-          icon: payload.icon || '/favicon.ico',
+          icon: payload.icon || '/icon.svg',
           tag: payload.tag || 'liveconnect-notification',
           data: payload.data,
         });

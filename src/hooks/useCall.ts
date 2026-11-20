@@ -7,6 +7,7 @@ import {
   updateDoc,
   query,
   where,
+  limit,
   onSnapshot,
   serverTimestamp,
 } from 'firebase/firestore';
@@ -369,7 +370,7 @@ export function useCall(currentUser?: Profile | null) {
       const incomingQuery = query(
         collection(db, 'calls'),
         where('calleeId', '==', currentUser.id),
-        where('status', 'in', ['calling', 'ringing'])
+        limit(30)
       );
 
       const unsubIncoming = onSnapshot(
@@ -383,6 +384,7 @@ export function useCall(currentUser?: Profile | null) {
           for (const docSnap of snap.docs) {
             const d = docSnap.data();
             if (!d) continue;
+            if (d.status !== 'calling' && d.status !== 'ringing') continue;
             if (answeredCallIdsRef.current.has(docSnap.id) || isAnsweringRef.current) continue;
             if (d.callerDeviceId && d.callerDeviceId === getClientDeviceId()) continue;
 
@@ -446,7 +448,7 @@ export function useCall(currentUser?: Profile | null) {
               notificationService.sendNotification({
                 title: `Incoming ${matchedCall.call_type === 'video' ? 'Video' : 'Voice'} Call`,
                 body: `${callerName} is calling you on LiveConnect...`,
-                icon: matchedCall.caller?.avatar_url || '/favicon.ico',
+                icon: matchedCall.caller?.avatar_url || '/icon.svg',
                 tag: `call-${matchedCall.id}`,
               });
 
@@ -504,7 +506,7 @@ export function useCall(currentUser?: Profile | null) {
           notificationService.sendNotification({
             title: `Incoming ${incoming.call_type === 'video' ? 'Video' : 'Voice'} Call`,
             body: `${callerName} is calling you on LiveConnect...`,
-            icon: callerProfile?.avatar_url || '/favicon.ico',
+            icon: callerProfile?.avatar_url || '/icon.svg',
             tag: `call-${incoming.id}`,
           });
         }
@@ -632,7 +634,7 @@ export function useCall(currentUser?: Profile | null) {
             notificationService.sendNotification({
               title: `Incoming ${foundCall.call_type === 'video' ? 'Video' : 'Voice'} Call`,
               body: `${callerName} is calling you on LiveConnect...`,
-              icon: foundCall.caller?.avatar_url || '/favicon.ico',
+              icon: foundCall.caller?.avatar_url || '/icon.svg',
               tag: `call-${foundCall.id}`,
             });
 
@@ -920,6 +922,10 @@ export function useCall(currentUser?: Profile | null) {
     const calleeId = peer?.id || (peer as any)?.username;
     if (!calleeId) {
       setCallError('Could not find user to call.');
+      return;
+    }
+    if (calleeId === currentUser.id) {
+      setCallError('You cannot start a call with yourself.');
       return;
     }
 

@@ -3907,15 +3907,26 @@ app.get('/api/health', (_req, res) => {
   });
 });
 
+app.get('/favicon.ico', (_req, res) => {
+  res.redirect(302, '/icon.svg');
+});
+
 async function startServer() {
   const isProd = process.env.NODE_ENV === 'production';
 
   if (!isProd) {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
+    const vitePromise = createViteServer({
+      server: { middlewareMode: true, hmr: false },
       appType: 'spa',
     });
-    app.use(vite.middlewares);
+    app.use(async (req, res, next) => {
+      try {
+        const vite = await vitePromise;
+        return vite.middlewares(req, res, next);
+      } catch (err) {
+        return next(err);
+      }
+    });
   } else {
     const cwdDist = path.resolve(process.cwd(), 'dist');
     const localDist = path.resolve(__dirname, 'dist');

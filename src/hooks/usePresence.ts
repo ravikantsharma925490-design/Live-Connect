@@ -26,7 +26,7 @@ export function usePresence(currentUserId?: string) {
   const presenceBusRef = useRef<BroadcastChannel | null>(null);
 
   // Send offline beacon
-  const sendOfflineStatus = useCallback((userId: string) => {
+  const sendOfflineStatus = useCallback((userId: string, skipRestFallback = false) => {
     if (!userId) return;
     const now = new Date().toISOString();
 
@@ -38,6 +38,8 @@ export function usePresence(currentUserId?: string) {
       }).catch(() => {});
       return;
     }
+
+    if (skipRestFallback) return;
 
     try {
       const payload = JSON.stringify({ userId });
@@ -169,8 +171,7 @@ export function usePresence(currentUserId?: string) {
       const q = query(
         collection(db, 'public_profiles'),
         where('isPublic', '==', true),
-        where('isOnline', '==', true),
-        limit(150)
+        limit(200)
       );
       unsubFirestore = onSnapshot(
         q,
@@ -178,8 +179,9 @@ export function usePresence(currentUserId?: string) {
           const nextMap: Record<string, { is_online: boolean; last_seen: string }> = {};
           snap.forEach((docSnap) => {
             const d = docSnap.data();
+            if (!d?.isOnline) return;
             nextMap[docSnap.id] = {
-              is_online: Boolean(d.isOnline),
+              is_online: true,
               last_seen: tsToIso(d.lastSeen),
             };
           });
@@ -242,7 +244,7 @@ export function usePresence(currentUserId?: string) {
         presenceBusRef.current.close();
         presenceBusRef.current = null;
       }
-      sendOfflineStatus(currentUserId);
+      sendOfflineStatus(currentUserId, usingFirebase);
     };
   }, [currentUserId, sendOnlineHeartbeat, sendOfflineStatus, fetchOnlinePresence]);
 

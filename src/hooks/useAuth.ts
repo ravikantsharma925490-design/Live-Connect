@@ -14,6 +14,7 @@ import {
   db,
   googleProvider,
   isFirebaseSessionActive,
+  testConnection,
 } from '@/src/lib/firebase/client';
 import {
   fetchPublicProfileFs,
@@ -174,12 +175,8 @@ export function useAuth() {
     const u = loadCachedUser();
     return tok && u ? { access_token: tok } : null;
   });
-  const [loading, setLoading] = useState<boolean>(() => {
-    if (typeof window === 'undefined') return true;
-    return !localStorage.getItem('liveconnect_cached_user');
-  });
+  const [loading, setLoading] = useState<boolean>(true);
   const [authError, setAuthError] = useState<string | null>(null);
-  const [isPasswordRecovery, setIsPasswordRecovery] = useState(false);
   const [needsOnboarding, setNeedsOnboarding] = useState(false);
   const [onboardingUser, setOnboardingUser] = useState<AuthUser | null>(null);
   const [profileCheckPending, setProfileCheckPending] = useState(false);
@@ -262,6 +259,7 @@ export function useAuth() {
     async (fbUser: FirebaseUser) => {
       setProfileCheckPending(true);
       try {
+        void testConnection();
         const privInfo = await fetchPrivateUserInfoFs(fbUser.uid).catch(() => null);
         if (privInfo?.bannedUntil && new Date(privInfo.bannedUntil).getTime() > Date.now()) {
           await firebaseSignOut(auth).catch(() => {});
@@ -275,7 +273,14 @@ export function useAuth() {
         setSession({ access_token: token });
         updateUserState(mappedUser);
 
-        const publicProf = await fetchPublicProfileFs(fbUser.uid).catch(() => null);
+        let publicProf: Profile | null = null;
+        let profileFetchFailed = false;
+        try {
+          publicProf = await fetchPublicProfileFs(fbUser.uid);
+        } catch {
+          profileFetchFailed = true;
+        }
+
         if (publicProf) {
           const mergedProf: Profile = {
             ...publicProf,
@@ -285,18 +290,32 @@ export function useAuth() {
           updateProfileState(mergedProf);
           setNeedsOnboarding(false);
           setOnboardingUser(null);
+          setAuthError(null);
 
           updateDoc(doc(db, 'public_profiles', fbUser.uid), {
             isOnline: true,
             lastSeen: serverTimestamp(),
             updatedAt: serverTimestamp(),
           }).catch(() => {});
+        } else if (profileFetchFailed) {
+          const cachedProf = loadCachedProfile();
+          if (cachedProf && cachedProf.id === fbUser.uid) {
+            updateProfileState(cachedProf);
+            setNeedsOnboarding(false);
+            setOnboardingUser(null);
+            setAuthError(null);
+          } else {
+            updateProfileState(null);
+            setNeedsOnboarding(false);
+            setOnboardingUser(null);
+            setAuthError('Could not connect to LiveConnect servers. Please check your internet connection and try again.');
+          }
         } else {
           updateProfileState(null);
           setNeedsOnboarding(true);
           setOnboardingUser(mappedUser);
+          setAuthError(null);
         }
-        setAuthError(null);
       } catch (err: any) {
         console.warn('Error resolving Firebase user:', err?.message);
       } finally {
@@ -351,7 +370,7 @@ export function useAuth() {
   useEffect(() => {
     const safetyTimer = setTimeout(() => {
       setLoading(false);
-    }, 1500);
+    }, 2500);
 
     getRedirectResult(auth)
       .then((res) => {
@@ -478,119 +497,6 @@ export function useAuth() {
     setOnboardingUser(null);
   };
 
-  const signUp = async (
-    email: string,
-    password: string,
-    displayName: string,
-    username: string,
-    country?: string
-  ) => {
-    setAuthError(null);
-    const cleanEmail = email.trim().toLowerCase();
-    const cleanUsername = username.trim().toLowerCase().replace(/[^a-z0-9_]/g, '');
-
-    if (cleanUsername.length < 3) {
-      const msg = 'Username must be at least 3 characters (letters, numbers, underscores only).';
-      setAuthError(msg);
-      throw new Error(msg);
-    }
-    if (password.length < 6) {
-      const msg = 'Password must be at least 6 characters.';
-      setAuthError(msg);
-      throw new Error(msg);
-    }
-
-    const res = await fetch('/api/auth/create-account', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        email: cleanEmail,
-        password,
-        displayName: displayName.trim() || cleanUsername,
-        username: cleanUsername,
-        country: country || 'India',
-      }),
-    });
-
-    const data = await res.json();
-    if (!res.ok || !data.success) {
-      const msg = data.error || 'Failed to create account';
-      setAuthError(msg);
-      throw new Error(msg);
-    }
-
-    return {
-      needsOtp: Boolean(data.needsOtp),
-      email: cleanEmail,
-      emailSent: Boolean(data.emailSent),
-      otpCode: data.emailSent ? undefined : data.otpCode,
-      session: data.session,
-      user: data.user,
-      profile: data.profile,
-    };
-  };
-
-  const verifySignupOtp = async (email: string, otpCode: string) => {
-    setAuthError(null);
-    const res = await fetch('/api/auth/verify-otp', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: email.trim().toLowerCase(), otpCode: otpCode.trim() }),
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) {
-      const msg = data.error || 'Invalid verification code';
-      setAuthError(msg);
-      throw new Error(msg);
-    }
-    if (data.session && data.user) {
-      applyServerAuthPayload({
-        session: data.session,
-        user: data.user,
-        profile: data.profile,
-        needsOnboarding: !data.profile,
-      });
-    }
-    return data;
-  };
-
-  const sendLoginOtp = async (email: string) => {
-    setAuthError(null);
-    const res = await fetch('/api/auth/send-otp', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: email.trim().toLowerCase(), type: 'login' }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      const msg = data.error || 'Failed to send verification code';
-      setAuthError(msg);
-      throw new Error(msg);
-    }
-    return data;
-  };
-
-  const signIn = async (email: string, password: string) => {
-    setAuthError(null);
-    const res = await fetch('/api/auth/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: email.trim().toLowerCase(), password }),
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) {
-      if (data.banned) {
-        setBannedUntilDate(data.bannedUntil || null);
-      }
-      const msg = data.error || 'Failed to sign in';
-      setAuthError(msg);
-      throw new Error(msg);
-    }
-
-    applyServerAuthPayload(data);
-    return data;
-  };
-
   const signInWithGoogle = async (payload?: { credential?: string; accessToken?: string }) => {
     setAuthError(null);
 
@@ -695,62 +601,6 @@ export function useAuth() {
     clearAuthState();
   };
 
-  const resetPassword = async (email: string) => {
-    setAuthError(null);
-    const res = await fetch('/api/auth/reset-password', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: email.trim().toLowerCase() }),
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) {
-      const msg = data.error || 'Failed to send password reset code';
-      setAuthError(msg);
-      throw new Error(msg);
-    }
-    return data;
-  };
-
-  const verifyResetPassword = async (email: string, otpCode: string, newPassword: string) => {
-    setAuthError(null);
-    const res = await fetch('/api/auth/verify-reset-password', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        email: email.trim().toLowerCase(),
-        otpCode: otpCode.trim(),
-        newPassword,
-      }),
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) {
-      const msg = data.error || 'Failed to reset password';
-      setAuthError(msg);
-      throw new Error(msg);
-    }
-    return data;
-  };
-
-  const updatePassword = async (newPassword: string) => {
-    setAuthError(null);
-    const token = getStoredToken();
-    const res = await fetch('/api/auth/update-password', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-      body: JSON.stringify({ newPassword }),
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) {
-      const msg = data.error || 'Failed to update password';
-      setAuthError(msg);
-      throw new Error(msg);
-    }
-    setIsPasswordRecovery(false);
-  };
-
   const updateProfile = async (updates: Partial<Profile>) => {
     if (!user) return null;
 
@@ -822,18 +672,9 @@ export function useAuth() {
     loading,
     authError,
     setAuthError,
-    signUp,
-    verifySignupOtp,
-    signIn,
     signInWithGoogle,
     loginWithTruecaller,
-    sendLoginOtp,
     signOut,
-    resetPassword,
-    verifyResetPassword,
-    updatePassword,
-    isPasswordRecovery,
-    setIsPasswordRecovery,
     needsOnboarding,
     onboardingUser,
     profileCheckPending,

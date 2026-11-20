@@ -45,18 +45,8 @@ export default function App() {
     loading: authLoading,
     authError,
     setAuthError,
-    signUp,
-    verifySignupOtp,
-    signIn,
     signInWithGoogle,
-    loginWithTruecaller,
-    sendLoginOtp,
     signOut,
-    resetPassword,
-    verifyResetPassword,
-    updatePassword,
-    isPasswordRecovery,
-    setIsPasswordRecovery,
     needsOnboarding,
     onboardingUser,
     profileCheckPending,
@@ -66,7 +56,10 @@ export default function App() {
     refreshProfile,
   } = useAuth();
 
-  const { isUserOnline, getUserLastSeen } = usePresence(user?.id);
+  const readyUserId =
+    !authLoading && !profileCheckPending && user && profile && !needsOnboarding ? user.id : undefined;
+
+  const { isUserOnline, getUserLastSeen } = usePresence(readyUserId);
 
   const activeUserProfile = useMemo<Profile | null>(() => {
     if (profile) return profile;
@@ -88,8 +81,10 @@ export default function App() {
     return null;
   }, [profile, user]);
 
+  const readyProfile = readyUserId ? activeUserProfile : null;
+
   // Social Relations (Follow, Follow-Back, Mutual, Block/Unblock)
-  const socialRelations = useSocialRelations(activeUserProfile || profile);
+  const socialRelations = useSocialRelations(readyProfile);
 
   // Real-time In-App Notifications
   const {
@@ -98,7 +93,7 @@ export default function App() {
     markAsRead: markNotificationAsRead,
     markAllAsRead: markAllNotificationsAsRead,
     deleteNotification,
-  } = useNotifications(user?.id);
+  } = useNotifications(readyUserId);
 
   const [isNotificationOpen, setIsNotificationOpen] = useState(false);
 
@@ -117,7 +112,7 @@ export default function App() {
     deleteConversation,
     markConversationAsRead,
     updateConversation,
-  } = useConversations(user?.id, activeTab);
+  } = useConversations(readyUserId, activeTab);
 
   const {
     incomingCall,
@@ -136,7 +131,7 @@ export default function App() {
     toggleCamera,
     switchCamera,
     clearCallError,
-  } = useCall(activeUserProfile);
+  } = useCall(readyProfile);
 
   const {
     history: callHistory,
@@ -146,7 +141,7 @@ export default function App() {
     deleteCall,
     clearAllHistory,
     markHistoryAsViewed,
-  } = useCallHistory(user?.id);
+  } = useCallHistory(readyUserId);
 
   // Modals state
   const [isSearchOpen, setIsSearchOpen] = useState(false);
@@ -156,12 +151,6 @@ export default function App() {
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [viewingProfile, setViewingProfile] = useState<Profile | null>(null);
-
-  // Password Recovery form state
-  const [newPassword, setNewPassword] = useState('');
-  const [confirmNewPassword, setConfirmNewPassword] = useState('');
-  const [passwordUpdateError, setPasswordUpdateError] = useState<string | null>(null);
-  const [passwordUpdateSuccess, setPasswordUpdateSuccess] = useState(false);
 
   // Calculate total unread messages count (active open chat messages are only excluded if currently viewing messages tab)
   const totalUnreadCount = useMemo(() => {
@@ -248,74 +237,6 @@ export default function App() {
     return <BannedScreen bannedUntil={bannedUntilDate} />;
   }
 
-  if (isPasswordRecovery) {
-    const handleSetNewPassword = async (e: React.FormEvent) => {
-      e.preventDefault();
-      setPasswordUpdateError(null);
-      if (newPassword.length < 6) {
-        setPasswordUpdateError('Password must be at least 6 characters.');
-        return;
-      }
-      if (newPassword !== confirmNewPassword) {
-        setPasswordUpdateError('Passwords do not match.');
-        return;
-      }
-      try {
-        await updatePassword(newPassword);
-        setPasswordUpdateSuccess(true);
-        setTimeout(() => {
-          window.history.pushState({}, '', '/app');
-          window.location.href = '/';
-        }, 1500);
-      } catch (err: any) {
-        setPasswordUpdateError(err.message || 'Failed to update password.');
-      }
-    };
-
-    return (
-      <div className="min-h-screen w-full flex flex-col items-center justify-center bg-neutral-950 text-white px-6">
-        <div className="w-full max-w-sm">
-          <h2 className="text-xl font-bold text-center mb-2">Set a new password</h2>
-          <p className="text-sm text-neutral-400 text-center mb-6">
-            Enter a new password for your account.
-          </p>
-          {passwordUpdateSuccess ? (
-            <p className="text-sm text-green-400 text-center">
-              Password updated! Redirecting you to the app...
-            </p>
-          ) : (
-            <form onSubmit={handleSetNewPassword} className="space-y-4">
-              <input
-                type="password"
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-                placeholder="New password"
-                className="w-full py-3 px-4 rounded-xl bg-neutral-800 border border-neutral-700 text-white placeholder-neutral-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                autoFocus
-              />
-              <input
-                type="password"
-                value={confirmNewPassword}
-                onChange={(e) => setConfirmNewPassword(e.target.value)}
-                placeholder="Confirm new password"
-                className="w-full py-3 px-4 rounded-xl bg-neutral-800 border border-neutral-700 text-white placeholder-neutral-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-              {passwordUpdateError && (
-                <p className="text-sm text-red-400 text-center">{passwordUpdateError}</p>
-              )}
-              <button
-                type="submit"
-                className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold cursor-pointer transition-colors"
-              >
-                Update Password
-              </button>
-            </form>
-          )}
-        </div>
-      </div>
-    );
-  }
-
   // Public standalone view of Terms, Privacy & Delete Account Policy
   if (typeof window !== 'undefined') {
     const pathname = window.location.pathname;
@@ -367,11 +288,6 @@ export default function App() {
       <>
         <AuthPage
           onGoogleSignIn={signInWithGoogle}
-          onEmailSignIn={signIn}
-          onSignUp={signUp}
-          onVerifyOtp={verifySignupOtp}
-          onResetPassword={resetPassword}
-          onVerifyResetPassword={verifyResetPassword}
           authError={authError}
           clearError={() => setAuthError(null)}
         />

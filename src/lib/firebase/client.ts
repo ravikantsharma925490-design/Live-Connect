@@ -6,23 +6,58 @@ import {
 } from 'firebase/auth';
 import {
   getFirestore,
+  initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
+  memoryLocalCache,
+  Firestore,
   doc,
   getDocFromServer,
   Timestamp,
 } from 'firebase/firestore';
 import firebaseConfig from '@/firebase-applet-config.json';
-
-const resolvedFirebaseConfig = {
-  ...firebaseConfig,
-  databaseURL: 'https://gen-lang-client-0538154845-default-rtdb.asia-southeast1.firebasedatabase.app',
-};
+import { restProbeConnection } from './restFallback';
 
 // Initialize Firebase App singleton
 export const app =
-  getApps().length > 0 ? getApp() : initializeApp(resolvedFirebaseConfig);
+  getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
 
-// Connect to the specific provisioned Firestore database ID
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+// Connect to the provisioned Firestore database using fetch streams + persistent multi-tab cache
+// to prevent buffering timeouts in preview iframes, proxies, or mobile WebViews.
+function createFirestoreInstance(): Firestore {
+  if (typeof window === 'undefined') {
+    return getFirestore(app, firebaseConfig.firestoreDatabaseId);
+  }
+  try {
+    return initializeFirestore(
+      app,
+      {
+        experimentalAutoDetectLongPolling: true,
+        experimentalLongPollingOptions: { timeoutSeconds: 8 },
+        localCache: persistentLocalCache({
+          tabManager: persistentMultipleTabManager(),
+        }),
+      },
+      firebaseConfig.firestoreDatabaseId
+    );
+  } catch {
+    try {
+      return initializeFirestore(
+        app,
+        {
+          experimentalAutoDetectLongPolling: true,
+          experimentalLongPollingOptions: { timeoutSeconds: 8 },
+          localCache: memoryLocalCache(),
+        },
+        firebaseConfig.firestoreDatabaseId
+      );
+    } catch {
+      return getFirestore(app, firebaseConfig.firestoreDatabaseId);
+    }
+  }
+}
+
+export const db = createFirestoreInstance();
 export const auth = getAuth(app);
 
 export const googleProvider = new GoogleAuthProvider();
@@ -106,19 +141,19 @@ export function handleFirestoreError(
 }
 
 export async function testConnection(): Promise<void> {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return;
+  }
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
   } catch (error) {
     if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.error('Please check your Firebase configuration.');
+      const restOk = await restProbeConnection();
+      if (!restOk) {
+        console.error('Please check your Firebase configuration.');
+      }
     }
-    // Other errors (such as permission-denied prior to sign-in or missing doc) do not indicate offline config failure
   }
-}
-
-// Execute connection probe on startup
-if (typeof window !== 'undefined') {
-  void testConnection();
 }
 
 export function isFirebaseSessionActive(userId?: string): boolean {

@@ -597,7 +597,7 @@ service cloud.firestore {
                       get(/databases/$(database)/documents/calls/$(callId)).data.callerId == request.auth.uid ||
                       get(/databases/$(database)/documents/calls/$(callId)).data.calleeId == request.auth.uid
                     );
-        allow list: if isSignedIn() && resource.data.callId == callId &&
+        allow list: if isSignedIn() &&
                        (resource.data.callerId == request.auth.uid || resource.data.calleeId == request.auth.uid);
         allow create: if isEmailVerified() && isValidId(callId) && isValidId(candidateId) &&
                          isValidIceCandidate(incoming(), callId, candidateId) &&

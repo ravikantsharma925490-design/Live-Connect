@@ -735,10 +735,9 @@ export class WebRTCP2PSession {
         }
       );
 
-      // 2. Watch peer ICE candidates using rule-compliant participant filter
+      // 2. Watch peer ICE candidates using rule-compliant single participant filter
       const iceQuery = query(
         collection(db, 'calls', this.callId, 'ice_candidates'),
-        where('callId', '==', this.callId),
         where(this.isCaller ? 'callerId' : 'calleeId', '==', this.currentUserId)
       );
 

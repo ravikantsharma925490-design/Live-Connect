@@ -3841,14 +3841,24 @@ app.get("/api/health", (_req, res) => {
     timestamp: (/* @__PURE__ */ new Date()).toISOString()
   });
 });
+app.get("/favicon.ico", (_req, res) => {
+  res.redirect(302, "/icon.svg");
+});
 async function startServer() {
   const isProd = process.env.NODE_ENV === "production";
   if (!isProd) {
-    const vite = await (0, import_vite.createServer)({
-      server: { middlewareMode: true },
+    const vitePromise = (0, import_vite.createServer)({
+      server: { middlewareMode: true, hmr: false },
       appType: "spa"
     });
-    app.use(vite.middlewares);
+    app.use(async (req, res, next) => {
+      try {
+        const vite = await vitePromise;
+        return vite.middlewares(req, res, next);
+      } catch (err) {
+        return next(err);
+      }
+    });
   } else {
     const cwdDist = import_path3.default.resolve(process.cwd(), "dist");
     const localDist = import_path3.default.resolve(__dirname, "dist");

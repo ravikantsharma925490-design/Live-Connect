@@ -108,7 +108,7 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
         notificationService.sendNotification({
           title: '🔔 Push Notifications Active!',
           body: 'You will now receive instant alerts for incoming calls and messages.',
-          icon: '/favicon.ico',
+          icon: '/icon.svg',
         });
       } else {
         const currentPerm = notificationService.getPermissionStatus();
@@ -123,7 +123,7 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
           notificationService.sendNotification({
             title: '🔔 In-App Alerts Active',
             body: 'You will receive top screen alerts for calls & messages.',
-            icon: '/favicon.ico',
+            icon: '/icon.svg',
           });
         } else {
           // If in iframe / preview fallback, enable in-app notifications
@@ -136,7 +136,7 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
           notificationService.sendNotification({
             title: '🔔 LiveConnect In-App Alerts Active',
             body: 'You will see notifications at the top of your screen.',
-            icon: '/favicon.ico',
+            icon: '/icon.svg',
           });
         }
       }
@@ -156,7 +156,7 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
     const sent = await notificationService.sendNotification({
       title: '💬 Test LiveConnect Notification',
       body: 'Alex: Hey! Push notifications are working perfectly.',
-      icon: '/favicon.ico',
+      icon: '/icon.svg',
     });
 
     if (sent) {

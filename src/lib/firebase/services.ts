@@ -29,6 +29,12 @@ import {
   isValidFirestoreId,
 } from './client';
 import {
+  isOfflineOrUnavailableError,
+  restGetDocument,
+  restCommitWrites,
+  RestWriteOperation,
+} from './restFallback';
+import {
   Profile,
   Conversation,
   ConversationMember,
@@ -168,13 +174,28 @@ export function buildConversationFromDocs(
 // PROFILES, AUTH & USERNAMES
 // ============================================================================
 
+async function getDocDataWithRestFallback(
+  docPath: string,
+  ...pathSegments: [string, ...string[]]
+): Promise<{ exists: boolean; data?: Record<string, any> }> {
+  try {
+    const snap = await getDoc(doc(db, ...pathSegments));
+    return snap.exists() ? { exists: true, data: snap.data() } : { exists: false };
+  } catch (err) {
+    if (isOfflineOrUnavailableError(err)) {
+      return await restGetDocument(docPath);
+    }
+    throw err;
+  }
+}
+
 export async function fetchPublicProfileFs(userId: string): Promise<Profile | null> {
   if (!userId || !isValidFirestoreId(userId)) return null;
   const path = `public_profiles/${userId}`;
   try {
-    const snap = await getDoc(doc(db, 'public_profiles', userId));
-    if (!snap.exists()) return null;
-    return publicProfileDocToProfile(snap.data(), userId);
+    const res = await getDocDataWithRestFallback(path, 'public_profiles', userId);
+    if (!res.exists || !res.data) return null;
+    return publicProfileDocToProfile(res.data, userId);
   } catch (err) {
     handleFirestoreError(err, OperationType.GET, path);
   }
@@ -207,9 +228,9 @@ export async function fetchPrivateUserInfoFs(userId: string): Promise<{
   if (!userId || !isValidFirestoreId(userId)) return null;
   const path = `users/${userId}/private/info`;
   try {
-    const snap = await getDoc(doc(db, 'users', userId, 'private', 'info'));
-    if (!snap.exists()) return null;
-    const d = snap.data();
+    const res = await getDocDataWithRestFallback(path, 'users', userId, 'private', 'info');
+    if (!res.exists || !res.data) return null;
+    const d = res.data;
     return {
       email: d.email ?? null,
       phoneNumber: d.phoneNumber ?? null,
@@ -235,11 +256,11 @@ export async function checkUsernameAvailabilityFs(
 
   const path = `usernames/${clean}`;
   try {
-    const snap = await getDoc(doc(db, 'usernames', clean));
-    if (!snap.exists()) {
+    const res = await getDocDataWithRestFallback(path, 'usernames', clean);
+    if (!res.exists) {
       return { available: true };
     }
-    const existingUid = snap.data()?.uid;
+    const existingUid = res.data?.uid;
     if (excludeUserId && existingUid === excludeUserId) {
       return { available: true };
     }
@@ -293,42 +314,148 @@ export async function createOnboardingUserDocsFs(
   const cleanCountry = sanitizeOptionalStr(details.country, FIREBASE_CONSTRAINTS.MAX_COUNTRY);
   const cleanEmail = sanitizeOptionalStr(email, FIREBASE_CONSTRAINTS.MAX_EMAIL);
 
+  const [existingUsernameRes, existingPublicRes, existingPrivateRes] = await Promise.all([
+    getDocDataWithRestFallback(`usernames/${cleanUsername}`, 'usernames', cleanUsername).catch(
+      () => ({ exists: false }) as { exists: boolean; data?: Record<string, any> }
+    ),
+    getDocDataWithRestFallback(`public_profiles/${userId}`, 'public_profiles', userId).catch(
+      () => ({ exists: false }) as { exists: boolean; data?: Record<string, any> }
+    ),
+    getDocDataWithRestFallback(`users/${userId}/private/info`, 'users', userId, 'private', 'info').catch(
+      () => ({ exists: false }) as { exists: boolean; data?: Record<string, any> }
+    ),
+  ]);
+
+  if (existingUsernameRes.exists && existingUsernameRes.data?.uid !== userId) {
+    throw new Error('This username is already taken.');
+  }
+
   const batch = writeBatch(db);
+  const restOps: RestWriteOperation[] = [];
 
-  batch.set(doc(db, 'usernames', cleanUsername), {
-    uid: userId,
-    username: cleanUsername,
-    createdAt: serverTimestamp(),
-  });
+  if (!existingUsernameRes.exists) {
+    batch.set(doc(db, 'usernames', cleanUsername), {
+      uid: userId,
+      username: cleanUsername,
+      createdAt: serverTimestamp(),
+    });
+    restOps.push({
+      type: 'set',
+      path: `usernames/${cleanUsername}`,
+      data: {
+        uid: userId,
+        username: cleanUsername,
+      },
+      serverTimestampFields: ['createdAt'],
+    });
+  }
 
-  batch.set(doc(db, 'public_profiles', userId), {
-    id: userId,
-    username: cleanUsername,
-    displayName: cleanDisplayName,
-    avatarUrl: cleanAvatar,
-    bio: cleanBio,
-    gender: cleanGender,
-    country: cleanCountry,
-    isOnline: true,
-    isPublic: true,
-    lastSeen: serverTimestamp(),
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  });
+  if (existingPublicRes.exists) {
+    batch.update(doc(db, 'public_profiles', userId), {
+      username: cleanUsername,
+      displayName: cleanDisplayName,
+      avatarUrl: cleanAvatar,
+      bio: cleanBio,
+      gender: cleanGender,
+      country: cleanCountry,
+      isOnline: true,
+      lastSeen: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+    restOps.push({
+      type: 'update',
+      path: `public_profiles/${userId}`,
+      data: {
+        username: cleanUsername,
+        displayName: cleanDisplayName,
+        avatarUrl: cleanAvatar,
+        bio: cleanBio,
+        gender: cleanGender,
+        country: cleanCountry,
+        isOnline: true,
+      },
+      serverTimestampFields: ['lastSeen', 'updatedAt'],
+    });
+  } else {
+    batch.set(doc(db, 'public_profiles', userId), {
+      id: userId,
+      username: cleanUsername,
+      displayName: cleanDisplayName,
+      avatarUrl: cleanAvatar,
+      bio: cleanBio,
+      gender: cleanGender,
+      country: cleanCountry,
+      isOnline: true,
+      isPublic: true,
+      lastSeen: serverTimestamp(),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+    restOps.push({
+      type: 'set',
+      path: `public_profiles/${userId}`,
+      data: {
+        id: userId,
+        username: cleanUsername,
+        displayName: cleanDisplayName,
+        avatarUrl: cleanAvatar,
+        bio: cleanBio,
+        gender: cleanGender,
+        country: cleanCountry,
+        isOnline: true,
+        isPublic: true,
+      },
+      serverTimestampFields: ['lastSeen', 'createdAt', 'updatedAt'],
+    });
+  }
 
-  batch.set(doc(db, 'users', userId, 'private', 'info'), {
-    id: userId,
-    email: cleanEmail,
-    phoneNumber: null,
-    role: 'user',
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  });
+  if (existingPrivateRes.exists) {
+    batch.update(doc(db, 'users', userId, 'private', 'info'), {
+      email: cleanEmail,
+      updatedAt: serverTimestamp(),
+    });
+    restOps.push({
+      type: 'update',
+      path: `users/${userId}/private/info`,
+      data: {
+        email: cleanEmail,
+      },
+      serverTimestampFields: ['updatedAt'],
+    });
+  } else {
+    batch.set(doc(db, 'users', userId, 'private', 'info'), {
+      id: userId,
+      email: cleanEmail,
+      phoneNumber: null,
+      role: 'user',
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+    restOps.push({
+      type: 'set',
+      path: `users/${userId}/private/info`,
+      data: {
+        id: userId,
+        email: cleanEmail,
+        phoneNumber: null,
+        role: 'user',
+      },
+      serverTimestampFields: ['createdAt', 'updatedAt'],
+    });
+  }
 
   try {
     await batch.commit();
   } catch (err) {
-    handleFirestoreError(err, OperationType.WRITE, `public_profiles/${userId}`);
+    if (isOfflineOrUnavailableError(err)) {
+      try {
+        await restCommitWrites(restOps);
+      } catch (restErr) {
+        handleFirestoreError(restErr, OperationType.WRITE, `public_profiles/${userId}`);
+      }
+    } else {
+      handleFirestoreError(err, OperationType.WRITE, `public_profiles/${userId}`);
+    }
   }
 
   const saved = await fetchPublicProfileFs(userId);
@@ -358,9 +485,12 @@ export async function updateUserProfileDocsFs(
 ): Promise<Profile> {
   const path = `public_profiles/${userId}`;
   const batch = writeBatch(db);
+  const restOps: RestWriteOperation[] = [];
   const publicPatch: Record<string, any> = {
     updatedAt: serverTimestamp(),
   };
+  const restPublicData: Record<string, unknown> = {};
+  const publicServerTsFields: string[] = ['updatedAt'];
 
   if (updates.username !== undefined) {
     const newUsername = sanitizeUsername(updates.username);
@@ -378,49 +508,97 @@ export async function updateUserProfileDocsFs(
         username: newUsername,
         createdAt: serverTimestamp(),
       });
+      restOps.push({
+        type: 'delete',
+        path: `usernames/${currentProfile.username}`,
+      });
+      restOps.push({
+        type: 'set',
+        path: `usernames/${newUsername}`,
+        data: { uid: userId, username: newUsername },
+        serverTimestampFields: ['createdAt'],
+      });
     }
     publicPatch.username = newUsername;
+    restPublicData.username = newUsername;
   }
 
   if (updates.display_name !== undefined) {
     const dn = sanitizeStr(updates.display_name, FIREBASE_CONSTRAINTS.MAX_DISPLAY_NAME);
     if (!dn) throw new Error('Display Name cannot be empty.');
     publicPatch.displayName = dn;
+    restPublicData.displayName = dn;
   }
   if (updates.avatar_url !== undefined) {
-    publicPatch.avatarUrl = sanitizeOptionalStr(updates.avatar_url, FIREBASE_CONSTRAINTS.MAX_AVATAR_URL);
+    const av = sanitizeOptionalStr(updates.avatar_url, FIREBASE_CONSTRAINTS.MAX_AVATAR_URL);
+    publicPatch.avatarUrl = av;
+    restPublicData.avatarUrl = av;
   }
   if (updates.bio !== undefined) {
-    publicPatch.bio = sanitizeOptionalStr(updates.bio, FIREBASE_CONSTRAINTS.MAX_BIO);
+    const bioVal = sanitizeOptionalStr(updates.bio, FIREBASE_CONSTRAINTS.MAX_BIO);
+    publicPatch.bio = bioVal;
+    restPublicData.bio = bioVal;
   }
   if (updates.gender !== undefined) {
-    publicPatch.gender = sanitizeOptionalStr(updates.gender, FIREBASE_CONSTRAINTS.MAX_GENDER);
+    const genderVal = sanitizeOptionalStr(updates.gender, FIREBASE_CONSTRAINTS.MAX_GENDER);
+    publicPatch.gender = genderVal;
+    restPublicData.gender = genderVal;
   }
   if (updates.country !== undefined) {
-    publicPatch.country = sanitizeOptionalStr(updates.country, FIREBASE_CONSTRAINTS.MAX_COUNTRY);
+    const countryVal = sanitizeOptionalStr(updates.country, FIREBASE_CONSTRAINTS.MAX_COUNTRY);
+    publicPatch.country = countryVal;
+    restPublicData.country = countryVal;
   }
   if (updates.is_online !== undefined) {
-    publicPatch.isOnline = Boolean(updates.is_online);
+    const onlineVal = Boolean(updates.is_online);
+    publicPatch.isOnline = onlineVal;
     publicPatch.lastSeen = serverTimestamp();
+    restPublicData.isOnline = onlineVal;
+    publicServerTsFields.push('lastSeen');
   }
 
   batch.update(doc(db, 'public_profiles', userId), publicPatch);
+  restOps.push({
+    type: 'update',
+    path: `public_profiles/${userId}`,
+    data: restPublicData,
+    serverTimestampFields: publicServerTsFields,
+  });
 
   if (updates.email !== undefined || updates.phone_number !== undefined) {
     const privPatch: Record<string, any> = { updatedAt: serverTimestamp() };
+    const restPrivData: Record<string, unknown> = {};
     if (updates.email !== undefined) {
-      privPatch.email = sanitizeOptionalStr(updates.email, FIREBASE_CONSTRAINTS.MAX_EMAIL);
+      const emailVal = sanitizeOptionalStr(updates.email, FIREBASE_CONSTRAINTS.MAX_EMAIL);
+      privPatch.email = emailVal;
+      restPrivData.email = emailVal;
     }
     if (updates.phone_number !== undefined) {
-      privPatch.phoneNumber = sanitizeOptionalStr(updates.phone_number, FIREBASE_CONSTRAINTS.MAX_PHONE);
+      const phoneVal = sanitizeOptionalStr(updates.phone_number, FIREBASE_CONSTRAINTS.MAX_PHONE);
+      privPatch.phoneNumber = phoneVal;
+      restPrivData.phoneNumber = phoneVal;
     }
     batch.update(doc(db, 'users', userId, 'private', 'info'), privPatch);
+    restOps.push({
+      type: 'update',
+      path: `users/${userId}/private/info`,
+      data: restPrivData,
+      serverTimestampFields: ['updatedAt'],
+    });
   }
 
   try {
     await batch.commit();
   } catch (err) {
-    handleFirestoreError(err, OperationType.UPDATE, path);
+    if (isOfflineOrUnavailableError(err)) {
+      try {
+        await restCommitWrites(restOps);
+      } catch (restErr) {
+        handleFirestoreError(restErr, OperationType.UPDATE, path);
+      }
+    } else {
+      handleFirestoreError(err, OperationType.UPDATE, path);
+    }
   }
 
   const refreshed = await fetchPublicProfileFs(userId);
@@ -1090,6 +1268,16 @@ export async function removeGroupMemberFs(
 
     const remainingMembers = existingMemberIds.filter((id) => id !== targetMemberId);
 
+    // If the last member is leaving the group, delete the conversation instead of leaving memberRoles empty
+    if (isSelfLeave && remainingMembers.length === 0) {
+      const cleanupBatch = writeBatch(db);
+      cleanupBatch.delete(doc(db, 'conversations', conversationId, 'members', targetMemberId));
+      cleanupBatch.delete(doc(db, 'users', targetMemberId, 'inbox', conversationId));
+      cleanupBatch.delete(doc(db, 'conversations', conversationId));
+      await cleanupBatch.commit();
+      return null;
+    }
+
     const batch = writeBatch(db);
 
     // 1. Write centered system notification message before member removal commits
@@ -1110,10 +1298,25 @@ export async function removeGroupMemberFs(
 
     // 2. Update conversation metadata
     if (isSelfLeave) {
-      batch.update(doc(db, 'conversations', conversationId), {
-        [`memberRoles.${targetMemberId}`]: deleteField(),
-        updatedAt: serverTimestamp(),
-      });
+      if (convData.ownerId === targetMemberId && remainingMembers.length > 0) {
+        const nextOwnerId = remainingMembers[0];
+        const nextRoles = { ...currentRoles };
+        delete nextRoles[targetMemberId];
+        nextRoles[nextOwnerId] = 'admin';
+        batch.update(doc(db, 'conversations', conversationId), {
+          ownerId: nextOwnerId,
+          memberRoles: nextRoles,
+          updatedAt: serverTimestamp(),
+        });
+        batch.update(doc(db, 'conversations', conversationId, 'members', nextOwnerId), {
+          role: 'admin',
+        });
+      } else {
+        batch.update(doc(db, 'conversations', conversationId), {
+          [`memberRoles.${targetMemberId}`]: deleteField(),
+          updatedAt: serverTimestamp(),
+        });
+      }
     } else {
       const nextRoles = { ...currentRoles };
       delete nextRoles[targetMemberId];
@@ -1295,7 +1498,9 @@ export async function sendMessageToFirestoreFs(params: {
       content: cleanContent,
       replyToMessageId: sanitizeOptionalStr(replyToMessageId, 128),
       reactions: {},
-      mentions: Array.isArray(mentions) ? mentions.slice(0, 20) : [],
+      mentions: Array.isArray(mentions)
+        ? mentions.filter((m): m is string => typeof m === 'string').slice(0, 20)
+        : [],
       mediaType: sanitizeOptionalStr(mediaType, 32),
       cloudinaryPublicId: sanitizeOptionalStr(cloudinaryPublicId, 256),
       b2FileId: sanitizeOptionalStr(b2FileId, 256),

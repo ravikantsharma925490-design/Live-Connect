@@ -4,11 +4,12 @@ import { cn } from '@/src/lib/utils';
 
 export interface ToastProps {
   type?: 'error' | 'success' | 'info';
+  title?: string;
   message: string;
   onClose?: () => void;
 }
 
-export const Toast: React.FC<ToastProps> = ({ type = 'info', message, onClose }) => {
+export const Toast: React.FC<ToastProps> = ({ type = 'info', title, message, onClose }) => {
   return (
     <div
       className={cn(
@@ -21,7 +22,10 @@ export const Toast: React.FC<ToastProps> = ({ type = 'info', message, onClose })
       {type === 'error' && <AlertCircle className="w-5 h-5 text-red-500 shrink-0" />}
       {type === 'success' && <CheckCircle2 className="w-5 h-5 text-emerald-500 shrink-0" />}
       {type === 'info' && <Info className="w-5 h-5 text-blue-500 shrink-0" />}
-      <p className="text-sm font-medium leading-tight flex-1">{message}</p>
+      <div className="flex-1 min-w-0">
+        {title && <p className="text-xs font-bold uppercase tracking-wider mb-0.5">{title}</p>}
+        <p className="text-sm font-medium leading-tight">{message}</p>
+      </div>
       {onClose && (
         <button
           onClick={onClose}
