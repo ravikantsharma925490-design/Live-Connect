@@ -1,4 +1,12 @@
 @import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: "Plus Jakarta Sans", "Poppins", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Poppins", "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --color-ig-blue: #0095F6;
+}
 
 @layer base {
   html, body, #root {
@@ -8,6 +16,7 @@
     padding: 0;
     overscroll-behavior-y: none;
     -webkit-tap-highlight-color: transparent;
+    font-family: var(--font-sans);
   }
 }
 

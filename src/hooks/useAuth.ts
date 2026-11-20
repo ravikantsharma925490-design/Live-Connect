@@ -8,7 +8,7 @@ import {
   User as FirebaseUser,
 } from 'firebase/auth';
 import { doc, updateDoc, serverTimestamp } from 'firebase/firestore';
-import { AuthSession, AuthUser, Profile } from '@/src/types';
+import { AccountStatus, AuthSession, AuthUser, Profile } from '@/src/types';
 import {
   auth,
   db,
@@ -24,8 +24,23 @@ import {
   createOnboardingUserDocsFs,
   updateUserProfileDocsFs,
 } from '@/src/lib/firebase/services';
+import { getClientDeviceId } from '@/src/lib/deviceId';
 
 export const SESSION_STORAGE_KEY = 'liveconnect_session_token';
+export const APPEAL_TOKEN_STORAGE_KEY = 'liveconnect_appeal_token';
+
+export interface SuspensionInfo {
+  status: Extract<AccountStatus, 'suspended' | 'disabled'> | string;
+  banReason: string | null;
+  ruleBroken: string | null;
+  ruleLabel: string | null;
+  banUntil: string | null;
+  scheduledDeletionAt: string | null;
+  strikeCount: number;
+  appealToken: string | null;
+  userId?: string;
+  email?: string;
+}
 
 function getStoredToken(): string {
   if (typeof window === 'undefined') return '';
@@ -45,6 +60,34 @@ function setStoredToken(token: string | null) {
       localStorage.removeItem(SESSION_STORAGE_KEY);
     }
   } catch {}
+}
+
+function getStoredAppealToken(): string {
+  if (typeof window === 'undefined') return '';
+  try {
+    return localStorage.getItem(APPEAL_TOKEN_STORAGE_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+
+function setStoredAppealToken(token: string | null) {
+  if (typeof window === 'undefined') return;
+  try {
+    if (token) {
+      localStorage.setItem(APPEAL_TOKEN_STORAGE_KEY, token);
+    } else {
+      localStorage.removeItem(APPEAL_TOKEN_STORAGE_KEY);
+    }
+  } catch {}
+}
+
+function buildAuthHeaders(token?: string | null, extra?: Record<string, string>): Record<string, string> {
+  return {
+    'x-device-id': getClientDeviceId(),
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(extra || {}),
+  };
 }
 
 // Helper: check if a username is available (Firestore when Firebase-signed-in, SQLite API otherwise)
@@ -150,7 +193,11 @@ function loadCachedProfile(): Profile | null {
   }
 }
 
-function mapFirebaseUserToAuthUser(fbUser: FirebaseUser, privEmail?: string | null, privPhone?: string | null): AuthUser {
+function mapFirebaseUserToAuthUser(
+  fbUser: FirebaseUser,
+  privEmail?: string | null,
+  privPhone?: string | null
+): AuthUser {
   return {
     id: fbUser.uid,
     email: fbUser.email || privEmail || undefined,
@@ -181,6 +228,8 @@ export function useAuth() {
   const [onboardingUser, setOnboardingUser] = useState<AuthUser | null>(null);
   const [profileCheckPending, setProfileCheckPending] = useState(false);
   const [bannedUntilDate, setBannedUntilDate] = useState<string | null>(null);
+  const [suspensionInfo, setSuspensionInfo] = useState<SuspensionInfo | null>(null);
+  const [restoredNoticePending, setRestoredNoticePending] = useState(false);
 
   const updateProfileState = useCallback((newProf: Profile | null) => {
     setProfile(newProf);
@@ -208,14 +257,60 @@ export function useAuth() {
     }
   }, []);
 
-  const clearAuthState = useCallback(() => {
-    setStoredToken(null);
-    setSession(null);
-    updateUserState(null);
-    updateProfileState(null);
-    setNeedsOnboarding(false);
-    setOnboardingUser(null);
-  }, [updateProfileState, updateUserState]);
+  const clearAuthState = useCallback(
+    (preserveAppeal = false) => {
+      setStoredToken(null);
+      if (!preserveAppeal) {
+        setStoredAppealToken(null);
+        setSuspensionInfo(null);
+      }
+      setSession(null);
+      updateUserState(null);
+      updateProfileState(null);
+      setNeedsOnboarding(false);
+      setOnboardingUser(null);
+    },
+    [updateProfileState, updateUserState]
+  );
+
+  const enterSuspensionState = useCallback(
+    (payload: {
+      accountStatus?: string;
+      status?: string;
+      banReason?: string | null;
+      ruleBroken?: string | null;
+      ruleLabel?: string | null;
+      banUntil?: string | null;
+      bannedUntil?: string | null;
+      scheduledDeletionAt?: string | null;
+      strikeCount?: number;
+      appealSession?: AuthSession | null;
+      appealToken?: string | null;
+      user?: AuthUser | null;
+    }) => {
+      const nextAppealToken =
+        payload.appealSession?.access_token || payload.appealToken || getStoredAppealToken() || null;
+      if (nextAppealToken) {
+        setStoredAppealToken(nextAppealToken);
+      }
+      clearAuthState(true);
+      const until = payload.banUntil || payload.bannedUntil || null;
+      setBannedUntilDate(until);
+      setSuspensionInfo({
+        status: payload.accountStatus || payload.status || 'suspended',
+        banReason: payload.banReason || 'Violation of LiveConnect Community Guidelines',
+        ruleBroken: payload.ruleBroken || 'community_guidelines',
+        ruleLabel: payload.ruleLabel || 'Community Guidelines',
+        banUntil: until,
+        scheduledDeletionAt: payload.scheduledDeletionAt || null,
+        strikeCount: Number(payload.strikeCount || 0),
+        appealToken: nextAppealToken,
+        userId: payload.user?.id,
+        email: payload.user?.email,
+      });
+    },
+    [clearAuthState]
+  );
 
   const applyServerAuthPayload = useCallback(
     (data: {
@@ -225,12 +320,24 @@ export function useAuth() {
       needsOnboarding?: boolean;
       banned?: boolean;
       bannedUntil?: string | null;
+      banUntil?: string | null;
+      accountStatus?: string;
+      banReason?: string | null;
+      ruleBroken?: string | null;
+      ruleLabel?: string | null;
+      scheduledDeletionAt?: string | null;
+      strikeCount?: number;
+      appealSession?: AuthSession | null;
+      restoredNoticePending?: boolean;
     }) => {
       if (data.banned) {
-        clearAuthState();
-        setBannedUntilDate(data.bannedUntil || null);
+        enterSuspensionState(data);
         return;
       }
+
+      setStoredAppealToken(null);
+      setSuspensionInfo(null);
+      setBannedUntilDate(null);
 
       if (data.session?.access_token) {
         setStoredToken(data.session.access_token);
@@ -250,9 +357,13 @@ export function useAuth() {
         setNeedsOnboarding(Boolean(data.needsOnboarding ?? true));
         setOnboardingUser(data.user);
       }
+
+      if (data.restoredNoticePending) {
+        setRestoredNoticePending(true);
+      }
       setAuthError(null);
     },
-    [clearAuthState, updateProfileState, updateUserState]
+    [enterSuspensionState, updateProfileState, updateUserState]
   );
 
   const resolveFirebaseUser = useCallback(
@@ -260,16 +371,43 @@ export function useAuth() {
       setProfileCheckPending(true);
       try {
         void testConnection();
+        const token = await fbUser.getIdToken().catch(() => fbUser.uid);
+
+        // Always verify SQLite live moderation status if backend knows this user
+        try {
+          const banRes = await fetch('/api/auth/check-ban-status', {
+            headers: buildAuthHeaders(token),
+          });
+          if (banRes.ok) {
+            const banData = await banRes.json();
+            if (banData?.banned) {
+              await firebaseSignOut(auth).catch(() => {});
+              enterSuspensionState({
+                ...banData,
+                appealToken: token,
+                user: { id: fbUser.uid, email: fbUser.email || undefined, user_metadata: {} },
+              });
+              return;
+            }
+            if (banData?.restoredNoticePending) {
+              setRestoredNoticePending(true);
+            }
+          }
+        } catch {}
+
         const privInfo = await fetchPrivateUserInfoFs(fbUser.uid).catch(() => null);
         if (privInfo?.bannedUntil && new Date(privInfo.bannedUntil).getTime() > Date.now()) {
           await firebaseSignOut(auth).catch(() => {});
-          clearAuthState();
-          setBannedUntilDate(privInfo.bannedUntil);
+          enterSuspensionState({
+            accountStatus: 'suspended',
+            banReason: 'Violation of LiveConnect Community Guidelines',
+            bannedUntil: privInfo.bannedUntil,
+            appealToken: token,
+          });
           return;
         }
 
         const mappedUser = mapFirebaseUserToAuthUser(fbUser, privInfo?.email, privInfo?.phoneNumber);
-        const token = await fbUser.getIdToken().catch(() => fbUser.uid);
         setSession({ access_token: token });
         updateUserState(mappedUser);
 
@@ -323,7 +461,7 @@ export function useAuth() {
         setLoading(false);
       }
     },
-    [clearAuthState, updateProfileState, updateUserState]
+    [enterSuspensionState, updateProfileState, updateUserState]
   );
 
   const refreshProfile = useCallback(async () => {
@@ -332,7 +470,7 @@ export function useAuth() {
       return;
     }
 
-    const token = getStoredToken();
+    const token = getStoredToken() || getStoredAppealToken();
     if (!token) {
       clearAuthState();
       setLoading(false);
@@ -342,20 +480,22 @@ export function useAuth() {
     setProfileCheckPending(true);
     try {
       const res = await fetch('/api/auth/session', {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: buildAuthHeaders(token),
       });
       if (!res.ok) {
         clearAuthState();
         return;
       }
       const data = await res.json();
+      if (data.banned) {
+        enterSuspensionState({
+          ...data,
+          appealToken: token,
+        });
+        return;
+      }
       if (!data.session || !data.user) {
-        if (data.banned) {
-          clearAuthState();
-          setBannedUntilDate(data.bannedUntil || null);
-        } else {
-          clearAuthState();
-        }
+        clearAuthState();
         return;
       }
       applyServerAuthPayload(data);
@@ -365,7 +505,18 @@ export function useAuth() {
       setProfileCheckPending(false);
       setLoading(false);
     }
-  }, [applyServerAuthPayload, clearAuthState, resolveFirebaseUser]);
+  }, [applyServerAuthPayload, clearAuthState, enterSuspensionState, resolveFirebaseUser]);
+
+  const acknowledgeRestored = useCallback(async () => {
+    setRestoredNoticePending(false);
+    const token = getStoredToken() || session?.access_token;
+    if (token) {
+      await fetch('/api/account/acknowledge-restored', {
+        method: 'POST',
+        headers: buildAuthHeaders(token, { 'Content-Type': 'application/json' }),
+      }).catch(() => {});
+    }
+  }, [session?.access_token]);
 
   useEffect(() => {
     const safetyTimer = setTimeout(() => {
@@ -389,7 +540,7 @@ export function useAuth() {
       if (fbUser) {
         await resolveFirebaseUser(fbUser);
       } else {
-        const token = getStoredToken();
+        const token = getStoredToken() || getStoredAppealToken();
         if (token) {
           await refreshProfile();
         } else {
@@ -399,39 +550,67 @@ export function useAuth() {
       }
     });
 
+    // Live status check every 30s (immediate logout across devices + auto-restore detection)
     const banCheckInterval = setInterval(async () => {
       if (auth.currentUser) {
         try {
-          const privInfo = await fetchPrivateUserInfoFs(auth.currentUser.uid);
+          const idToken = await auth.currentUser.getIdToken().catch(() => auth.currentUser?.uid || '');
+          const banRes = await fetch('/api/auth/check-ban-status', {
+            headers: buildAuthHeaders(idToken),
+          }).then((r) => (r.ok ? r.json() : null));
+
+          if (banRes?.banned) {
+            await firebaseSignOut(auth).catch(() => {});
+            enterSuspensionState({ ...banRes, appealToken: idToken });
+            return;
+          }
+          if (banRes?.restoredNoticePending) {
+            setRestoredNoticePending(true);
+          }
+
+          const privInfo = await fetchPrivateUserInfoFs(auth.currentUser.uid).catch(() => null);
           if (privInfo?.bannedUntil && new Date(privInfo.bannedUntil).getTime() > Date.now()) {
             await firebaseSignOut(auth).catch(() => {});
-            clearAuthState();
-            setBannedUntilDate(privInfo.bannedUntil);
+            enterSuspensionState({
+              accountStatus: 'suspended',
+              bannedUntil: privInfo.bannedUntil,
+              appealToken: idToken,
+            });
           }
         } catch {}
         return;
       }
 
-      const currentToken = getStoredToken();
+      const currentToken = getStoredToken() || getStoredAppealToken();
       if (!currentToken) return;
       try {
-        const banStatus = await fetch('/api/auth/check-ban-status', {
-          headers: { Authorization: `Bearer ${currentToken}` },
-        }).then((r) => r.json());
+        const res = await fetch('/api/auth/check-ban-status', {
+          headers: buildAuthHeaders(currentToken),
+        });
+        if (res.status === 401) {
+          // Session was revoked across all devices (e.g., suspended/banned)
+          await refreshProfile();
+          return;
+        }
+        const banStatus = await res.json();
 
         if (banStatus?.banned) {
-          clearAuthState();
-          setBannedUntilDate(banStatus.bannedUntil || null);
+          enterSuspensionState({ ...banStatus, appealToken: currentToken });
+        } else if (!banStatus?.banned && suspensionInfo) {
+          // Account was restored (or ban expired) while sitting on BannedScreen!
+          await refreshProfile();
+        } else if (banStatus?.restoredNoticePending) {
+          setRestoredNoticePending(true);
         }
       } catch {}
-    }, 60000);
+    }, 30000);
 
     return () => {
       clearTimeout(safetyTimer);
       clearInterval(banCheckInterval);
       unsubscribe();
     };
-  }, [clearAuthState, refreshProfile, resolveFirebaseUser]);
+  }, [clearAuthState, enterSuspensionState, refreshProfile, resolveFirebaseUser, suspensionInfo]);
 
   const completeOnboarding = async (details: {
     username: string;
@@ -469,10 +648,7 @@ export function useAuth() {
     const token = getStoredToken();
     const res = await fetch('/api/auth/complete-onboarding', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
+      headers: buildAuthHeaders(token, { 'Content-Type': 'application/json' }),
       body: JSON.stringify({
         userId: targetUser.id,
         username: details.username.trim().toLowerCase().replace(/[^a-z0-9_]/g, ''),
@@ -500,7 +676,6 @@ export function useAuth() {
   const signInWithGoogle = async (payload?: { credential?: string; accessToken?: string }) => {
     setAuthError(null);
 
-    // Primary path: Firebase Google Sign-In
     if (!payload?.credential && !payload?.accessToken) {
       try {
         const result = await signInWithPopup(auth, googleProvider);
@@ -539,16 +714,16 @@ export function useAuth() {
       }
     }
 
-    // Legacy GIS token fallback
     const res = await fetch('/api/auth/google', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: buildAuthHeaders(null, { 'Content-Type': 'application/json' }),
       body: JSON.stringify(payload),
     });
     const data = await res.json();
     if (!res.ok || !data.success) {
       if (data.banned) {
-        setBannedUntilDate(data.bannedUntil || null);
+        enterSuspensionState(data);
+        return { success: false, banned: true, error: data.error };
       }
       const msg = data.error || 'Failed to sign in with Google';
       setAuthError(msg);
@@ -559,8 +734,25 @@ export function useAuth() {
     return data;
   };
 
-  const loginWithTruecaller = async (payload: { user: AuthUser; profile: Profile | null; session?: AuthSession }) => {
+  const loginWithTruecaller = async (payload: {
+    user?: AuthUser;
+    profile?: Profile | null;
+    session?: AuthSession;
+    banned?: boolean;
+    accountStatus?: string;
+    banReason?: string | null;
+    ruleBroken?: string | null;
+    ruleLabel?: string | null;
+    banUntil?: string | null;
+    scheduledDeletionAt?: string | null;
+    strikeCount?: number;
+    appealSession?: AuthSession | null;
+  }) => {
     setAuthError(null);
+    if (payload.banned) {
+      enterSuspensionState(payload);
+      return { success: false, banned: true };
+    }
     try {
       applyServerAuthPayload({
         session: payload.session,
@@ -586,19 +778,18 @@ export function useAuth() {
       await firebaseSignOut(auth).catch(() => {});
     }
 
-    const token = getStoredToken();
+    const token = getStoredToken() || getStoredAppealToken();
     if (token) {
       try {
         await fetch('/api/auth/logout', {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-          },
+          headers: buildAuthHeaders(token, { 'Content-Type': 'application/json' }),
         });
       } catch {}
     }
-    clearAuthState();
+    clearAuthState(false);
+    setBannedUntilDate(null);
+    setRestoredNoticePending(false);
   };
 
   const updateProfile = async (updates: Partial<Profile>) => {
@@ -626,15 +817,15 @@ export function useAuth() {
     try {
       const res = await fetch('/api/auth/update-profile', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
+        headers: buildAuthHeaders(token, { 'Content-Type': 'application/json' }),
         body: JSON.stringify({ userId: user.id, updates }),
       });
 
       const data = await res.json();
       if (!res.ok || !data.success) {
+        if (data.code === 'ACCOUNT_SUSPENDED') {
+          enterSuspensionState(data);
+        }
         throw new Error(data.error || 'Failed to update profile');
       }
 
@@ -674,13 +865,18 @@ export function useAuth() {
     setAuthError,
     signInWithGoogle,
     loginWithTruecaller,
+    applyServerAuthPayload,
     signOut,
     needsOnboarding,
     onboardingUser,
     profileCheckPending,
     bannedUntilDate,
+    suspensionInfo,
+    restoredNoticePending,
+    acknowledgeRestored,
     completeOnboarding,
     updateProfile,
     refreshProfile,
   };
 }
+

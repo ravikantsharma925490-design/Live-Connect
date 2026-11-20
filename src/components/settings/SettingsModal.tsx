@@ -13,6 +13,8 @@ import {
   Loader2,
   UserX,
   ChevronRight,
+  ShieldCheck,
+  ShieldAlert,
 } from 'lucide-react';
 import { cn } from '@/src/lib/utils';
 import { Profile } from '@/src/types';
@@ -26,6 +28,8 @@ interface SettingsModalProps {
   onSignOut?: () => void;
   blockedCount?: number;
   onOpenBlockedUsers?: () => void;
+  onOpenAccountStatus?: () => void;
+  onOpenAdminPanel?: () => void;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -35,6 +39,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onSignOut,
   blockedCount = 0,
   onOpenBlockedUsers,
+  onOpenAccountStatus,
+  onOpenAdminPanel,
 }) => {
   // User-controlled explicit toggle states (default OFF until user turns them ON)
   const [micEnabled, setMicEnabled] = useState<boolean>(() => {
@@ -400,6 +406,63 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </div>
             )}
           </div>
+
+          {/* Account Status & Moderation Console */}
+          {(onOpenAccountStatus || onOpenAdminPanel) && (
+            <div className="pt-2 border-t border-neutral-200 dark:border-neutral-800 space-y-2.5">
+              {onOpenAccountStatus && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onClose();
+                    onOpenAccountStatus();
+                  }}
+                  className="w-full p-4 rounded-2xl bg-neutral-50 dark:bg-neutral-800/50 border border-neutral-200 dark:border-neutral-700/60 hover:bg-neutral-100 dark:hover:bg-neutral-800 flex items-center justify-between gap-3 transition-colors cursor-pointer"
+                >
+                  <div className="flex items-center gap-3.5 min-w-0 text-left">
+                    <div className="p-2.5 rounded-2xl shrink-0 bg-[#0095F6]/10 text-[#0095F6]">
+                      <ShieldCheck className="w-5 h-5" />
+                    </div>
+                    <div className="min-w-0">
+                      <h4 className="text-sm font-bold text-neutral-900 dark:text-neutral-100">
+                        Account Status & Appeals
+                      </h4>
+                      <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-0.5 truncate">
+                        Strikes, violations history, data export & review requests
+                      </p>
+                    </div>
+                  </div>
+                  <ChevronRight className="w-4 h-4 text-neutral-400 shrink-0" />
+                </button>
+              )}
+
+              {onOpenAdminPanel && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onClose();
+                    onOpenAdminPanel();
+                  }}
+                  className="w-full p-4 rounded-2xl bg-neutral-50 dark:bg-neutral-800/50 border border-neutral-200 dark:border-neutral-700/60 hover:bg-neutral-100 dark:hover:bg-neutral-800 flex items-center justify-between gap-3 transition-colors cursor-pointer"
+                >
+                  <div className="flex items-center gap-3.5 min-w-0 text-left">
+                    <div className="p-2.5 rounded-2xl shrink-0 bg-indigo-500/10 text-indigo-600 dark:text-indigo-400">
+                      <ShieldAlert className="w-5 h-5" />
+                    </div>
+                    <div className="min-w-0">
+                      <h4 className="text-sm font-bold text-neutral-900 dark:text-neutral-100">
+                        Trust & Safety Admin Console
+                      </h4>
+                      <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-0.5 truncate">
+                        Moderate users, manage appeals & review audit logs
+                      </p>
+                    </div>
+                  </div>
+                  <ChevronRight className="w-4 h-4 text-neutral-400 shrink-0" />
+                </button>
+              )}
+            </div>
+          )}
 
           {/* Blocked Users Management */}
           {onOpenBlockedUsers && (

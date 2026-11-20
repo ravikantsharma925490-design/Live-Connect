@@ -94,11 +94,24 @@ service cloud.firestore {
 
     function isValidPrivateUserInfo(data, userId) {
       return data.keys().hasAll(['id', 'role', 'createdAt', 'updatedAt']) &&
-             data.keys().hasOnly(['id', 'email', 'phoneNumber', 'role', 'bannedUntil', 'createdAt', 'updatedAt']) &&
+             data.keys().hasOnly([
+               'id', 'email', 'phoneNumber', 'role', 'status', 'strikeCount',
+               'banReason', 'ruleBroken', 'banUntil', 'restrictedUntil',
+               'scheduledDeletionAt', 'restoredNoticePending', 'bannedUntil',
+               'createdAt', 'updatedAt'
+             ]) &&
              data.id == userId && isValidId(data.id) &&
-             data.role in ['user', 'admin'] &&
+             data.role in ['user', 'moderator', 'admin'] &&
+             (!('status' in data) || data.status in ['active', 'restricted', 'suspended', 'disabled', 'deactivated']) &&
+             (!('strikeCount' in data) || (data.strikeCount is int && data.strikeCount >= 0 && data.strikeCount <= 100)) &&
              isOptionalString(data, 'email', 254) &&
              isOptionalString(data, 'phoneNumber', 32) &&
+             isOptionalString(data, 'banReason', 500) &&
+             isOptionalString(data, 'ruleBroken', 200) &&
+             isOptionalString(data, 'banUntil', 64) &&
+             isOptionalString(data, 'restrictedUntil', 64) &&
+             isOptionalString(data, 'scheduledDeletionAt', 64) &&
+             (!('restoredNoticePending' in data) || data.restoredNoticePending is bool) &&
              isOptionalString(data, 'bannedUntil', 64) &&
              data.createdAt is timestamp &&
              data.updatedAt is timestamp;
@@ -280,7 +293,7 @@ service cloud.firestore {
              isOptionalString(data, 'actorDisplayName', 80) &&
              isOptionalString(data, 'actorUsername', 32) &&
              isOptionalString(data, 'actorAvatarUrl', 1024) &&
-             data.type in ['follow', 'follow_back', 'message', 'call_audio', 'call_video'] &&
+             data.type in ['follow', 'follow_back', 'message', 'call_audio', 'call_video', 'account_warning', 'account_restricted', 'account_suspended', 'account_disabled', 'account_restored', 'appeal_update'] &&
              data.title is string && data.title.size() >= 1 && data.title.size() <= 160 &&
              data.message is string && data.message.size() >= 1 && data.message.size() <= 1000 &&
              isOptionalString(data, 'referenceId', 128) &&
@@ -296,6 +309,46 @@ service cloud.firestore {
              data.category is string && data.category.size() >= 1 && data.category.size() <= 64 &&
              data.description is string && data.description.size() >= 1 && data.description.size() <= 3000 &&
              data.status in ['submitted', 'reviewed', 'resolved'] &&
+             data.createdAt is timestamp;
+    }
+
+    function isValidModerationBan(data, banId) {
+      return data.keys().hasAll(['id', 'userId', 'adminId', 'actionType', 'statusApplied', 'reason', 'ruleBroken', 'strikeNumber', 'isActive', 'createdAt']) &&
+             data.keys().hasOnly(['id', 'userId', 'adminId', 'actionType', 'statusApplied', 'reason', 'ruleBroken', 'strikeNumber', 'banUntil', 'isActive', 'createdAt']) &&
+             data.id == banId && isValidId(data.id) &&
+             isValidId(data.userId) && isValidId(data.adminId) &&
+             data.actionType in ['warn', 'restrict', 'suspend', 'ban', 'restore', 'auto_restore'] &&
+             data.statusApplied in ['active', 'restricted', 'suspended', 'disabled', 'deactivated'] &&
+             data.reason is string && data.reason.size() >= 1 && data.reason.size() <= 500 &&
+             data.ruleBroken is string && data.ruleBroken.size() >= 1 && data.ruleBroken.size() <= 200 &&
+             data.strikeNumber is int && data.strikeNumber >= 0 && data.strikeNumber <= 100 &&
+             isOptionalString(data, 'banUntil', 64) &&
+             data.isActive is bool &&
+             data.createdAt is timestamp;
+    }
+
+    function isValidAppealSubmission(data, appealId) {
+      return data.keys().hasAll(['id', 'userId', 'reason', 'status', 'createdAt', 'updatedAt']) &&
+             data.keys().hasOnly(['id', 'userId', 'banId', 'reason', 'verificationDocUrl', 'status', 'adminNote', 'decisionDueAt', 'createdAt', 'updatedAt']) &&
+             data.id == appealId && isValidId(data.id) &&
+             isValidId(data.userId) &&
+             isOptionalString(data, 'banId', 128) &&
+             data.reason is string && data.reason.size() >= 1 && data.reason.size() <= 2000 &&
+             isOptionalString(data, 'verificationDocUrl', 1024) &&
+             data.status in ['pending', 'approved', 'rejected'] &&
+             isOptionalString(data, 'adminNote', 500) &&
+             (!('decisionDueAt' in data) || data.decisionDueAt is timestamp) &&
+             data.createdAt is timestamp &&
+             data.updatedAt is timestamp;
+    }
+
+    function isValidAuditLogEntry(data, logId) {
+      return data.keys().hasAll(['id', 'adminId', 'targetUserId', 'action', 'reason', 'createdAt']) &&
+             data.keys().hasOnly(['id', 'adminId', 'targetUserId', 'action', 'reason', 'createdAt']) &&
+             data.id == logId && isValidId(data.id) &&
+             isValidId(data.adminId) && isValidId(data.targetUserId) &&
+             data.action is string && data.action.size() >= 1 && data.action.size() <= 64 &&
+             data.reason is string && data.reason.size() >= 1 && data.reason.size() <= 500 &&
              data.createdAt is timestamp;
     }
 
@@ -323,16 +376,23 @@ service cloud.firestore {
                        isValidPublicProfile(incoming(), userId) &&
                        incoming().createdAt == request.time &&
                        incoming().updatedAt == request.time;
-      allow update: if isEmailVerified() && isOwner(userId) && isValidId(userId) &&
-                       isValidPublicProfile(incoming(), userId) &&
-                       incoming().id == existing().id &&
-                       incoming().isPublic == existing().isPublic &&
-                       incoming().createdAt == existing().createdAt &&
-                       incoming().updatedAt == request.time &&
-                       incoming().diff(existing()).affectedKeys().hasOnly([
-                         'username', 'displayName', 'avatarUrl', 'bio', 'gender', 'country',
-                         'isOnline', 'lastSeen', 'updatedAt'
-                       ]);
+      allow update: if isEmailVerified() && isValidId(userId) && (
+                       (isOwner(userId) &&
+                        isValidPublicProfile(incoming(), userId) &&
+                        incoming().id == existing().id &&
+                        incoming().isPublic == existing().isPublic &&
+                        incoming().createdAt == existing().createdAt &&
+                        incoming().updatedAt == request.time &&
+                        incoming().diff(existing()).affectedKeys().hasOnly([
+                          'username', 'displayName', 'avatarUrl', 'bio', 'gender', 'country',
+                          'isOnline', 'lastSeen', 'updatedAt'
+                        ])) ||
+                       (isAdmin() &&
+                        incoming().id == existing().id &&
+                        incoming().createdAt == existing().createdAt &&
+                        incoming().updatedAt == request.time &&
+                        incoming().diff(existing()).affectedKeys().hasOnly(['isPublic', 'updatedAt']))
+                     );
       allow delete: if isOwner(userId) && isValidId(userId);
     }
 
@@ -362,9 +422,13 @@ service cloud.firestore {
                        incoming().createdAt == existing().createdAt &&
                        incoming().updatedAt == request.time && (
                          (isOwner(userId) && incoming().role == existing().role &&
-                          incoming().diff(existing()).affectedKeys().hasOnly(['email', 'phoneNumber', 'updatedAt'])) ||
+                          incoming().diff(existing()).affectedKeys().hasOnly(['email', 'phoneNumber', 'restoredNoticePending', 'updatedAt'])) ||
                          (isAdmin() &&
-                          incoming().diff(existing()).affectedKeys().hasOnly(['role', 'bannedUntil', 'updatedAt']))
+                          incoming().diff(existing()).affectedKeys().hasOnly([
+                            'role', 'status', 'strikeCount', 'banReason', 'ruleBroken',
+                            'banUntil', 'restrictedUntil', 'scheduledDeletionAt',
+                            'restoredNoticePending', 'bannedUntil', 'updatedAt'
+                          ]))
                        );
       allow delete: if isOwner(userId) && isValidId(userId) && isValidId(docId);
     }
@@ -656,6 +720,55 @@ service cloud.firestore {
                        isValidProblemReport(incoming(), reportId) &&
                        incoming().diff(existing()).affectedKeys().hasOnly(['status']);
       allow delete: if isSignedIn() && isValidId(reportId) && existing().userId == request.auth.uid;
+    }
+
+    // Account moderation ban & warning history
+    match /bans/{banId} {
+      allow get: if isSignedIn() && isValidId(banId) &&
+                    (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() &&
+                     (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isAdmin() && isValidId(banId) &&
+                       isValidModerationBan(incoming(), banId) &&
+                       incoming().adminId == request.auth.uid &&
+                       incoming().createdAt == request.time;
+      allow update: if isAdmin() && isValidId(banId) &&
+                       isValidModerationBan(incoming(), banId) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['isActive']);
+      allow delete: if false;
+    }
+
+    // Suspension & permanent ban review appeals
+    match /appeals/{appealId} {
+      allow get: if isSignedIn() && isValidId(appealId) &&
+                    (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() &&
+                     (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isEmailVerified() && isValidId(appealId) &&
+                       isValidAppealSubmission(incoming(), appealId) &&
+                       incoming().userId == request.auth.uid &&
+                       incoming().status == 'pending' &&
+                       incoming().createdAt == request.time &&
+                       incoming().updatedAt == request.time;
+      allow update: if isAdmin() && isValidId(appealId) &&
+                       isValidAppealSubmission(incoming(), appealId) &&
+                       existing().status == 'pending' &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().updatedAt == request.time &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['status', 'adminNote', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    // Immutable admin audit logs
+    match /audit_logs/{logId} {
+      allow get: if isAdmin() && isValidId(logId);
+      allow list: if isAdmin();
+      allow create: if isAdmin() && isValidId(logId) &&
+                       isValidAuditLogEntry(incoming(), logId) &&
+                       incoming().adminId == request.auth.uid &&
+                       incoming().createdAt == request.time;
+      allow update, delete: if false;
     }
   }
 }

@@ -18,19 +18,106 @@ export type CallStatus =
   | 'cancelled'
   | 'failed';
 
+export type AccountStatus = 'active' | 'restricted' | 'suspended' | 'disabled' | 'deactivated';
+export type UserRole = 'user' | 'moderator' | 'admin';
+export type AppealStatus = 'pending' | 'approved' | 'rejected';
+export type ModerationActionType = 'warn' | 'restrict' | 'suspend' | 'ban' | 'restore' | 'deactivate' | 'auto_restore';
+
+export interface AccountModerationState {
+  status: AccountStatus;
+  strike_count: number;
+  ban_reason?: string | null;
+  rule_broken?: string | null;
+  ban_until?: string | null;
+  restricted_until?: string | null;
+  scheduled_deletion_at?: string | null;
+  restored_at?: string | null;
+  restored_notice_pending?: boolean;
+  role?: UserRole;
+}
+
+export interface BanHistoryRecord {
+  id: string;
+  user_id: string;
+  admin_id?: string | null;
+  action_type: ModerationActionType;
+  status_applied: AccountStatus;
+  reason: string;
+  rule_broken: string;
+  severity: 'warning' | 'restriction' | 'suspension' | 'permanent' | 'system';
+  strike_number: number;
+  duration_days?: number | null;
+  ban_until?: string | null;
+  scheduled_deletion_at?: string | null;
+  is_active: boolean;
+  created_at: string;
+  admin_username?: string | null;
+}
+
+export interface AppealRecord {
+  id: string;
+  user_id: string;
+  ban_id?: string | null;
+  reason: string;
+  verification_doc_url?: string | null;
+  verification_doc_name?: string | null;
+  status: AppealStatus;
+  admin_id?: string | null;
+  admin_note?: string | null;
+  decision_due_at: string;
+  reviewed_at?: string | null;
+  created_at: string;
+  updated_at: string;
+  user?: {
+    id: string;
+    username: string;
+    display_name: string;
+    email?: string;
+    avatar_url?: string | null;
+    status: AccountStatus;
+    strike_count: number;
+    ban_reason?: string | null;
+    rule_broken?: string | null;
+    ban_until?: string | null;
+  };
+}
+
+export interface AuditLogRecord {
+  id: string;
+  admin_id: string;
+  target_user_id: string;
+  action: string;
+  reason: string;
+  details_json?: string | null;
+  created_at: string;
+  admin_username?: string | null;
+  target_username?: string | null;
+}
+
 export interface AuthUser {
   id: string;
   email?: string;
   phone?: string;
   email_confirmed?: boolean;
   user_metadata?: Record<string, any>;
+  status?: AccountStatus;
+  strike_count?: number;
+  ban_reason?: string | null;
+  rule_broken?: string | null;
   banned_until?: string | null;
+  ban_until?: string | null;
+  restricted_until?: string | null;
+  scheduled_deletion_at?: string | null;
+  restored_at?: string | null;
+  restored_notice_pending?: boolean;
+  role?: UserRole;
   created_at?: string;
 }
 
 export interface AuthSession {
   access_token: string;
   expires_at?: string;
+  token_scope?: 'full' | 'appeal_only';
 }
 
 export interface Profile {
@@ -46,6 +133,9 @@ export interface Profile {
   cloudinary_public_id?: string | null;
   b2_file_id?: string | null;
   b2_file_name?: string | null;
+  status?: AccountStatus;
+  strike_count?: number;
+  role?: UserRole;
   is_online: boolean;
   last_seen: string;
   created_at: string;
@@ -124,7 +214,13 @@ export type NotificationType =
   | 'follow_back'
   | 'message'
   | 'call_audio'
-  | 'call_video';
+  | 'call_video'
+  | 'account_warning'
+  | 'account_restricted'
+  | 'account_suspended'
+  | 'account_disabled'
+  | 'account_restored'
+  | 'appeal_update';
 
 export interface AppNotification {
   id: string;

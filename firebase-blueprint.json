@@ -39,7 +39,15 @@
         "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "email": { "type": "string", "maxLength": 254 },
         "phoneNumber": { "type": "string", "maxLength": 32 },
-        "role": { "type": "string", "enum": ["user", "admin"] },
+        "role": { "type": "string", "enum": ["user", "moderator", "admin"] },
+        "status": { "type": "string", "enum": ["active", "restricted", "suspended", "disabled", "deactivated"] },
+        "strikeCount": { "type": "number" },
+        "banReason": { "type": "string", "maxLength": 500 },
+        "ruleBroken": { "type": "string", "maxLength": 200 },
+        "banUntil": { "type": "string", "maxLength": 64 },
+        "restrictedUntil": { "type": "string", "maxLength": 64 },
+        "scheduledDeletionAt": { "type": "string", "maxLength": 64 },
+        "restoredNoticePending": { "type": "boolean" },
         "bannedUntil": { "type": "string", "maxLength": 64 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
@@ -243,7 +251,7 @@
         "actorDisplayName": { "type": "string", "maxLength": 80 },
         "actorUsername": { "type": "string", "maxLength": 32 },
         "actorAvatarUrl": { "type": "string", "maxLength": 1024 },
-        "type": { "type": "string", "enum": ["follow", "follow_back", "message", "call_audio", "call_video"] },
+        "type": { "type": "string", "enum": ["follow", "follow_back", "message", "call_audio", "call_video", "account_warning", "account_restricted", "account_suspended", "account_disabled", "account_restored", "appeal_update"] },
         "title": { "type": "string", "minLength": 1, "maxLength": 160 },
         "message": { "type": "string", "minLength": 1, "maxLength": 1000 },
         "referenceId": { "type": "string", "maxLength": 128 },
@@ -265,6 +273,57 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "userId", "category", "description", "status", "createdAt"]
+    },
+    "ModerationBan": {
+      "title": "ModerationBan",
+      "description": "Account moderation action history (warn, restrict, suspend, permanent ban, restore).",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "adminId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "actionType": { "type": "string", "enum": ["warn", "restrict", "suspend", "ban", "restore", "auto_restore"] },
+        "statusApplied": { "type": "string", "enum": ["active", "restricted", "suspended", "disabled", "deactivated"] },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "ruleBroken": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "strikeNumber": { "type": "number" },
+        "banUntil": { "type": "string", "maxLength": 64 },
+        "isActive": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "adminId", "actionType", "statusApplied", "reason", "ruleBroken", "strikeNumber", "isActive", "createdAt"]
+    },
+    "AppealSubmission": {
+      "title": "AppealSubmission",
+      "description": "User appeal request for account suspension or permanent ban review.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "banId": { "type": "string", "maxLength": 128 },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "verificationDocUrl": { "type": "string", "maxLength": 1024 },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "adminNote": { "type": "string", "maxLength": 500 },
+        "decisionDueAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "reason", "status", "createdAt", "updatedAt"]
+    },
+    "AuditLogEntry": {
+      "title": "AuditLogEntry",
+      "description": "Immutable administrative moderation audit log entry.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "adminId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "targetUserId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "action": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "adminId", "targetUserId", "action", "reason", "createdAt"]
     }
   },
   "firestore": {
@@ -327,6 +386,18 @@
     "/problem_reports/{reportId}": {
       "schema": { "$ref": "#/entities/ProblemReport" },
       "description": "Support & problem reports."
+    },
+    "/bans/{banId}": {
+      "schema": { "$ref": "#/entities/ModerationBan" },
+      "description": "Account moderation ban and warning history."
+    },
+    "/appeals/{appealId}": {
+      "schema": { "$ref": "#/entities/AppealSubmission" },
+      "description": "Suspension and permanent ban review appeals."
+    },
+    "/audit_logs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLogEntry" },
+      "description": "Admin and moderator audit trail."
     }
   }
 }

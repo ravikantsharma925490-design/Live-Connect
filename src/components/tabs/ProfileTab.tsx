@@ -13,6 +13,8 @@ import {
   UserCheck,
   UserX,
   Globe,
+  ShieldCheck,
+  ShieldAlert,
 } from 'lucide-react';
 import { Profile } from '@/src/types';
 import { cn, getAvatarColor, getInitials, formatJoinedYear } from '@/src/lib/utils';
@@ -31,6 +33,8 @@ interface ProfileTabProps {
   onUnblockUser?: (userId: string) => Promise<boolean | void>;
   onEditProfile: () => void;
   onOpenSettingsModal: () => void;
+  onOpenAccountStatus?: () => void;
+  onOpenAdminPanel?: () => void;
   onOpenNotifications?: () => void;
   unreadNotificationsCount?: number;
   onSignOut: () => void;
@@ -50,6 +54,8 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
   onUnblockUser,
   onEditProfile,
   onOpenSettingsModal,
+  onOpenAccountStatus,
+  onOpenAdminPanel,
   onOpenNotifications,
   unreadNotificationsCount = 0,
   onSignOut,
@@ -387,6 +393,52 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
 
               <ChevronRight className="w-4 h-4 text-neutral-400 group-hover:translate-x-0.5 transition-transform" />
             </button>
+
+            {/* 4b. Account Status & Strikes */}
+            {onOpenAccountStatus && (
+              <button
+                onClick={onOpenAccountStatus}
+                className="w-full p-4 md:px-6 flex items-center justify-between hover:bg-neutral-50/50 dark:hover:bg-neutral-800/40 transition-colors text-left group cursor-pointer"
+              >
+                <div className="flex items-center gap-3.5">
+                  <div className="p-2.5 rounded-2xl bg-[#0095F6]/10 text-[#0095F6]">
+                    <ShieldCheck className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h5 className="text-sm font-bold text-neutral-900 dark:text-neutral-100 group-hover:text-[#0095F6] transition-colors">
+                      Account Status & Strikes
+                    </h5>
+                    <p className="text-xs text-neutral-500">
+                      Standing, warnings, feature restrictions, appeals & data export
+                    </p>
+                  </div>
+                </div>
+                <ChevronRight className="w-4 h-4 text-neutral-400 group-hover:translate-x-0.5 transition-transform" />
+              </button>
+            )}
+
+            {/* 4c. Admin / Moderator Moderation Console */}
+            {onOpenAdminPanel && (
+              <button
+                onClick={onOpenAdminPanel}
+                className="w-full p-4 md:px-6 flex items-center justify-between hover:bg-neutral-50/50 dark:hover:bg-neutral-800/40 transition-colors text-left group cursor-pointer"
+              >
+                <div className="flex items-center gap-3.5">
+                  <div className="p-2.5 rounded-2xl bg-indigo-500/10 text-indigo-600 dark:text-indigo-400">
+                    <ShieldAlert className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h5 className="text-sm font-bold text-neutral-900 dark:text-neutral-100 group-hover:text-indigo-600 transition-colors">
+                      Trust & Safety Admin Console
+                    </h5>
+                    <p className="text-xs text-neutral-500">
+                      Manage user strikes, suspensions, bans, appeals & audit logs
+                    </p>
+                  </div>
+                </div>
+                <ChevronRight className="w-4 h-4 text-neutral-400 group-hover:translate-x-0.5 transition-transform" />
+              </button>
+            )}
 
             {/* 5. Blocked Accounts / Users */}
             <button

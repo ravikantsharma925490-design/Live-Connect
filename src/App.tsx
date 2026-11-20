@@ -32,6 +32,9 @@ import { PrivacyPolicy } from '@/src/components/legal/PrivacyPolicy';
 import { DeleteAccountPage } from '@/src/components/legal/DeleteAccountPage';
 import { OnboardingScreen } from '@/src/components/auth/OnboardingScreen';
 import { BannedScreen } from '@/src/components/auth/BannedScreen';
+import { AccountStatusModal } from '@/src/components/moderation/AccountStatusModal';
+import { AccountRestoredModal } from '@/src/components/moderation/AccountRestoredModal';
+import { AdminModerationPanel } from '@/src/components/moderation/AdminModerationPanel';
 import { Profile, Message } from '@/src/types';
 
 // Ensures the cinematic launch animation plays strictly once on cold app launch
@@ -50,10 +53,19 @@ export default function App() {
     onboardingUser,
     profileCheckPending,
     bannedUntilDate,
+    suspensionInfo,
+    restoredNoticePending,
+    acknowledgeRestored,
     completeOnboarding,
     updateProfile,
     refreshProfile,
   } = useAuth();
+
+  const isModeratorOrAdmin =
+    user?.role === 'admin' ||
+    user?.role === 'moderator' ||
+    profile?.role === 'admin' ||
+    profile?.role === 'moderator';
 
   const readyUserId =
     !authLoading && !profileCheckPending && user && profile && !needsOnboarding ? user.id : undefined;
@@ -146,6 +158,8 @@ export default function App() {
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isBlockedModalOpen, setIsBlockedModalOpen] = useState(false);
+  const [isAccountStatusOpen, setIsAccountStatusOpen] = useState(false);
+  const [isAdminPanelOpen, setIsAdminPanelOpen] = useState(false);
   const [viewingProfile, setViewingProfile] = useState<Profile | null>(null);
 
   // Two-way visibility: exclude blocked peers from conversations, unread badge, search, and calls
@@ -266,9 +280,20 @@ export default function App() {
       return null;
     }
 
-  if (bannedUntilDate && new Date(bannedUntilDate).getTime() > Date.now()) {
-    return <BannedScreen bannedUntil={bannedUntilDate} />;
-  }
+    if (suspensionInfo || (bannedUntilDate && new Date(bannedUntilDate).getTime() > Date.now())) {
+      return (
+        <BannedScreen
+          status={suspensionInfo?.status || 'suspended'}
+          bannedUntil={suspensionInfo?.banUntil || bannedUntilDate}
+          banReason={suspensionInfo?.banReason}
+          ruleLabel={suspensionInfo?.ruleLabel}
+          scheduledDeletionAt={suspensionInfo?.scheduledDeletionAt}
+          strikeCount={suspensionInfo?.strikeCount}
+          appealToken={suspensionInfo?.appealToken}
+          onSignOut={signOut}
+        />
+      );
+    }
 
   // Public standalone view of Terms, Privacy & Delete Account Policy
   if (typeof window !== 'undefined') {
@@ -479,6 +504,8 @@ export default function App() {
               setIsProfileOpen(true);
             }}
             onOpenSettingsModal={() => setIsSettingsOpen(true)}
+            onOpenAccountStatus={() => setIsAccountStatusOpen(true)}
+            onOpenAdminPanel={isModeratorOrAdmin ? () => setIsAdminPanelOpen(true) : undefined}
             onOpenNotifications={() => setIsNotificationOpen(true)}
             unreadNotificationsCount={unreadNotificationsCount}
             onSignOut={signOut}
@@ -675,6 +702,8 @@ export default function App() {
         onSignOut={signOut}
         blockedCount={socialRelations.blockedByMeSet.size}
         onOpenBlockedUsers={() => setIsBlockedModalOpen(true)}
+        onOpenAccountStatus={() => setIsAccountStatusOpen(true)}
+        onOpenAdminPanel={isModeratorOrAdmin ? () => setIsAdminPanelOpen(true) : undefined}
       />
 
       <BlockedUsersModal
@@ -683,6 +712,25 @@ export default function App() {
         blockedUserIds={socialRelations.blockedByMeSet}
         onUnblock={socialRelations.unblockUser}
         currentUserId={profile?.id}
+      />
+
+      <AccountStatusModal
+        isOpen={isAccountStatusOpen}
+        onClose={() => setIsAccountStatusOpen(false)}
+        onSignOut={signOut}
+      />
+
+      {isModeratorOrAdmin && (
+        <AdminModerationPanel
+          isOpen={isAdminPanelOpen}
+          onClose={() => setIsAdminPanelOpen(false)}
+        />
+      )}
+
+      <AccountRestoredModal
+        isOpen={restoredNoticePending}
+        strikeCount={profile?.strike_count || user?.strike_count || 0}
+        onContinue={acknowledgeRestored}
       />
 
       <LanguageSelectorModal />

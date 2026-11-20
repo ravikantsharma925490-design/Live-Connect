@@ -14,9 +14,12 @@ import {
   verifyPassword,
   formatAuthUser,
   formatProfile,
+  isAccountHiddenStatus,
   createSessionForUser,
+  revokeAllSessionsForUser,
   getUserBySessionToken,
   deleteSessionToken,
+  findPermanentBanByIdentifier,
   findUserByEmail,
   findUserById,
   getProfileById,
@@ -26,6 +29,17 @@ import {
   DbUserRow,
   DbProfileRow,
 } from './server/db';
+import {
+  AccountStatus,
+  buildModerationTemplate,
+  sendModerationEmail,
+  executeModerationAction,
+  restoreUserAccount,
+  resolveLiveUserRow,
+  startModerationScheduler,
+  writeAuditLog,
+  formatRuleLabel,
+} from './server/moderationService';
 import {
   uploadBufferToCloudinary,
   deleteAssetFromCloudinary,
@@ -311,17 +325,148 @@ async function getOptionalAuthUserId(req: express.Request): Promise<string | nul
   return verifyAuthToken(token);
 }
 
-// Auth middleware: requires valid session or Firebase Bearer token
+function getRequestDeviceId(req: express.Request): string | null {
+  const fromHeader = req.headers['x-device-id'];
+  if (typeof fromHeader === 'string' && fromHeader.trim()) return fromHeader.trim().slice(0, 128);
+  const fromBody = req.body?.deviceId;
+  if (typeof fromBody === 'string' && fromBody.trim()) return fromBody.trim().slice(0, 128);
+  return null;
+}
+
+function syncProfileCacheAfterModeration(userId: string, status: AccountStatus) {
+  for (const [tok, val] of verifiedFirebaseTokenCache.entries()) {
+    if (val.uid === userId) verifiedFirebaseTokenCache.delete(tok);
+  }
+  const fresh = getProfileById(userId);
+  if (fresh) {
+    serverProfilesStore.set(userId, {
+      ...fresh,
+      status,
+      is_online: isAccountHiddenStatus(status) ? false : fresh.is_online,
+    });
+  }
+}
+
+const APPEAL_ALLOWED_API_PATHS = new Set([
+  '/appeals',
+  '/appeals/me',
+  '/appeals/upload',
+  '/account/export-data',
+  '/account/status',
+  '/account/templates',
+  '/account/reactivate',
+  '/account/acknowledge-restored',
+  '/auth/session',
+  '/auth/logout',
+  '/auth/check-ban-status',
+  '/auth/login',
+  '/auth/google',
+  '/auth/create-account',
+  '/auth/confirm-user',
+  '/auth/send-otp',
+  '/auth/verify-otp',
+  '/auth/truecaller/initiate',
+  '/auth/truecaller/status',
+  '/auth/truecaller/verify-otp',
+  '/auth/truecaller/verify-number',
+  '/health',
+]);
+
+// Global API middleware: verifies live account status on every authenticated request (not just token validity)
+app.use('/api', async (req, res, next) => {
+  try {
+    const token = extractBearerToken(req);
+    if (!token) return next();
+
+    const sessionInfo = getUserBySessionToken(token);
+    const uid = sessionInfo?.userRow?.id || (await verifyAuthToken(token));
+    if (!uid) return next();
+
+    const liveRow = await resolveLiveUserRow(uid, syncProfileCacheAfterModeration);
+    if (!liveRow) return next();
+
+    const tokenScope = sessionInfo?.session?.token_scope || 'full';
+    (req as any).authUserId = uid;
+    (req as any).authUserRow = liveRow;
+    (req as any).tokenScope = tokenScope;
+
+    const reqPath = req.path || '/';
+    const isMediaServe = reqPath.startsWith('/media/file/') || reqPath.startsWith('/b2/file/');
+    if (APPEAL_ALLOWED_API_PATHS.has(reqPath) || isMediaServe) {
+      return next();
+    }
+
+    if (
+      tokenScope === 'appeal_only' ||
+      liveRow.status === 'suspended' ||
+      liveRow.status === 'disabled' ||
+      liveRow.status === 'deactivated'
+    ) {
+      return res.status(403).json({
+        error:
+          liveRow.status === 'disabled'
+            ? 'Your account has been permanently disabled. Only the appeal and data-export APIs are permitted.'
+            : liveRow.status === 'deactivated'
+              ? 'Your account is deactivated. Please reactivate your account to continue.'
+              : 'Your account has been suspended. Only the appeal and data-export APIs are permitted.',
+        code: 'ACCOUNT_SUSPENDED',
+        accountStatus: liveRow.status,
+        banReason: liveRow.ban_reason || null,
+        ruleBroken: liveRow.rule_broken || null,
+        ruleLabel: formatRuleLabel(liveRow.rule_broken),
+        banUntil: liveRow.ban_until || liveRow.banned_until || null,
+        scheduledDeletionAt: liveRow.scheduled_deletion_at || null,
+      });
+    }
+
+    const restrictedWriteRoutes = new Set([
+      '/messages/send',
+      '/messages/react',
+      '/calls/create',
+      '/relations/follow',
+      '/conversations/create-or-get',
+    ]);
+    if (liveRow.status === 'restricted' && restrictedWriteRoutes.has(reqPath)) {
+      return res.status(403).json({
+        error: 'Your account is temporarily restricted from sending messages, starting calls, or following users.',
+        code: 'ACCOUNT_RESTRICTED',
+        accountStatus: 'restricted',
+        restrictedUntil: liveRow.restricted_until || null,
+      });
+    }
+
+    return next();
+  } catch {
+    return next();
+  }
+});
+
+// Auth middleware: requires valid session or Firebase Bearer token AND verifies live account row
 async function requireAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
   const token = extractBearerToken(req);
   if (!token) {
     return res.status(401).json({ error: 'Authentication required' });
   }
-  const uid = await verifyAuthToken(token);
+  const uid = (req as any).authUserId || (await verifyAuthToken(token));
   if (!uid) {
     return res.status(401).json({ error: 'Invalid or expired authentication token' });
   }
+  if (!(req as any).authUserRow) {
+    (req as any).authUserRow = await resolveLiveUserRow(uid, syncProfileCacheAfterModeration);
+  }
   (req as any).authUserId = uid;
+  return next();
+}
+
+// Role middleware: only admin and moderator may access moderation endpoints
+function requireModeratorOrAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const userRow = (req as any).authUserRow as DbUserRow | undefined;
+  const uid = (req as any).authUserId as string | undefined;
+  const live = userRow || (uid ? findUserById(uid) : undefined);
+  const role = live?.role || 'user';
+  if (role !== 'admin' && role !== 'moderator') {
+    return res.status(403).json({ error: 'Admin or moderator privileges required' });
+  }
   return next();
 }
 
@@ -348,6 +493,32 @@ function blockRateLimiter(req: express.Request, res: express.Response, next: exp
 
   timestamps.push(now);
   blockRateLimitBuckets.set(key, timestamps);
+  return next();
+}
+
+// Sliding-window rate limiter for Appeal API (max 5 requests per 10 minutes per user)
+const appealRateLimitBuckets = new Map<string, number[]>();
+const APPEAL_RATE_LIMIT_MAX = 5;
+const APPEAL_RATE_LIMIT_WINDOW_MS = 10 * 60_000;
+
+function appealRateLimiter(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const key = String((req as any).authUserId || req.ip || 'anonymous');
+  const now = Date.now();
+  const windowStart = now - APPEAL_RATE_LIMIT_WINDOW_MS;
+  const timestamps = (appealRateLimitBuckets.get(key) || []).filter((ts) => ts > windowStart);
+
+  if (timestamps.length >= APPEAL_RATE_LIMIT_MAX) {
+    const oldest = timestamps[0] || now;
+    const retryAfterSec = Math.max(1, Math.ceil((oldest + APPEAL_RATE_LIMIT_WINDOW_MS - now) / 1000));
+    res.setHeader('Retry-After', String(retryAfterSec));
+    return res.status(429).json({
+      error: 'Appeal submission rate limit exceeded. Please wait before submitting another request.',
+      retryAfterSeconds: retryAfterSec,
+    });
+  }
+
+  timestamps.push(now);
+  appealRateLimitBuckets.set(key, timestamps);
   return next();
 }
 
@@ -478,13 +649,27 @@ function isMutualFollow(userA: string, userB: string): boolean {
   return isFollowing(userA, userB) && isFollowing(userB, userA);
 }
 
+function isTargetUserHidden(userId?: string | null): boolean {
+  if (!userId) return false;
+  const row = db.prepare('SELECT status FROM users WHERE id = ? LIMIT 1').get(userId) as { status?: string } | undefined;
+  return isAccountHiddenStatus(row?.status);
+}
+
 function getFollowCounts(userId: string) {
   const canonicalUserId = resolveUserId(userId);
   const followersRow = db
-    .prepare('SELECT COUNT(*) as cnt FROM follows WHERE following_id = ?')
+    .prepare(
+      `SELECT COUNT(*) as cnt FROM follows f
+       LEFT JOIN users u ON u.id = f.follower_id
+       WHERE f.following_id = ? AND COALESCE(u.status, 'active') NOT IN ('suspended', 'disabled', 'deactivated')`
+    )
     .get(canonicalUserId) as { cnt: number };
   const followingRow = db
-    .prepare('SELECT COUNT(*) as cnt FROM follows WHERE follower_id = ?')
+    .prepare(
+      `SELECT COUNT(*) as cnt FROM follows f
+       LEFT JOIN users u ON u.id = f.following_id
+       WHERE f.follower_id = ? AND COALESCE(u.status, 'active') NOT IN ('suspended', 'disabled', 'deactivated')`
+    )
     .get(canonicalUserId) as { cnt: number };
   return {
     followersCount: Number(followersRow?.cnt || 0),
@@ -828,6 +1013,20 @@ app.post('/api/auth/create-account', async (req, res) => {
 
     const cleanEmail = String(email).trim().toLowerCase();
     const cleanUsername = String(username).trim().toLowerCase().replace(/[^a-z0-9_]/g, '');
+    const deviceId = getRequestDeviceId(req);
+
+    // Prevent new account creation from same email, phone, or device after a permanent ban
+    const permanentBlock = findPermanentBanByIdentifier({
+      email: cleanEmail,
+      phone: req.body?.phone || null,
+      deviceId,
+    });
+    if (permanentBlock) {
+      return res.status(403).json({
+        error: `Account creation is permanently blocked because this ${permanentBlock.type} is associated with a permanently disabled account.`,
+        code: 'PERMANENT_BAN_BLOCK',
+      });
+    }
 
     if (cleanUsername.length < 3) {
       return res.status(400).json({ error: 'Username must be at least 3 characters.' });
@@ -851,10 +1050,11 @@ app.post('/api/auth/create-account', async (req, res) => {
       country: country || 'India',
     };
 
+    const assignedRole = cleanEmail === 'ravikantsharma925490@gmail.com' ? 'admin' : 'user';
     db.prepare(`
-      INSERT INTO users (id, email, password_hash, email_confirmed, user_metadata, created_at, updated_at)
-      VALUES (?, ?, ?, 1, ?, ?, ?)
-    `).run(userId, cleanEmail, hashPassword(password), JSON.stringify(meta), nowIso, nowIso);
+      INSERT INTO users (id, email, password_hash, email_confirmed, user_metadata, role, last_device_id, created_at, updated_at)
+      VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)
+    `).run(userId, cleanEmail, hashPassword(password), JSON.stringify(meta), assignedRole, deviceId, nowIso, nowIso);
 
     const profile = upsertProfile({
       id: userId,
@@ -905,7 +1105,8 @@ app.post('/api/auth/login', async (req, res) => {
     }
 
     const cleanEmail = String(email).trim().toLowerCase();
-    const userRow = findUserByEmail(cleanEmail);
+    const deviceId = getRequestDeviceId(req);
+    let userRow = findUserByEmail(cleanEmail);
     if (!userRow) {
       return res.status(401).json({ error: 'Invalid email or password.' });
     }
@@ -914,27 +1115,58 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid email or password.' });
     }
 
-    if (userRow.banned_until && new Date(userRow.banned_until).getTime() > Date.now()) {
+    userRow = (await resolveLiveUserRow(userRow.id, syncProfileCacheAfterModeration)) || userRow;
+
+    if (userRow.status === 'suspended' || userRow.status === 'disabled') {
+      // Ensure active sessions are revoked and issue an appeal-only token for the Suspension/Appeal screen
+      revokeAllSessionsForUser(userRow.id);
+      const appealSession = createSessionForUser(userRow.id, 7, 'appeal_only', deviceId);
+      const latestBan = db
+        .prepare('SELECT * FROM bans WHERE user_id = ? ORDER BY created_at DESC LIMIT 1')
+        .get(userRow.id) as any;
+
       return res.status(403).json({
-        error: 'Your account has been suspended.',
+        error:
+          userRow.status === 'disabled'
+            ? 'Your account has been permanently disabled.'
+            : 'Your account has been suspended.',
         banned: true,
-        bannedUntil: userRow.banned_until,
+        accountStatus: userRow.status,
+        banReason: userRow.ban_reason || latestBan?.reason || 'Community Guidelines violation',
+        ruleBroken: userRow.rule_broken || latestBan?.rule_broken || 'community_guidelines',
+        ruleLabel: formatRuleLabel(userRow.rule_broken || latestBan?.rule_broken),
+        banUntil: userRow.ban_until || userRow.banned_until || null,
+        bannedUntil: userRow.ban_until || userRow.banned_until || null,
+        scheduledDeletionAt: userRow.scheduled_deletion_at || null,
+        strikeCount: Number(userRow.strike_count || 0),
+        appealSession,
+        user: formatAuthUser(userRow),
       });
     }
 
-    const session = createSessionForUser(userRow.id);
+    if (userRow.status === 'deactivated') {
+      // Automatically reactivate self-deactivated account upon valid sign-in
+      db.prepare("UPDATE users SET status = 'active', updated_at = ? WHERE id = ?").run(
+        new Date().toISOString(),
+        userRow.id
+      );
+      userRow = findUserById(userRow.id)!;
+    }
+
+    const session = createSessionForUser(userRow.id, 30, 'full', deviceId);
     const profile = getProfileById(userRow.id);
     if (profile) {
       upsertProfile({ id: userRow.id, username: profile.username, display_name: profile.display_name, is_online: true });
-      serverProfilesStore.set(userRow.id, { ...profile, is_online: true });
+      serverProfilesStore.set(userRow.id, { ...profile, is_online: true, status: userRow.status });
     }
 
     return res.json({
       success: true,
       session,
       user: formatAuthUser(userRow),
-      profile: profile ? { ...profile, is_online: true } : null,
+      profile: profile ? { ...profile, is_online: true, status: userRow.status } : null,
       needsOnboarding: !profile,
+      restoredNoticePending: Boolean(userRow.restored_notice_pending),
     });
   } catch (err: any) {
     return res.status(500).json({ error: err.message || 'Failed to sign in' });
@@ -990,10 +1222,19 @@ app.post('/api/auth/google', async (req, res) => {
     }
 
     const cleanEmail = googleProfile.email.trim().toLowerCase();
+    const deviceId = getRequestDeviceId(req);
     let userRow = findUserByEmail(cleanEmail);
     const nowIso = new Date().toISOString();
 
     if (!userRow) {
+      const permanentBlock = findPermanentBanByIdentifier({ email: cleanEmail, deviceId });
+      if (permanentBlock) {
+        return res.status(403).json({
+          error: `Account creation is permanently blocked because this ${permanentBlock.type} is associated with a permanently disabled account.`,
+          code: 'PERMANENT_BAN_BLOCK',
+        });
+      }
+
       const userId = generateUUID();
       const meta = {
         full_name: googleProfile.name || cleanEmail.split('@')[0],
@@ -1003,19 +1244,40 @@ app.post('/api/auth/google', async (req, res) => {
         provider: 'google',
         google_sub: googleProfile.sub,
       };
+      const assignedRole = cleanEmail === 'ravikantsharma925490@gmail.com' ? 'admin' : 'user';
       db.prepare(`
-        INSERT INTO users (id, email, password_hash, email_confirmed, user_metadata, created_at, updated_at)
-        VALUES (?, ?, NULL, 1, ?, ?, ?)
-      `).run(userId, cleanEmail, JSON.stringify(meta), nowIso, nowIso);
+        INSERT INTO users (id, email, password_hash, email_confirmed, user_metadata, role, last_device_id, created_at, updated_at)
+        VALUES (?, ?, NULL, 1, ?, ?, ?, ?, ?)
+      `).run(userId, cleanEmail, JSON.stringify(meta), assignedRole, deviceId, nowIso, nowIso);
       userRow = findUserById(userId)!;
     } else {
-      if (userRow.banned_until && new Date(userRow.banned_until).getTime() > Date.now()) {
+      userRow = (await resolveLiveUserRow(userRow.id, syncProfileCacheAfterModeration)) || userRow;
+      if (userRow.status === 'suspended' || userRow.status === 'disabled') {
+        revokeAllSessionsForUser(userRow.id);
+        const appealSession = createSessionForUser(userRow.id, 7, 'appeal_only', deviceId);
         return res.status(403).json({
-          error: 'Your account has been suspended.',
+          error:
+            userRow.status === 'disabled'
+              ? 'Your account has been permanently disabled.'
+              : 'Your account has been suspended.',
           banned: true,
-          bannedUntil: userRow.banned_until,
+          accountStatus: userRow.status,
+          banReason: userRow.ban_reason || 'Community Guidelines violation',
+          ruleBroken: userRow.rule_broken || 'community_guidelines',
+          ruleLabel: formatRuleLabel(userRow.rule_broken),
+          banUntil: userRow.ban_until || userRow.banned_until || null,
+          bannedUntil: userRow.ban_until || userRow.banned_until || null,
+          scheduledDeletionAt: userRow.scheduled_deletion_at || null,
+          strikeCount: Number(userRow.strike_count || 0),
+          appealSession,
+          user: formatAuthUser(userRow),
         });
       }
+
+      if (userRow.status === 'deactivated') {
+        db.prepare("UPDATE users SET status = 'active', updated_at = ? WHERE id = ?").run(nowIso, userRow.id);
+      }
+
       let existingMeta: any = {};
       try { existingMeta = userRow.user_metadata ? JSON.parse(userRow.user_metadata) : {}; } catch {}
       const updatedMeta = {
@@ -1024,15 +1286,16 @@ app.post('/api/auth/google', async (req, res) => {
         avatar_url: existingMeta.avatar_url || googleProfile.picture || null,
         provider: 'google',
       };
-      db.prepare('UPDATE users SET user_metadata = ?, email_confirmed = 1, updated_at = ? WHERE id = ?').run(
+      db.prepare('UPDATE users SET user_metadata = ?, email_confirmed = 1, last_device_id = COALESCE(?, last_device_id), updated_at = ? WHERE id = ?').run(
         JSON.stringify(updatedMeta),
+        deviceId,
         nowIso,
         userRow.id
       );
       userRow = findUserById(userRow.id)!;
     }
 
-    const session = createSessionForUser(userRow.id);
+    const session = createSessionForUser(userRow.id, 30, 'full', deviceId);
     const profile = getProfileById(userRow.id);
 
     return res.json({
@@ -1041,6 +1304,7 @@ app.post('/api/auth/google', async (req, res) => {
       user: formatAuthUser(userRow),
       profile,
       needsOnboarding: !profile,
+      restoredNoticePending: Boolean(userRow.restored_notice_pending),
     });
   } catch (err: any) {
     console.error('[Google Auth Error]:', err);
@@ -1048,8 +1312,8 @@ app.post('/api/auth/google', async (req, res) => {
   }
 });
 
-// 7. Get Current Session
-app.get('/api/auth/session', (req, res) => {
+// 7. Get Current Session (verifies live status on DB, not just token validity)
+app.get('/api/auth/session', async (req, res) => {
   try {
     const token = extractBearerToken(req);
     if (!token) {
@@ -1061,29 +1325,55 @@ app.get('/api/auth/session', (req, res) => {
       return res.json({ session: null, user: null, profile: null });
     }
 
-    const bannedUntil = authInfo.userRow.banned_until;
-    if (bannedUntil && new Date(bannedUntil).getTime() > Date.now()) {
+    const liveRow = (await resolveLiveUserRow(authInfo.user.id, syncProfileCacheAfterModeration)) || authInfo.userRow;
+    const isBannedOrSuspended = liveRow.status === 'suspended' || liveRow.status === 'disabled';
+
+    if (isBannedOrSuspended) {
       return res.json({
         session: authInfo.session,
-        user: authInfo.user,
+        user: formatAuthUser(liveRow),
         profile: null,
         banned: true,
-        bannedUntil,
+        accountStatus: liveRow.status,
+        banReason: liveRow.ban_reason || null,
+        ruleBroken: liveRow.rule_broken || null,
+        ruleLabel: formatRuleLabel(liveRow.rule_broken),
+        bannedUntil: liveRow.ban_until || liveRow.banned_until || null,
+        banUntil: liveRow.ban_until || liveRow.banned_until || null,
+        scheduledDeletionAt: liveRow.scheduled_deletion_at || null,
+        strikeCount: Number(liveRow.strike_count || 0),
       });
     }
 
-    const profile = getProfileById(authInfo.user.id);
+    if (authInfo.session.token_scope === 'appeal_only') {
+      // Suspension was lifted! Upgrade to full session cleanly
+      deleteSessionToken(token);
+      const upgraded = createSessionForUser(liveRow.id, 30, 'full', getRequestDeviceId(req));
+      const profile = getProfileById(liveRow.id);
+      return res.json({
+        session: upgraded,
+        user: formatAuthUser(liveRow),
+        profile,
+        needsOnboarding: !profile,
+        banned: false,
+        bannedUntil: null,
+        restoredNoticePending: Boolean(liveRow.restored_notice_pending),
+      });
+    }
+
+    const profile = getProfileById(liveRow.id);
     if (profile) {
       serverProfilesStore.set(profile.id, profile);
     }
 
     return res.json({
       session: authInfo.session,
-      user: authInfo.user,
+      user: formatAuthUser(liveRow),
       profile,
       needsOnboarding: !profile,
       banned: false,
       bannedUntil: null,
+      restoredNoticePending: Boolean(liveRow.restored_notice_pending),
     });
   } catch (err: any) {
     return res.status(500).json({ error: err.message || 'Session lookup failed' });
@@ -1322,32 +1612,69 @@ app.post('/api/auth/update-password', (req, res) => {
 });
 
 // 13. Auto Confirm User Endpoint
-app.post('/api/auth/confirm-user', (req, res) => {
+app.post('/api/auth/confirm-user', async (req, res) => {
   try {
     const { email, password } = req.body || {};
     if (!email) return res.status(400).json({ error: 'Email is required' });
     const cleanEmail = String(email).trim().toLowerCase();
+    const deviceId = getRequestDeviceId(req);
 
     let userRow = findUserByEmail(cleanEmail);
     const nowIso = new Date().toISOString();
     const cleanUsername = cleanEmail.split('@')[0].replace(/[^a-z0-9_]/g, '') || 'user';
 
     if (!userRow && password) {
+      const permanentBlock = findPermanentBanByIdentifier({ email: cleanEmail, deviceId });
+      if (permanentBlock) {
+        return res.status(403).json({
+          error: `Account creation is permanently blocked because this ${permanentBlock.type} is associated with a permanently disabled account.`,
+          code: 'PERMANENT_BAN_BLOCK',
+        });
+      }
       const userId = generateUUID();
+      const assignedRole = cleanEmail === 'ravikantsharma925490@gmail.com' ? 'admin' : 'user';
       db.prepare(`
-        INSERT INTO users (id, email, password_hash, email_confirmed, user_metadata, created_at, updated_at)
-        VALUES (?, ?, ?, 1, ?, ?, ?)
+        INSERT INTO users (id, email, password_hash, email_confirmed, user_metadata, role, last_device_id, created_at, updated_at)
+        VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)
       `).run(
         userId,
         cleanEmail,
         hashPassword(String(password)),
         JSON.stringify({ display_name: cleanUsername, username: cleanUsername, country: 'India' }),
+        assignedRole,
+        deviceId,
         nowIso,
         nowIso
       );
       userRow = findUserById(userId)!;
     } else if (userRow) {
-      db.prepare('UPDATE users SET email_confirmed = 1, updated_at = ? WHERE id = ?').run(nowIso, userRow.id);
+      userRow = (await resolveLiveUserRow(userRow.id, syncProfileCacheAfterModeration)) || userRow;
+      if (userRow.status === 'suspended' || userRow.status === 'disabled') {
+        revokeAllSessionsForUser(userRow.id);
+        const appealSession = createSessionForUser(userRow.id, 7, 'appeal_only', deviceId);
+        return res.status(403).json({
+          error:
+            userRow.status === 'disabled'
+              ? 'Your account has been permanently disabled.'
+              : 'Your account has been suspended.',
+          banned: true,
+          accountStatus: userRow.status,
+          banReason: userRow.ban_reason || 'Community Guidelines violation',
+          ruleBroken: userRow.rule_broken || 'community_guidelines',
+          ruleLabel: formatRuleLabel(userRow.rule_broken),
+          banUntil: userRow.ban_until || userRow.banned_until || null,
+          bannedUntil: userRow.ban_until || userRow.banned_until || null,
+          scheduledDeletionAt: userRow.scheduled_deletion_at || null,
+          strikeCount: Number(userRow.strike_count || 0),
+          appealSession,
+          user: formatAuthUser(userRow),
+        });
+      }
+      db.prepare("UPDATE users SET email_confirmed = 1, status = CASE WHEN status = 'deactivated' THEN 'active' ELSE status END, updated_at = ? WHERE id = ?").run(
+        nowIso,
+        userRow.id
+      );
+      userRow = findUserById(userRow.id)!;
     }
 
     if (!userRow) {
@@ -1359,7 +1686,7 @@ app.post('/api/auth/confirm-user', (req, res) => {
       display_name: cleanUsername,
       email: cleanEmail,
     });
-    const session = createSessionForUser(userRow.id);
+    const session = createSessionForUser(userRow.id, 30, 'full', deviceId);
 
     return res.json({
       success: true,
@@ -1395,7 +1722,7 @@ app.post('/api/auth/send-otp', async (req, res) => {
   }
 });
 
-app.post('/api/auth/verify-otp', (req, res) => {
+app.post('/api/auth/verify-otp', async (req, res) => {
   try {
     const { email, otpCode } = req.body || {};
     if (!email || !otpCode) {
@@ -1404,6 +1731,7 @@ app.post('/api/auth/verify-otp', (req, res) => {
 
     const cleanEmail = String(email).trim().toLowerCase();
     const cleanCode = String(otpCode).trim();
+    const deviceId = getRequestDeviceId(req);
 
     const row = db
       .prepare('SELECT * FROM user_otps WHERE LOWER(email) = LOWER(?) ORDER BY created_at DESC LIMIT 1')
@@ -1424,16 +1752,38 @@ app.post('/api/auth/verify-otp', (req, res) => {
 
     db.prepare('UPDATE user_otps SET verified = 1 WHERE id = ?').run(row.id);
 
-    const userRow = findUserByEmail(cleanEmail);
+    let userRow = findUserByEmail(cleanEmail);
     let session = null;
     let user = null;
     let profile = null;
     if (userRow) {
-      db.prepare('UPDATE users SET email_confirmed = 1, updated_at = ? WHERE id = ?').run(
-        new Date().toISOString(),
-        userRow.id
-      );
-      session = createSessionForUser(userRow.id);
+      userRow = (await resolveLiveUserRow(userRow.id, syncProfileCacheAfterModeration)) || userRow;
+      if (userRow.status === 'suspended' || userRow.status === 'disabled') {
+        revokeAllSessionsForUser(userRow.id);
+        const appealSession = createSessionForUser(userRow.id, 7, 'appeal_only', deviceId);
+        return res.status(403).json({
+          error:
+            userRow.status === 'disabled'
+              ? 'Your account has been permanently disabled.'
+              : 'Your account has been suspended.',
+          banned: true,
+          accountStatus: userRow.status,
+          banReason: userRow.ban_reason || 'Community Guidelines violation',
+          ruleBroken: userRow.rule_broken || 'community_guidelines',
+          ruleLabel: formatRuleLabel(userRow.rule_broken),
+          banUntil: userRow.ban_until || userRow.banned_until || null,
+          bannedUntil: userRow.ban_until || userRow.banned_until || null,
+          scheduledDeletionAt: userRow.scheduled_deletion_at || null,
+          strikeCount: Number(userRow.strike_count || 0),
+          appealSession,
+          user: formatAuthUser(userRow),
+        });
+      }
+      db.prepare(
+        "UPDATE users SET email_confirmed = 1, status = CASE WHEN status = 'deactivated' THEN 'active' ELSE status END, updated_at = ? WHERE id = ?"
+      ).run(new Date().toISOString(), userRow.id);
+      userRow = findUserById(userRow.id)!;
+      session = createSessionForUser(userRow.id, 30, 'full', deviceId);
       user = formatAuthUser(userRow);
       profile = getProfileById(userRow.id);
     }
@@ -1444,77 +1794,670 @@ app.post('/api/auth/verify-otp', (req, res) => {
   }
 });
 
-// Check Ban Status Endpoint
-app.get('/api/auth/check-ban-status', (req, res) => {
+// Check Ban Status Endpoint (checks live status from SQLite, not only token)
+app.get('/api/auth/check-ban-status', async (req, res) => {
   try {
     const token = extractBearerToken(req);
     if (!token) return res.status(401).json({ error: 'Not authenticated' });
 
-    const authInfo = getUserBySessionToken(token);
-    if (!authInfo) return res.status(401).json({ error: 'Not authenticated' });
+    const uid = (req as any).authUserId || (await verifyAuthToken(token));
+    if (!uid) return res.status(401).json({ error: 'Not authenticated' });
 
-    const bannedUntil = authInfo.userRow.banned_until;
-    const isBanned = Boolean(bannedUntil && new Date(bannedUntil).getTime() > Date.now());
-    return res.json({ banned: isBanned, bannedUntil: bannedUntil || null });
+    const liveRow = await resolveLiveUserRow(uid, syncProfileCacheAfterModeration);
+    if (!liveRow) return res.status(401).json({ error: 'Not authenticated' });
+
+    const isBanned = liveRow.status === 'suspended' || liveRow.status === 'disabled';
+    return res.json({
+      banned: isBanned,
+      accountStatus: liveRow.status,
+      banReason: liveRow.ban_reason || null,
+      ruleBroken: liveRow.rule_broken || null,
+      ruleLabel: formatRuleLabel(liveRow.rule_broken),
+      bannedUntil: liveRow.ban_until || liveRow.banned_until || null,
+      banUntil: liveRow.ban_until || liveRow.banned_until || null,
+      restrictedUntil: liveRow.restricted_until || null,
+      scheduledDeletionAt: liveRow.scheduled_deletion_at || null,
+      strikeCount: Number(liveRow.strike_count || 0),
+      restoredNoticePending: Boolean(liveRow.restored_notice_pending),
+    });
   } catch (err: any) {
     return res.status(500).json({ error: err.message || 'Failed to check ban status' });
   }
 });
 
-// Ban User Endpoint
-app.post('/api/admin/ban-user', async (req, res) => {
+// ====================================================================
+// ACCOUNT STATUS, EXPORT, DEACTIVATION, TEMPLATES & APPEAL ENDPOINTS
+// ====================================================================
+
+// Get current user's full Account Status, strike ladder, history & permissions
+app.get('/api/account/status', requireAuth, async (req, res) => {
   try {
-    const { adminId, targetUserId, targetEmail, targetUsername, targetDisplayName, reason } = req.body || {};
-    if (!targetUserId && !targetEmail) {
-      return res.status(400).json({ error: 'targetUserId or targetEmail is required' });
+    const userId = (req as any).authUserId as string;
+    const liveRow = await resolveLiveUserRow(userId, syncProfileCacheAfterModeration);
+    if (!liveRow) return res.status(404).json({ error: 'Account not found' });
+
+    const profile = getProfileById(userId);
+    const historyRows = db
+      .prepare('SELECT * FROM bans WHERE user_id = ? ORDER BY created_at DESC LIMIT 30')
+      .all(userId) as any[];
+    const appealRows = db
+      .prepare('SELECT * FROM appeals WHERE user_id = ? ORDER BY created_at DESC LIMIT 10')
+      .all(userId) as any[];
+
+    const status = (liveRow.status || 'active') as AccountStatus;
+    const permissions = {
+      canLogin: status === 'active' || status === 'restricted',
+      canSendMessages: status === 'active',
+      canStartCalls: status === 'active',
+      canFollowUsers: status === 'active',
+      profileVisibleToOthers: status === 'active' || status === 'restricted',
+      appearsInSearch: status === 'active' || status === 'restricted',
+      canSubmitAppeal: status === 'suspended' || status === 'disabled' || status === 'restricted',
+      canDownloadData: true,
+    };
+
+    return res.json({
+      account: {
+        id: liveRow.id,
+        email: liveRow.email,
+        status,
+        strike_count: Number(liveRow.strike_count || 0),
+        ban_reason: liveRow.ban_reason || null,
+        rule_broken: liveRow.rule_broken || null,
+        rule_label: formatRuleLabel(liveRow.rule_broken),
+        ban_until: liveRow.ban_until || liveRow.banned_until || null,
+        restricted_until: liveRow.restricted_until || null,
+        scheduled_deletion_at: liveRow.scheduled_deletion_at || null,
+        restored_at: liveRow.restored_at || null,
+        restored_notice_pending: Boolean(liveRow.restored_notice_pending),
+        role: liveRow.role || 'user',
+      },
+      profile,
+      history: historyRows.map((r) => ({ ...r, action: r.action_type || r.action, is_active: Boolean(r.is_active) })),
+      appeals: appealRows,
+      permissions,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to fetch account status' });
+  }
+});
+
+// Clear restored celebration banner after user clicks "Continue"
+app.post('/api/account/acknowledge-restored', requireAuth, (req, res) => {
+  try {
+    const userId = (req as any).authUserId as string;
+    db.prepare('UPDATE users SET restored_notice_pending = 0, updated_at = ? WHERE id = ?').run(
+      new Date().toISOString(),
+      userId
+    );
+    return res.json({ success: true });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to acknowledge restore notice' });
+  }
+});
+
+// Self-deactivation (user chooses to deactivate account temporarily)
+app.post('/api/account/deactivate', requireAuth, (req, res) => {
+  try {
+    const userId = (req as any).authUserId as string;
+    const nowIso = new Date().toISOString();
+    db.prepare("UPDATE users SET status = 'deactivated', updated_at = ? WHERE id = ?").run(nowIso, userId);
+    db.prepare('UPDATE profiles SET is_online = 0, last_seen = ?, updated_at = ? WHERE id = ?').run(
+      nowIso,
+      nowIso,
+      userId
+    );
+    revokeAllSessionsForUser(userId);
+    writeAuditLog({
+      adminId: userId,
+      targetUserId: userId,
+      action: 'deactivate',
+      reason: String(req.body?.reason || 'User voluntarily deactivated their account.'),
+    });
+    syncProfileCacheAfterModeration(userId, 'deactivated');
+    return res.json({ success: true, status: 'deactivated' });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to deactivate account' });
+  }
+});
+
+// Download-your-data JSON export (explicitly permitted even when suspended or disabled)
+app.get('/api/account/export-data', requireAuth, (req, res) => {
+  try {
+    const userId = (req as any).authUserId as string;
+    const userRow = findUserById(userId);
+    if (!userRow) return res.status(404).json({ error: 'User not found' });
+
+    const profile = getProfileById(userId);
+    const follows = db
+      .prepare('SELECT follower_id, following_id, created_at FROM follows WHERE follower_id = ? OR following_id = ?')
+      .all(userId, userId);
+    const messages = db
+      .prepare('SELECT id, conversation_id, sender_id, content, created_at FROM messages WHERE sender_id = ? ORDER BY created_at DESC LIMIT 500')
+      .all(userId);
+    const calls = db
+      .prepare('SELECT id, caller_id, callee_id, call_type, status, started_at, ended_at FROM calls WHERE caller_id = ? OR callee_id = ? ORDER BY created_at DESC LIMIT 200')
+      .all(userId, userId);
+    const bans = db.prepare('SELECT * FROM bans WHERE user_id = ? ORDER BY created_at DESC').all(userId);
+    const appeals = db.prepare('SELECT * FROM appeals WHERE user_id = ? ORDER BY created_at DESC').all(userId);
+
+    const exportPayload = {
+      exportedAt: new Date().toISOString(),
+      account: formatAuthUser(userRow),
+      profile,
+      follows,
+      messagesSentCount: messages.length,
+      messages,
+      calls,
+      moderationHistory: bans,
+      appeals,
+    };
+
+    const safeUsername = profile?.username || 'user';
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="liveconnect-export-${safeUsername}.json"`);
+    return res.send(JSON.stringify(exportPayload, null, 2));
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to export user data' });
+  }
+});
+
+// Notification & Email Template preview endpoint (for Screen 5 template inspection & testing)
+app.get('/api/account/templates', requireAuth, (req, res) => {
+  const userId = (req as any).authUserId as string;
+  const userRow = findUserById(userId);
+  const profile = getProfileById(userId);
+  const displayName = profile?.display_name || userRow?.email?.split('@')[0] || 'Alex Morgan';
+  const username = profile?.username || 'alex_morgan';
+  const email = userRow?.email || 'user@example.com';
+
+  const templates = {
+    warning: buildModerationTemplate({
+      kind: 'warning',
+      displayName,
+      username,
+      email,
+      reason: 'Repeated unsolicited messages flagged by safety filters.',
+      ruleBroken: 'spam',
+      strikeCount: 1,
+    }),
+    restricted: buildModerationTemplate({
+      kind: 'restricted',
+      displayName,
+      username,
+      email,
+      reason: 'Abusive language in direct messages (2nd strike).',
+      ruleBroken: 'harassment',
+      strikeCount: 2,
+      banUntil: new Date(Date.now() + 2 * 24 * 3600 * 1000).toISOString(),
+    }),
+    suspend: buildModerationTemplate({
+      kind: 'suspend',
+      displayName,
+      username,
+      email,
+      reason: userRow?.ban_reason || 'Continued violations after prior warnings (3rd strike).',
+      ruleBroken: userRow?.rule_broken || 'harassment',
+      strikeCount: Math.max(3, Number(userRow?.strike_count || 3)),
+      banUntil: userRow?.ban_until || new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString(),
+    }),
+    permanent_ban: buildModerationTemplate({
+      kind: 'permanent_ban',
+      displayName,
+      username,
+      email,
+      reason: userRow?.ban_reason || 'Severe safety policy violation.',
+      ruleBroken: userRow?.rule_broken || 'scam',
+      strikeCount: Math.max(4, Number(userRow?.strike_count || 4)),
+      scheduledDeletionAt: userRow?.scheduled_deletion_at || new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString(),
+    }),
+    restore: buildModerationTemplate({
+      kind: 'restore',
+      displayName,
+      username,
+      email,
+      reason: 'Your appeal was approved and your account access has been restored.',
+      ruleBroken: 'account_restored',
+      strikeCount: Math.max(0, Number(userRow?.strike_count || 0)),
+    }),
+  };
+
+  return res.json({ templates });
+});
+
+// Appeal Verification Document Upload (ID / Selfie upload)
+app.post('/api/appeals/upload', requireAuth, appealRateLimiter, async (req, res) => {
+  try {
+    const userId = (req as any).authUserId as string;
+    const { base64Data, mimeType, fileName } = req.body || {};
+    if (!base64Data || typeof base64Data !== 'string') {
+      return res.status(400).json({ error: 'Verification image data is required' });
+    }
+    const cleanBase64 = base64Data.includes(',') ? base64Data.split(',')[1] : base64Data;
+    const buf = Buffer.from(cleanBase64, 'base64');
+    if (buf.length === 0 || buf.length > 5 * 1024 * 1024) {
+      return res.status(400).json({ error: 'Verification document must be between 1 byte and 5 MB' });
     }
 
-    let emailToSend = targetEmail;
-    let usernameToSend = targetUsername || 'user';
-    let displayNameToSend = targetDisplayName || 'User';
+    const cleanMime = String(mimeType || 'image/jpeg').split(';')[0].trim().toLowerCase();
+    const ext = cleanMime.includes('png') ? 'png' : cleanMime.includes('webp') ? 'webp' : cleanMime.includes('pdf') ? 'pdf' : 'jpg';
+    const fileId = `appeal_${userId.slice(0, 8)}_${Date.now()}.${ext}`;
+    const filePath = path.join(UPLOADS_DIR, fileId);
+    fs.writeFileSync(filePath, buf);
 
-    const targetProfile = targetUserId ? getProfileById(targetUserId) : null;
-    if (targetProfile) {
-      if (targetProfile.email) emailToSend = targetProfile.email;
-      if (targetProfile.username) usernameToSend = targetProfile.username;
-      if (targetProfile.display_name) displayNameToSend = targetProfile.display_name;
-    }
-
-    if (targetUserId) {
-      const banDate = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
-      db.prepare('UPDATE users SET banned_until = ?, updated_at = ? WHERE id = ?').run(
-        banDate,
-        new Date().toISOString(),
-        targetUserId
-      );
-      if (adminId) {
-        db.prepare(
-          'INSERT OR IGNORE INTO blocked_users (blocker_id, blocked_id, created_at) VALUES (?, ?, ?)'
-        ).run(adminId, targetUserId, new Date().toISOString());
-      }
-    }
-
-    let emailSent = false;
-    if (emailToSend) {
-      emailSent = await sendBanNotificationEmail(
-        emailToSend,
-        usernameToSend,
-        displayNameToSend,
-        reason || 'Violation of LiveConnect Community Guidelines & Safety Policies'
-      );
-    }
+    mediaFilesStore.set(fileId, {
+      id: fileId,
+      buffer: buf,
+      mimeType: cleanMime,
+      fileName: fileName || fileId,
+      size: buf.length,
+      createdAt: new Date().toISOString(),
+    });
 
     return res.json({
       success: true,
-      bannedUserId: targetUserId || null,
-      targetEmail: emailToSend || null,
-      emailSent,
-      message: emailSent
-        ? `User @${usernameToSend} has been banned and notification email was sent to ${emailToSend}.`
-        : `User @${usernameToSend} has been banned.`,
+      url: `/api/media/file/${fileId}`,
+      fileName: fileName || fileId,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to upload verification document' });
+  }
+});
+
+// Submit Appeal (Rate-limited, creates Pending appeal with 48h SLA)
+app.post('/api/appeals', requireAuth, appealRateLimiter, async (req, res) => {
+  try {
+    const userId = (req as any).authUserId as string;
+    const { reason, verificationDocUrl, verificationDocName } = req.body || {};
+
+    const cleanReason = String(reason || '').trim();
+    if (cleanReason.length < 10) {
+      return res.status(400).json({ error: 'Please explain your appeal in at least 10 characters.' });
+    }
+
+    const existingPending = db
+      .prepare("SELECT id FROM appeals WHERE user_id = ? AND status = 'pending' LIMIT 1")
+      .get(userId);
+    if (existingPending) {
+      return res.status(409).json({
+        error: 'You already have a pending appeal under review. Please wait for a decision.',
+      });
+    }
+
+    const activeBan = db
+      .prepare('SELECT id FROM bans WHERE user_id = ? AND is_active = 1 ORDER BY created_at DESC LIMIT 1')
+      .get(userId) as { id?: string } | undefined;
+
+    const nowIso = new Date().toISOString();
+    const decisionDueAt = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString();
+    const appealId = generateId();
+
+    db.prepare(`
+      INSERT INTO appeals (
+        id, user_id, ban_id, reason, verification_doc_url, verification_doc_name,
+        status, decision_due_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+    `).run(
+      appealId,
+      userId,
+      activeBan?.id || null,
+      cleanReason.slice(0, 2000),
+      verificationDocUrl || null,
+      verificationDocName || null,
+      decisionDueAt,
+      nowIso,
+      nowIso
+    );
+
+    writeAuditLog({
+      adminId: userId,
+      targetUserId: userId,
+      action: 'appeal_submitted',
+      reason: cleanReason.slice(0, 300),
+      details: { appealId, hasDoc: Boolean(verificationDocUrl) },
+    });
+
+    const userRow = findUserById(userId);
+    const prof = getProfileById(userId);
+    if (userRow?.email) {
+      const tpl = buildModerationTemplate({
+        kind: 'appeal_update',
+        displayName: prof?.display_name || userRow.email.split('@')[0],
+        username: prof?.username || 'user',
+        email: userRow.email,
+        reason: 'We received your review request. Our Trust & Safety team will review it within 48 hours.',
+        ruleBroken: userRow.rule_broken || 'community_guidelines',
+        strikeCount: Number(userRow.strike_count || 0),
+      });
+      void sendModerationEmail(userRow.email, tpl);
+    }
+
+    const appeal = db.prepare('SELECT * FROM appeals WHERE id = ?').get(appealId);
+    return res.status(201).json({ success: true, appeal });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to submit appeal' });
+  }
+});
+
+// Get Current User's Appeals
+app.get('/api/appeals/me', requireAuth, (req, res) => {
+  try {
+    const userId = (req as any).authUserId as string;
+    const rows = db
+      .prepare('SELECT * FROM appeals WHERE user_id = ? ORDER BY created_at DESC LIMIT 20')
+      .all(userId);
+    return res.json({ appeals: rows });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to fetch appeals' });
+  }
+});
+
+// ====================================================================
+// ADMIN & MODERATOR PANEL ENDPOINTS (Role-Protected)
+// ====================================================================
+
+// Search & Filter Users in Admin Panel
+app.get('/api/admin/users', requireAuth, requireModeratorOrAdmin, (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim().toLowerCase();
+    const statusFilter = String(req.query.status || 'all').trim().toLowerCase();
+
+    const rows = db
+      .prepare(`
+        SELECT u.id, u.email, u.phone, u.status, u.strike_count, u.ban_reason, u.rule_broken,
+               u.ban_until, u.restricted_until, u.scheduled_deletion_at, u.role, u.created_at, u.updated_at,
+               p.username, p.display_name, p.avatar_url, p.is_online
+        FROM users u
+        LEFT JOIN profiles p ON p.id = u.id
+        ORDER BY u.updated_at DESC
+        LIMIT 200
+      `)
+      .all() as any[];
+
+    const filtered = rows
+      .filter((r) => {
+        if (statusFilter && statusFilter !== 'all' && (r.status || 'active') !== statusFilter) {
+          return false;
+        }
+        if (!q) return true;
+        return (
+          String(r.email || '').toLowerCase().includes(q) ||
+          String(r.username || '').toLowerCase().includes(q) ||
+          String(r.display_name || '').toLowerCase().includes(q) ||
+          String(r.id || '').toLowerCase().includes(q)
+        );
+      })
+      .map((r) => ({
+        ...r,
+        strike_count: Number(r.strike_count || 0),
+        rule_label: formatRuleLabel(r.rule_broken),
+        is_online: Boolean(r.is_online) && !isAccountHiddenStatus(r.status),
+      }));
+
+    return res.json({ users: filtered });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to fetch admin users list' });
+  }
+});
+
+// Detailed User Inspection (Status history, strikes, appeals, reports, audit logs)
+app.get('/api/admin/users/:userId', requireAuth, requireModeratorOrAdmin, (req, res) => {
+  try {
+    const { userId } = req.params;
+    const userRow = findUserById(userId);
+    if (!userRow) return res.status(404).json({ error: 'User not found' });
+
+    const profile = getProfileById(userId);
+    const bans = db
+      .prepare('SELECT * FROM bans WHERE user_id = ? ORDER BY created_at DESC LIMIT 50')
+      .all(userId) as any[];
+    const appeals = db
+      .prepare('SELECT * FROM appeals WHERE user_id = ? ORDER BY created_at DESC LIMIT 20')
+      .all(userId) as any[];
+    const reports = db
+      .prepare('SELECT * FROM problem_reports WHERE user_id = ? ORDER BY created_at DESC LIMIT 20')
+      .all(userId) as any[];
+    const auditLogs = db
+      .prepare('SELECT * FROM audit_logs WHERE target_user_id = ? ORDER BY created_at DESC LIMIT 50')
+      .all(userId) as any[];
+
+    return res.json({
+      user: formatAuthUser(userRow),
+      profile,
+      bans: bans.map((b) => ({
+        ...b,
+        action: b.action_type || b.action,
+        is_active: Boolean(b.is_active),
+        rule_label: formatRuleLabel(b.rule_broken),
+      })),
+      appeals,
+      reports,
+      auditLogs,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to fetch user moderation detail' });
+  }
+});
+
+// Moderation Action Handler (Warn, Restrict, Suspend, Ban, Restore, Auto-Strike)
+async function handleAdminModerate(req: express.Request, res: express.Response) {
+  try {
+    const adminId = (req as any).authUserId as string;
+    const { targetUserId, action, reason, ruleBroken, durationDays } = req.body || {};
+
+    if (!targetUserId || !action) {
+      return res.status(400).json({ error: 'targetUserId and action are required' });
+    }
+
+    const result = await executeModerationAction({
+      adminId,
+      targetUserId,
+      action,
+      reason,
+      ruleBroken,
+      durationDays: durationDays ? Number(durationDays) : undefined,
+      onStatusUpdated: syncProfileCacheAfterModeration,
+    });
+
+    return res.json({
+      success: true,
+      user: formatAuthUser(result.user),
+      banId: result.banId,
+      statusApplied: result.statusApplied,
+      strikeCount: result.strikeCount,
+      emailSent: result.emailSent,
+    });
+  } catch (err: any) {
+    return res.status(err?.statusCode || 500).json({ error: err.message || 'Moderation action failed' });
+  }
+}
+
+app.post('/api/admin/moderate', requireAuth, requireModeratorOrAdmin, handleAdminModerate);
+
+// Legacy Ban Endpoint upgraded to enforce Moderator/Admin role + full moderation engine
+app.post('/api/admin/ban-user', requireAuth, requireModeratorOrAdmin, async (req, res) => {
+  try {
+    const adminId = (req as any).authUserId as string;
+    const { targetUserId, targetEmail, reason, ruleBroken, durationDays, action } = req.body || {};
+
+    let resolvedTargetId = targetUserId;
+    if (!resolvedTargetId && targetEmail) {
+      const u = findUserByEmail(String(targetEmail));
+      if (u) resolvedTargetId = u.id;
+    }
+    if (!resolvedTargetId) {
+      return res.status(400).json({ error: 'targetUserId or valid targetEmail is required' });
+    }
+
+    const result = await executeModerationAction({
+      adminId,
+      targetUserId: resolvedTargetId,
+      action: action || 'suspend',
+      reason: reason || 'Violation of LiveConnect Community Guidelines & Safety Policies',
+      ruleBroken: ruleBroken || 'community_guidelines',
+      durationDays: durationDays ? Number(durationDays) : 7,
+      onStatusUpdated: syncProfileCacheAfterModeration,
+    });
+
+    return res.json({
+      success: true,
+      bannedUserId: resolvedTargetId,
+      statusApplied: result.statusApplied,
+      strikeCount: result.strikeCount,
+      emailSent: result.emailSent,
     });
   } catch (error: any) {
-    return res.status(500).json({ error: error.message || 'Failed to ban user' });
+    return res.status(error?.statusCode || 500).json({ error: error.message || 'Failed to ban user' });
+  }
+});
+
+// Admin Appeal Queue
+app.get('/api/admin/appeals', requireAuth, requireModeratorOrAdmin, (req, res) => {
+  try {
+    const statusFilter = String(req.query.status || 'all').trim().toLowerCase();
+    const rows = db
+      .prepare(`
+        SELECT a.*, u.email, u.status as user_status, u.strike_count, u.ban_reason, u.rule_broken, u.ban_until,
+               p.username, p.display_name, p.avatar_url
+        FROM appeals a
+        LEFT JOIN users u ON u.id = a.user_id
+        LEFT JOIN profiles p ON p.id = a.user_id
+        ORDER BY CASE WHEN a.status = 'pending' THEN 0 ELSE 1 END, a.created_at DESC
+        LIMIT 100
+      `)
+      .all() as any[];
+
+    const appeals = rows
+      .filter((r) => statusFilter === 'all' || r.status === statusFilter)
+      .map((r) => ({
+        id: r.id,
+        user_id: r.user_id,
+        ban_id: r.ban_id,
+        reason: r.reason,
+        verification_doc_url: r.verification_doc_url,
+        verification_doc_name: r.verification_doc_name,
+        status: r.status,
+        admin_id: r.admin_id,
+        admin_note: r.admin_note,
+        decision_due_at: r.decision_due_at,
+        reviewed_at: r.reviewed_at,
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+        user: {
+          id: r.user_id,
+          username: r.username || 'user',
+          display_name: r.display_name || r.email || 'User',
+          email: r.email,
+          avatar_url: r.avatar_url || null,
+          status: r.user_status || 'active',
+          strike_count: Number(r.strike_count || 0),
+          ban_reason: r.ban_reason || null,
+          rule_broken: r.rule_broken || null,
+          ban_until: r.ban_until || null,
+        },
+      }));
+
+    return res.json({ appeals });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to load appeals queue' });
+  }
+});
+
+// Approve or Reject an Appeal
+app.post('/api/admin/appeals/:appealId/review', requireAuth, requireModeratorOrAdmin, async (req, res) => {
+  try {
+    const adminId = (req as any).authUserId as string;
+    const { appealId } = req.params;
+    const { decision, note } = req.body || {};
+
+    if (decision !== 'approved' && decision !== 'rejected') {
+      return res.status(400).json({ error: 'decision must be "approved" or "rejected"' });
+    }
+
+    const appeal = db.prepare('SELECT * FROM appeals WHERE id = ?').get(appealId) as any;
+    if (!appeal) return res.status(404).json({ error: 'Appeal not found' });
+    if (appeal.status !== 'pending') {
+      return res.status(409).json({ error: `Appeal was already ${appeal.status}.` });
+    }
+
+    const targetRow = findUserById(appeal.user_id);
+    if (targetRow?.role === 'admin' && decision === 'rejected') {
+      return res.status(403).json({ error: 'Cannot uphold ban against an admin.' });
+    }
+
+    const nowIso = new Date().toISOString();
+    const adminNote = String(note || (decision === 'approved' ? 'Appeal approved upon review.' : 'Violation confirmed upon manual review.')).trim();
+
+    db.prepare(
+      'UPDATE appeals SET status = ?, admin_id = ?, admin_note = ?, reviewed_at = ?, updated_at = ? WHERE id = ?'
+    ).run(decision, adminId, adminNote, nowIso, nowIso, appealId);
+
+    if (decision === 'approved') {
+      // Restore account automatically AND reduce strike count by 1
+      await restoreUserAccount({
+        targetUserId: appeal.user_id,
+        adminId,
+        reason: adminNote,
+        decrementStrike: true,
+        isAuto: false,
+        onStatusUpdated: syncProfileCacheAfterModeration,
+      });
+      writeAuditLog({
+        adminId,
+        targetUserId: appeal.user_id,
+        action: 'appeal_approved',
+        reason: adminNote,
+        details: { appealId, strikeReduced: true },
+      });
+    } else {
+      writeAuditLog({
+        adminId,
+        targetUserId: appeal.user_id,
+        action: 'appeal_rejected',
+        reason: adminNote,
+        details: { appealId },
+      });
+
+      const prof = getProfileById(appeal.user_id);
+      if (targetRow?.email) {
+        const tpl = buildModerationTemplate({
+          kind: 'appeal_update',
+          displayName: prof?.display_name || targetRow.email.split('@')[0],
+          username: prof?.username || 'user',
+          email: targetRow.email,
+          reason: 'Your appeal was reviewed and not approved.',
+          ruleBroken: targetRow.rule_broken || 'community_guidelines',
+          strikeCount: Number(targetRow.strike_count || 0),
+          adminNote,
+        });
+        void sendModerationEmail(targetRow.email, tpl);
+      }
+    }
+
+    const updatedAppeal = db.prepare('SELECT * FROM appeals WHERE id = ?').get(appealId);
+    return res.json({ success: true, appeal: updatedAppeal });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to review appeal' });
+  }
+});
+
+// Admin Audit Logs
+app.get('/api/admin/audit-logs', requireAuth, requireModeratorOrAdmin, (req, res) => {
+  try {
+    const limit = Math.min(200, Math.max(10, Number(req.query.limit || 100)));
+    const rows = db
+      .prepare(`
+        SELECT a.*, ap.username as admin_username, tp.username as target_username
+        FROM audit_logs a
+        LEFT JOIN profiles ap ON ap.id = a.admin_id
+        LEFT JOIN profiles tp ON tp.id = a.target_user_id
+        ORDER BY a.created_at DESC
+        LIMIT ?
+      `)
+      .all(limit);
+    return res.json({ logs: rows });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to fetch audit logs' });
   }
 });
 
@@ -1584,7 +2527,8 @@ async function processTruecallerVerifiedProfile(
   rawPhone: string,
   displayName: string,
   avatarUrl?: string,
-  country?: string
+  country?: string,
+  deviceId?: string | null
 ) {
   try {
     const cleanDigits = rawPhone.replace(/\D/g, '');
@@ -1601,6 +2545,22 @@ async function processTruecallerVerifiedProfile(
         .slice(0, 15) || `user_${cleanDigits.slice(-4)}`;
 
     if (!userRow) {
+      const permanentBlock = findPermanentBanByIdentifier({
+        email: userEmail,
+        phone: formattedPhone,
+        deviceId: deviceId || null,
+      });
+      if (permanentBlock) {
+        const errMsg = `Account creation is permanently blocked because this ${permanentBlock.type} is associated with a permanently disabled account.`;
+        truecallerVerifications.set(requestId, {
+          requestId,
+          status: 'failed',
+          error: errMsg,
+          createdAt: Date.now(),
+        });
+        return { success: false, error: errMsg };
+      }
+
       const userId = generateUUID();
       const meta = {
         display_name: displayName || `User ${cleanDigits.slice(-4)}`,
@@ -1610,10 +2570,45 @@ async function processTruecallerVerifiedProfile(
         verified_by: 'truecaller',
       };
       db.prepare(`
-        INSERT INTO users (id, email, password_hash, email_confirmed, phone, user_metadata, created_at, updated_at)
-        VALUES (?, ?, NULL, 1, ?, ?, ?, ?)
-      `).run(userId, userEmail, formattedPhone, JSON.stringify(meta), nowIso, nowIso);
+        INSERT INTO users (id, email, password_hash, email_confirmed, phone, user_metadata, last_device_id, created_at, updated_at)
+        VALUES (?, ?, NULL, 1, ?, ?, ?, ?, ?)
+      `).run(userId, userEmail, formattedPhone, JSON.stringify(meta), deviceId || null, nowIso, nowIso);
       userRow = findUserById(userId)!;
+    } else {
+      userRow = (await resolveLiveUserRow(userRow.id, syncProfileCacheAfterModeration)) || userRow;
+      if (userRow.status === 'suspended' || userRow.status === 'disabled') {
+        revokeAllSessionsForUser(userRow.id);
+        const appealSession = createSessionForUser(userRow.id, 7, 'appeal_only', deviceId || null);
+        const errMsg =
+          userRow.status === 'disabled'
+            ? 'Your account has been permanently disabled.'
+            : 'Your account has been suspended.';
+        truecallerVerifications.set(requestId, {
+          requestId,
+          status: 'failed',
+          error: errMsg,
+          createdAt: Date.now(),
+        });
+        return {
+          success: false,
+          banned: true,
+          accountStatus: userRow.status,
+          banReason: userRow.ban_reason || 'Community Guidelines violation',
+          ruleBroken: userRow.rule_broken || 'community_guidelines',
+          ruleLabel: formatRuleLabel(userRow.rule_broken),
+          banUntil: userRow.ban_until || userRow.banned_until || null,
+          bannedUntil: userRow.ban_until || userRow.banned_until || null,
+          scheduledDeletionAt: userRow.scheduled_deletion_at || null,
+          strikeCount: Number(userRow.strike_count || 0),
+          appealSession,
+          user: formatAuthUser(userRow),
+          error: errMsg,
+        };
+      }
+      if (userRow.status === 'deactivated') {
+        db.prepare("UPDATE users SET status = 'active', updated_at = ? WHERE id = ?").run(nowIso, userRow.id);
+        userRow = findUserById(userRow.id)!;
+      }
     }
 
     const userProfile = ensureProfileRecord(userRow.id, {
@@ -1626,7 +2621,7 @@ async function processTruecallerVerifiedProfile(
       email: userEmail,
     })!;
 
-    const session = createSessionForUser(userRow.id);
+    const session = createSessionForUser(userRow.id, 30, 'full', deviceId || null);
     const authUser = formatAuthUser(userRow);
 
     truecallerVerifications.set(requestId, {
@@ -1778,9 +2773,10 @@ app.post('/api/auth/truecaller/verify-otp', async (req, res) => {
     pcPhoneOtpStore.delete(cleanDigits);
     const reqId = customRequestId || `tc_manual_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     const displayName = String(name || `User ${cleanDigits.slice(-4)}`).trim();
-    const result = await processTruecallerVerifiedProfile(reqId, cleanDigits, displayName, undefined, 'India');
+    const deviceId = getRequestDeviceId(req);
+    const result = await processTruecallerVerifiedProfile(reqId, cleanDigits, displayName, undefined, 'India', deviceId);
     if (!result.success) {
-      return res.status(500).json({ error: result.error || 'Failed to authenticate mobile number' });
+      return res.status((result as any).banned ? 403 : 500).json(result);
     }
     return res.json({ success: true, requestId: reqId, profile: result.profile, user: result.user, session: result.session });
   } catch (err: any) {
@@ -1798,9 +2794,10 @@ app.post('/api/auth/truecaller/verify-number', async (req, res) => {
     }
     const reqId = customRequestId || `tc_manual_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     const displayName = String(name || `User ${cleanDigits.slice(-4)}`).trim();
-    const result = await processTruecallerVerifiedProfile(reqId, cleanDigits, displayName, undefined, 'India');
+    const deviceId = getRequestDeviceId(req);
+    const result = await processTruecallerVerifiedProfile(reqId, cleanDigits, displayName, undefined, 'India', deviceId);
     if (!result.success) {
-      return res.status(500).json({ error: result.error || 'Failed to authenticate mobile number' });
+      return res.status((result as any).banned ? 403 : 500).json(result);
     }
     return res.json({ success: true, requestId: reqId, profile: result.profile, user: result.user, session: result.session });
   } catch (err: any) {
@@ -1896,7 +2893,9 @@ app.get('/api/presence/online', (_req, res) => {
       .prepare('SELECT id, is_online, last_seen FROM profiles WHERE is_online = 1 AND last_seen >= ?')
       .all(cutoff) as { id: string; is_online: number; last_seen: string }[];
     return res.json({
-      users: rows.map((r) => ({ id: r.id, is_online: true, last_seen: r.last_seen })),
+      users: rows
+        .filter((r) => !isTargetUserHidden(r.id))
+        .map((r) => ({ id: r.id, is_online: true, last_seen: r.last_seen })),
     });
   } catch {
     return res.json({ users: [] });
@@ -1921,6 +2920,12 @@ app.post('/api/relations/user-overview', async (req, res) => {
     }
 
     const viewerId = await getOptionalAuthUserId(req);
+    const viewerRow = viewerId ? findUserById(viewerId) : null;
+    const viewerIsMod = viewerRow?.role === 'admin' || viewerRow?.role === 'moderator';
+
+    if (targetId && viewerId !== targetId && !viewerIsMod && isTargetUserHidden(targetId)) {
+      return res.status(404).json({ error: 'User not found' });
+    }
     if (viewerId && targetId && viewerId !== targetId && isBlocked(viewerId, targetId)) {
       return res.status(404).json({ error: 'User not found' });
     }
@@ -1939,13 +2944,13 @@ app.post('/api/relations/user-overview', async (req, res) => {
       .prepare('SELECT blocker_id FROM blocked_users WHERE blocked_id = ?')
       .all(targetId) as { blocker_id: string }[];
 
-    // Exclude any blocked users from follower/following lists
+    // Exclude any blocked or suspended/disabled/deactivated users from follower/following lists
     const following = followingRows
       .map((r) => r.following_id)
-      .filter((id) => !isBlocked(targetId, id) && (!viewerId || !isBlocked(viewerId, id)));
+      .filter((id) => !isTargetUserHidden(id) && !isBlocked(targetId, id) && (!viewerId || !isBlocked(viewerId, id)));
     const followers = followerRows
       .map((r) => r.follower_id)
-      .filter((id) => !isBlocked(targetId, id) && (!viewerId || !isBlocked(viewerId, id)));
+      .filter((id) => !isTargetUserHidden(id) && !isBlocked(targetId, id) && (!viewerId || !isBlocked(viewerId, id)));
     const blockedByMe = blockedByMeRows.map((r) => r.blocked_id);
     const blockedByThem = blockedByThemRows.map((r) => r.blocker_id);
 
@@ -2017,6 +3022,7 @@ app.get('/api/relations/all-counts', (_req, res) => {
     const counts: Record<string, { followers: number; following: number }> = {};
     for (const r of rows) {
       if (isBlocked(r.follower_id, r.following_id)) continue;
+      if (isTargetUserHidden(r.follower_id) || isTargetUserHidden(r.following_id)) continue;
       if (!counts[r.follower_id]) counts[r.follower_id] = { followers: 0, following: 0 };
       if (!counts[r.following_id]) counts[r.following_id] = { followers: 0, following: 0 };
       counts[r.follower_id].following += 1;
@@ -2033,6 +3039,19 @@ app.post('/api/relations/status', (req, res) => {
     const { userId, targetUserId } = req.body || {};
     if (!userId || !targetUserId) {
       return res.status(400).json({ error: 'userId and targetUserId are required' });
+    }
+
+    if (isTargetUserHidden(targetUserId) || isTargetUserHidden(userId)) {
+      return res.json({
+        isFollowing: false,
+        isFollowedBy: false,
+        isMutual: false,
+        isBlockedByMe: false,
+        isBlockedByThem: false,
+        isBlocked: false,
+        followersCount: 0,
+        followingCount: 0,
+      });
     }
 
     const isBlockedByMe = Boolean(
@@ -2107,6 +3126,9 @@ app.post('/api/relations/follow', requireNotBlocked((req) => req.body?.targetUse
     }
     if (userId === targetUserId) {
       return res.status(400).json({ error: 'You cannot follow yourself' });
+    }
+    if (isTargetUserHidden(targetUserId) || isTargetUserHidden(userId)) {
+      return res.status(404).json({ error: 'User not found' });
     }
     if (isBlocked(userId, targetUserId)) {
       return res.status(403).json({ error: 'Cannot follow a blocked user' });
@@ -2319,13 +3341,18 @@ app.post('/api/notifications/list', (req, res) => {
       .all(userId) as any[];
 
     const notifications = rows
-      .filter((r) => !r.actor_id || !isBlocked(userId, r.actor_id))
+      .filter((r) => {
+        const isModerationNotif = String(r.type || '').startsWith('account_') || r.type === 'appeal_update';
+        if (isModerationNotif) return true;
+        if (r.actor_id && (isBlocked(userId, r.actor_id) || isTargetUserHidden(r.actor_id))) return false;
+        return true;
+      })
       .map((r) => {
         let actor = null;
         if (r.actor_json) {
           try { actor = JSON.parse(r.actor_json); } catch {}
         }
-        if (!actor && r.actor_id) actor = getProfileCachedOrDb(r.actor_id);
+        if (!actor && r.actor_id && r.actor_id !== 'system_moderation') actor = getProfileCachedOrDb(r.actor_id);
         return {
           id: r.id,
           user_id: r.user_id,
@@ -2435,6 +3462,10 @@ app.post('/api/calls/create', (req, res) => {
       return res.status(400).json({ error: 'Valid call object with caller_id and callee_id required' });
     }
 
+    if (isTargetUserHidden(call.caller_id) || isTargetUserHidden(call.callee_id)) {
+      return res.status(403).json({ error: 'Account unavailable for calls' });
+    }
+
     if (isBlocked(call.caller_id, call.callee_id)) {
       return res.status(403).json({ error: 'Cannot call blocked user' });
     }
@@ -2503,7 +3534,7 @@ app.post('/api/calls/incoming', (req, res) => {
       .all(userId, ninetySecondsAgo) as any[];
 
     const pendingCalls = rows
-      .filter((r) => !isBlocked(userId, r.caller_id))
+      .filter((r) => !isBlocked(userId, r.caller_id) && !isTargetUserHidden(r.caller_id))
       .filter((r) => !(deviceId && r.caller_device_id && r.caller_device_id === deviceId))
       .map(formatCallRow);
 
@@ -2808,6 +3839,10 @@ app.post('/api/conversations/create-or-get', (req, res) => {
       return res.status(400).json({ error: 'userId and targetUserId are required' });
     }
 
+    if (isTargetUserHidden(userId) || isTargetUserHidden(targetUserId)) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
     if (isBlocked(userId, targetUserId)) {
       return res.status(403).json({ error: 'Cannot start conversation with blocked user' });
     }
@@ -2874,7 +3909,7 @@ app.post('/api/conversations/list', (req, res) => {
       if (!convObj) continue;
 
       const otherId = convObj.other_member?.id;
-      if (otherId && otherId !== userId && isBlocked(userId, otherId)) continue;
+      if (otherId && otherId !== userId && (isBlocked(userId, otherId) || isTargetUserHidden(otherId))) continue;
 
       const mapKey = otherId || userId;
       const existing = directMap.get(mapKey);
@@ -2928,8 +3963,9 @@ app.post('/api/users/search', async (req, res) => {
       }
     }
 
-    // Two-way block filtering: neither blocker nor blocked user sees the other in search results
+    // Exclude suspended/disabled/deactivated accounts AND blocked accounts from search & suggestions
     const visibleUsers = rows
+      .filter((r) => !isTargetUserHidden(r.id))
       .filter((r) => !viewerId || !isBlocked(viewerId, r.id))
       .map(formatProfile)
       .filter(Boolean);
@@ -2946,6 +3982,12 @@ app.get('/api/users/profile/:userId', async (req, res) => {
     if (!userId) return res.status(400).json({ error: 'userId is required' });
 
     const viewerId = (await getOptionalAuthUserId(req)) || String(req.query.viewerId || '');
+    const viewerRow = viewerId ? findUserById(viewerId) : null;
+    const viewerIsMod = viewerRow?.role === 'admin' || viewerRow?.role === 'moderator';
+
+    if (viewerId !== userId && !viewerIsMod && isTargetUserHidden(userId)) {
+      return res.status(404).json({ error: 'User not found' });
+    }
     if (viewerId && viewerId !== userId && isBlocked(viewerId, userId)) {
       return res.status(404).json({ error: 'User not found' });
     }
@@ -2990,6 +4032,10 @@ app.post('/api/messages/react', (req, res) => {
       .prepare('SELECT conversation_id, sender_id, reactions_json FROM messages WHERE id = ?')
       .get(messageId) as any;
     if (!row) return res.json({ success: true });
+
+    if (isTargetUserHidden(userId) || (row.sender_id && isTargetUserHidden(row.sender_id))) {
+      return res.status(403).json({ error: 'Interaction paused due to account status' });
+    }
 
     if (row.sender_id && isBlocked(userId, row.sender_id)) {
       return res.status(403).json({ error: 'Cannot interact with blocked user' });
@@ -3037,6 +4083,10 @@ app.post('/api/messages/send', (req, res) => {
     const senderId = message.sender_id;
     const nowIso = message.created_at || new Date().toISOString();
 
+    if (isTargetUserHidden(senderId)) {
+      return res.status(403).json({ error: 'Your account cannot send messages while suspended or disabled' });
+    }
+
     db.prepare('DELETE FROM deleted_conversations WHERE conversation_id = ?').run(convId);
 
     const existingConv = buildConversationObject(convId, senderId);
@@ -3047,6 +4097,9 @@ app.post('/api/messages/send', (req, res) => {
     }
 
     if (targetRecipient && targetRecipient !== senderId) {
+      if (isTargetUserHidden(targetRecipient)) {
+        return res.status(403).json({ error: 'Direct messages to this account are paused' });
+      }
       if (isBlocked(senderId, targetRecipient)) {
         return res.status(403).json({ error: 'Cannot message blocked user' });
       }
@@ -3719,6 +4772,8 @@ async function startServer() {
       }
     });
   }
+
+  startModerationScheduler(syncProfileCacheAfterModeration);
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`LiveConnect server listening on http://0.0.0.0:${PORT}`);
