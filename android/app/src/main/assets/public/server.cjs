@@ -769,6 +769,91 @@ function extractBearerToken(req) {
   const authHeader = req.headers.authorization || "";
   return authHeader.replace(/^Bearer\s+/i, "").trim();
 }
+var cachedFirebaseApiKey;
+function getFirebaseWebApiKey() {
+  if (cachedFirebaseApiKey !== void 0) return cachedFirebaseApiKey;
+  try {
+    const cfgPath = import_path3.default.join(process.cwd(), "firebase-applet-config.json");
+    if (import_fs3.default.existsSync(cfgPath)) {
+      const parsed = JSON.parse(import_fs3.default.readFileSync(cfgPath, "utf-8"));
+      cachedFirebaseApiKey = parsed?.apiKey || null;
+      return cachedFirebaseApiKey;
+    }
+  } catch {
+  }
+  cachedFirebaseApiKey = null;
+  return null;
+}
+var verifiedFirebaseTokenCache = /* @__PURE__ */ new Map();
+async function verifyAuthToken(token) {
+  if (!token) return null;
+  const sessionInfo = getUserBySessionToken(token);
+  if (sessionInfo?.userRow?.id) {
+    return sessionInfo.userRow.id;
+  }
+  const cached = verifiedFirebaseTokenCache.get(token);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.uid;
+  }
+  const apiKey = getFirebaseWebApiKey();
+  if (apiKey && token.split(".").length === 3) {
+    try {
+      const resp = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(apiKey)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ idToken: token })
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        const uid = data?.users?.[0]?.localId;
+        if (uid) {
+          verifiedFirebaseTokenCache.set(token, { uid, expiresAt: Date.now() + 6e4 });
+          return uid;
+        }
+      }
+    } catch {
+    }
+  }
+  return null;
+}
+async function getOptionalAuthUserId(req) {
+  const token = extractBearerToken(req);
+  if (!token) return null;
+  return verifyAuthToken(token);
+}
+async function requireAuth(req, res, next) {
+  const token = extractBearerToken(req);
+  if (!token) {
+    return res.status(401).json({ error: "Authentication required" });
+  }
+  const uid = await verifyAuthToken(token);
+  if (!uid) {
+    return res.status(401).json({ error: "Invalid or expired authentication token" });
+  }
+  req.authUserId = uid;
+  return next();
+}
+var blockRateLimitBuckets = /* @__PURE__ */ new Map();
+var BLOCK_RATE_LIMIT_MAX = 12;
+var BLOCK_RATE_LIMIT_WINDOW_MS = 6e4;
+function blockRateLimiter(req, res, next) {
+  const key = String(req.authUserId || req.ip || "anonymous");
+  const now = Date.now();
+  const windowStart = now - BLOCK_RATE_LIMIT_WINDOW_MS;
+  const timestamps = (blockRateLimitBuckets.get(key) || []).filter((ts) => ts > windowStart);
+  if (timestamps.length >= BLOCK_RATE_LIMIT_MAX) {
+    const oldest = timestamps[0] || now;
+    const retryAfterSec = Math.max(1, Math.ceil((oldest + BLOCK_RATE_LIMIT_WINDOW_MS - now) / 1e3));
+    res.setHeader("Retry-After", String(retryAfterSec));
+    return res.status(429).json({
+      error: "Too many block/unblock requests. Please wait a moment and try again.",
+      retryAfterSeconds: retryAfterSec
+    });
+  }
+  timestamps.push(now);
+  blockRateLimitBuckets.set(key, timestamps);
+  return next();
+}
 function getDeterministicDirectConvId(userA, userB) {
   const sorted = [userA || "", userB || ""].sort().join(":");
   let h1 = 2166136261, h2 = 2166136261, h3 = 2166136261, h4 = 2166136261;
@@ -850,11 +935,21 @@ function resolveUserId(idOrUsername) {
   return idOrUsername;
 }
 function isBlocked(userA, userB) {
-  if (!userA || !userB) return false;
+  if (!userA || !userB || userA === userB) return false;
   const row = db.prepare(
     "SELECT 1 FROM blocked_users WHERE (blocker_id = ? AND blocked_id = ?) OR (blocker_id = ? AND blocked_id = ?) LIMIT 1"
   ).get(userA, userB, userB, userA);
   return Boolean(row);
+}
+function requireNotBlocked(getTargetUserId) {
+  return (req, res, next) => {
+    const actorId = req.authUserId || req.body?.userId || req.body?.sender_id || req.body?.caller_id;
+    const targetId = getTargetUserId(req);
+    if (actorId && targetId && isBlocked(String(actorId), String(targetId))) {
+      return res.status(403).json({ error: "Action unavailable because a user block exists" });
+    }
+    return next();
+  };
 }
 function isFollowing(followerId, followingId) {
   if (!followerId || !followingId) return false;
@@ -944,15 +1039,8 @@ function buildConversationObject(convId, requestingUserId) {
       membersMeta[m.user_id] = prof;
     }
   }
-  let removedMembers = {};
-  if (convRow.removed_members_json) {
-    try {
-      removedMembers = JSON.parse(convRow.removed_members_json);
-    } catch {
-      removedMembers = {};
-    }
-  }
-  const isGroup = convRow.type === "group" || Boolean(convRow.name) || Boolean(convRow.owner_id) || memberIds.length > 2;
+  const isGroup = convRow.type === "group" || Boolean(convRow.name) || memberIds.length > 2;
+  if (isGroup) return null;
   const msgRow = db.prepare(
     `SELECT m.* FROM messages m
        LEFT JOIN deleted_messages dm ON m.id = dm.message_id
@@ -973,7 +1061,7 @@ function buildConversationObject(convId, requestingUserId) {
   }
   const effectiveUpdatedAt = lastMessage?.created_at ? new Date(lastMessage.created_at).getTime() > new Date(convRow.updated_at || 0).getTime() ? lastMessage.created_at : convRow.updated_at : convRow.updated_at;
   let otherProfile = void 0;
-  if (!isGroup && requestingUserId) {
+  if (requestingUserId) {
     const otherId = memberIds.find((id) => id !== requestingUserId) || requestingUserId;
     otherProfile = membersMeta[otherId] || getProfileCachedOrDb(otherId) || {
       id: otherId,
@@ -987,21 +1075,12 @@ function buildConversationObject(convId, requestingUserId) {
       updated_at: (/* @__PURE__ */ new Date()).toISOString()
     };
   }
-  const isRemoved = requestingUserId ? Boolean(removedMembers[requestingUserId]) : false;
   return {
     id: convRow.id,
-    type: isGroup ? "group" : "direct",
-    name: convRow.name || void 0,
-    description: convRow.description || void 0,
-    avatar_url: convRow.avatar_url || void 0,
-    owner_id: convRow.owner_id || void 0,
+    type: "direct",
     pinned_message_id: convRow.pinned_message_id || null,
     member_ids: memberIds,
     members_meta: membersMeta,
-    member_roles: memberRoles,
-    removed_members: removedMembers,
-    is_removed: isRemoved,
-    removal_info: isRemoved && requestingUserId ? removedMembers[requestingUserId] : null,
     created_at: convRow.created_at,
     updated_at: effectiveUpdatedAt,
     other_member: otherProfile,
@@ -2071,7 +2150,7 @@ app.get("/api/presence/online", (_req, res) => {
     return res.json({ users: [] });
   }
 });
-app.post("/api/relations/user-overview", (req, res) => {
+app.post("/api/relations/user-overview", async (req, res) => {
   try {
     const { userId, username } = req.body || {};
     if (!userId && !username) {
@@ -2082,12 +2161,16 @@ app.post("/api/relations/user-overview", (req, res) => {
       const p = getProfileByUsername(username);
       if (p) targetId = p.id;
     }
+    const viewerId = await getOptionalAuthUserId(req);
+    if (viewerId && targetId && viewerId !== targetId && isBlocked(viewerId, targetId)) {
+      return res.status(404).json({ error: "User not found" });
+    }
     const followingRows = db.prepare("SELECT following_id FROM follows WHERE follower_id = ?").all(targetId);
     const followerRows = db.prepare("SELECT follower_id FROM follows WHERE following_id = ?").all(targetId);
     const blockedByMeRows = db.prepare("SELECT blocked_id FROM blocked_users WHERE blocker_id = ?").all(targetId);
     const blockedByThemRows = db.prepare("SELECT blocker_id FROM blocked_users WHERE blocked_id = ?").all(targetId);
-    const following = followingRows.map((r) => r.following_id);
-    const followers = followerRows.map((r) => r.follower_id);
+    const following = followingRows.map((r) => r.following_id).filter((id) => !isBlocked(targetId, id) && (!viewerId || !isBlocked(viewerId, id)));
+    const followers = followerRows.map((r) => r.follower_id).filter((id) => !isBlocked(targetId, id) && (!viewerId || !isBlocked(viewerId, id)));
     const blockedByMe = blockedByMeRows.map((r) => r.blocked_id);
     const blockedByThem = blockedByThemRows.map((r) => r.blocker_id);
     const buildMini = (id) => getProfileCachedOrDb(id) || {
@@ -2112,25 +2195,33 @@ app.post("/api/relations/user-overview", (req, res) => {
     return res.status(500).json({ error: "Failed to retrieve user overview" });
   }
 });
-app.post("/api/relations/blocked-profiles", (req, res) => {
+function handleGetBlockedList(req, res) {
   try {
-    const { userId, ids } = req.body || {};
-    let targetIds = Array.isArray(ids) ? ids : [];
-    if (userId && targetIds.length === 0) {
-      const rows = db.prepare("SELECT blocked_id FROM blocked_users WHERE blocker_id = ?").all(userId);
-      targetIds = rows.map((r) => r.blocked_id);
-    }
-    const profiles = targetIds.map((id) => getProfileCachedOrDb(id)).filter(Boolean);
-    return res.json({ blockedUsers: profiles });
+    const authUserId = req.authUserId;
+    const requestedIds = Array.isArray(req.body?.ids) ? req.body.ids : null;
+    const rows = db.prepare("SELECT blocked_id, created_at FROM blocked_users WHERE blocker_id = ? ORDER BY created_at DESC").all(authUserId);
+    const blockedIdsSet = new Set(rows.map((r) => r.blocked_id));
+    const filteredRows = requestedIds && requestedIds.length > 0 ? rows.filter((r) => requestedIds.includes(r.blocked_id)) : rows;
+    const blockedUsers = filteredRows.map((r) => {
+      const prof = getProfileCachedOrDb(r.blocked_id);
+      return prof ? { ...prof, blocked_at: r.created_at } : null;
+    }).filter(Boolean);
+    return res.json({
+      blockedUsers,
+      blockedIds: Array.from(blockedIdsSet)
+    });
   } catch {
-    return res.status(500).json({ error: "Failed to fetch blocked profiles" });
+    return res.status(500).json({ error: "Failed to fetch blocked users" });
   }
-});
+}
+app.get("/api/blocks", requireAuth, handleGetBlockedList);
+app.post("/api/relations/blocked-profiles", requireAuth, handleGetBlockedList);
 app.get("/api/relations/all-counts", (_req, res) => {
   try {
     const rows = db.prepare("SELECT follower_id, following_id FROM follows").all();
     const counts = {};
     for (const r of rows) {
+      if (isBlocked(r.follower_id, r.following_id)) continue;
       if (!counts[r.follower_id]) counts[r.follower_id] = { followers: 0, following: 0 };
       if (!counts[r.following_id]) counts[r.following_id] = { followers: 0, following: 0 };
       counts[r.follower_id].following += 1;
@@ -2147,23 +2238,36 @@ app.post("/api/relations/status", (req, res) => {
     if (!userId || !targetUserId) {
       return res.status(400).json({ error: "userId and targetUserId are required" });
     }
-    const isFollowingThem = isFollowing(userId, targetUserId);
-    const isFollowedByThem = isFollowing(targetUserId, userId);
-    const isMutual = Boolean(isFollowingThem && isFollowedByThem);
     const isBlockedByMe = Boolean(
       db.prepare("SELECT 1 FROM blocked_users WHERE blocker_id = ? AND blocked_id = ?").get(userId, targetUserId)
     );
     const isBlockedByThem = Boolean(
       db.prepare("SELECT 1 FROM blocked_users WHERE blocker_id = ? AND blocked_id = ?").get(targetUserId, userId)
     );
+    const blocked = isBlockedByMe || isBlockedByThem;
+    if (blocked) {
+      return res.json({
+        isFollowing: false,
+        isFollowedBy: false,
+        isMutual: false,
+        isBlockedByMe,
+        isBlockedByThem,
+        isBlocked: true,
+        followersCount: 0,
+        followingCount: 0
+      });
+    }
+    const isFollowingThem = isFollowing(userId, targetUserId);
+    const isFollowedByThem = isFollowing(targetUserId, userId);
+    const isMutual = Boolean(isFollowingThem && isFollowedByThem);
     const counts = getFollowCounts(targetUserId);
     return res.json({
       isFollowing: isFollowingThem,
       isFollowedBy: isFollowedByThem,
       isMutual,
-      isBlockedByMe,
-      isBlockedByThem,
-      isBlocked: isBlockedByMe || isBlockedByThem,
+      isBlockedByMe: false,
+      isBlockedByThem: false,
+      isBlocked: false,
       followersCount: counts.followersCount,
       followingCount: counts.followingCount
     });
@@ -2180,12 +2284,12 @@ app.post("/api/relations/sync", (req, res) => {
     );
     if (userId && Array.isArray(following)) {
       for (const id of following) {
-        if (id && id !== userId) stmt.run(userId, id, nowIso);
+        if (id && id !== userId && !isBlocked(userId, id)) stmt.run(userId, id, nowIso);
       }
     }
     if (userId && Array.isArray(followers)) {
       for (const id of followers) {
-        if (id && id !== userId) stmt.run(id, userId, nowIso);
+        if (id && id !== userId && !isBlocked(userId, id)) stmt.run(id, userId, nowIso);
       }
     }
     return res.json({ success: true });
@@ -2193,7 +2297,7 @@ app.post("/api/relations/sync", (req, res) => {
     return res.status(500).json({ error: "Failed to sync relations" });
   }
 });
-app.post("/api/relations/follow", (req, res) => {
+app.post("/api/relations/follow", requireNotBlocked((req) => req.body?.targetUserId), (req, res) => {
   try {
     const { userId, targetUserId, userMeta, targetMeta } = req.body || {};
     if (!userId || !targetUserId) {
@@ -2282,34 +2386,34 @@ app.post("/api/relations/unfollow", (req, res) => {
     return res.status(500).json({ error: "Failed to unfollow" });
   }
 });
-app.post("/api/relations/block", (req, res) => {
+function handleBlockUser(req, res) {
   try {
-    const { userId, targetUserId, targetEmail, targetUsername, targetDisplayName, reason, sendEmail } = req.body || {};
-    if (!userId || !targetUserId) {
-      return res.status(400).json({ error: "userId and targetUserId are required" });
+    const authUserId = req.authUserId;
+    const requestedUserId = req.body?.userId ? String(req.body.userId) : authUserId;
+    if (requestedUserId !== authUserId) {
+      return res.status(403).json({ error: "Cannot block users on behalf of another account" });
     }
-    if (userId === targetUserId) {
+    const targetUserId = String(req.body?.targetUserId || req.body?.blockedId || "").trim();
+    if (!targetUserId) {
+      return res.status(400).json({ error: "targetUserId is required" });
+    }
+    if (authUserId === targetUserId) {
       return res.status(400).json({ error: "You cannot block yourself" });
     }
-    db.prepare(
-      "INSERT OR IGNORE INTO blocked_users (blocker_id, blocked_id, created_at) VALUES (?, ?, ?)"
-    ).run(userId, targetUserId, (/* @__PURE__ */ new Date()).toISOString());
-    db.prepare(
-      "DELETE FROM follows WHERE (follower_id = ? AND following_id = ?) OR (follower_id = ? AND following_id = ?)"
-    ).run(userId, targetUserId, targetUserId, userId);
-    if (sendEmail || targetEmail) {
-      const targetProf = getProfileById(targetUserId);
-      const emailToSend = targetEmail || targetProf?.email;
-      if (emailToSend) {
-        sendBanNotificationEmail(
-          emailToSend,
-          targetUsername || targetProf?.username || "user",
-          targetDisplayName || targetProf?.display_name || "User",
-          reason || "Account Restriction / Block Notice"
-        );
-      }
+    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+    db.exec("BEGIN");
+    try {
+      db.prepare(
+        "INSERT OR IGNORE INTO blocked_users (blocker_id, blocked_id, created_at) VALUES (?, ?, ?)"
+      ).run(authUserId, targetUserId, nowIso);
+      db.prepare(
+        "DELETE FROM follows WHERE (follower_id = ? AND following_id = ?) OR (follower_id = ? AND following_id = ?)"
+      ).run(authUserId, targetUserId, targetUserId, authUserId);
+      db.exec("COMMIT");
+    } catch (txErr) {
+      db.exec("ROLLBACK");
+      throw txErr;
     }
-    const counts = getFollowCounts(targetUserId);
     return res.json({
       success: true,
       isBlockedByMe: true,
@@ -2317,25 +2421,30 @@ app.post("/api/relations/block", (req, res) => {
       isFollowing: false,
       isFollowedBy: false,
       isMutual: false,
-      followersCount: counts.followersCount,
-      followingCount: counts.followingCount
+      followersCount: 0,
+      followingCount: 0
     });
   } catch {
     return res.status(500).json({ error: "Failed to block user" });
   }
-});
-app.post("/api/relations/unblock", (req, res) => {
+}
+function handleUnblockUser(req, res) {
   try {
-    const { userId, targetUserId } = req.body || {};
-    if (!userId || !targetUserId) {
-      return res.status(400).json({ error: "userId and targetUserId are required" });
+    const authUserId = req.authUserId;
+    const requestedUserId = req.body?.userId ? String(req.body.userId) : authUserId;
+    if (requestedUserId !== authUserId) {
+      return res.status(403).json({ error: "Cannot unblock users on behalf of another account" });
     }
-    db.prepare("DELETE FROM blocked_users WHERE blocker_id = ? AND blocked_id = ?").run(userId, targetUserId);
+    const targetUserId = String(req.params?.targetUserId || req.body?.targetUserId || req.body?.blockedId || "").trim();
+    if (!targetUserId) {
+      return res.status(400).json({ error: "targetUserId is required" });
+    }
+    db.prepare("DELETE FROM blocked_users WHERE blocker_id = ? AND blocked_id = ?").run(authUserId, targetUserId);
     const counts = getFollowCounts(targetUserId);
     return res.json({
       success: true,
       isBlockedByMe: false,
-      isBlocked: false,
+      isBlocked: isBlocked(authUserId, targetUserId),
       isFollowing: false,
       isFollowedBy: false,
       isMutual: false,
@@ -2345,7 +2454,11 @@ app.post("/api/relations/unblock", (req, res) => {
   } catch {
     return res.status(500).json({ error: "Failed to unblock user" });
   }
-});
+}
+app.post("/api/blocks", requireAuth, blockRateLimiter, handleBlockUser);
+app.delete("/api/blocks/:targetUserId", requireAuth, blockRateLimiter, handleUnblockUser);
+app.post("/api/relations/block", requireAuth, blockRateLimiter, handleBlockUser);
+app.post("/api/relations/unblock", requireAuth, blockRateLimiter, handleUnblockUser);
 app.post("/api/relations/check-mutual", (req, res) => {
   try {
     const { userA, userB } = req.body || {};
@@ -2358,8 +2471,8 @@ app.post("/api/relations/check-mutual", (req, res) => {
       isMutual: mutual,
       mutual,
       blocked,
-      userAFollowsUserB: isFollowing(userA, userB),
-      userBFollowsUserA: isFollowing(userB, userA)
+      userAFollowsUserB: !blocked && isFollowing(userA, userB),
+      userBFollowsUserA: !blocked && isFollowing(userB, userA)
     });
   } catch {
     return res.status(500).json({ error: "Failed to check mutual status" });
@@ -2370,7 +2483,7 @@ app.post("/api/notifications/list", (req, res) => {
     const { userId } = req.body || {};
     if (!userId) return res.status(400).json({ error: "userId is required" });
     const rows = db.prepare("SELECT * FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 100").all(userId);
-    const notifications = rows.map((r) => {
+    const notifications = rows.filter((r) => !r.actor_id || !isBlocked(userId, r.actor_id)).map((r) => {
       let actor = null;
       if (r.actor_json) {
         try {
@@ -2437,6 +2550,9 @@ app.post("/api/notifications/create", (req, res) => {
     const { userId, actorId, type, title, message, referenceId, actorMeta } = req.body || {};
     if (!userId || !actorId || !type) {
       return res.status(400).json({ error: "userId, actorId, and type are required" });
+    }
+    if (isBlocked(userId, actorId)) {
+      return res.status(403).json({ error: "Cannot notify a blocked user" });
     }
     const newNotif = addNotification(userId, actorId, type, title, message, referenceId, actorMeta);
     return res.json({ success: true, notification: newNotif });
@@ -2528,7 +2644,7 @@ app.post("/api/calls/incoming", (req, res) => {
          WHERE callee_id = ? AND status IN ('calling', 'ringing') AND created_at >= ?
          ORDER BY created_at DESC LIMIT 5`
     ).all(userId, ninetySecondsAgo);
-    const pendingCalls = rows.filter((r) => !(deviceId && r.caller_device_id && r.caller_device_id === deviceId)).map(formatCallRow);
+    const pendingCalls = rows.filter((r) => !isBlocked(userId, r.caller_id)).filter((r) => !(deviceId && r.caller_device_id && r.caller_device_id === deviceId)).map(formatCallRow);
     return res.json({ calls: pendingCalls });
   } catch {
     return res.status(500).json({ error: "Failed to check incoming calls" });
@@ -2817,58 +2933,46 @@ app.post("/api/conversations/list", (req, res) => {
     const { userId } = req.body || {};
     if (!userId) return res.status(400).json({ error: "userId is required" });
     const memberConvRows = db.prepare("SELECT DISTINCT conversation_id FROM conversation_members WHERE user_id = ?").all(userId);
-    const removedGroupRows = db.prepare(`SELECT id, removed_members_json FROM conversations WHERE type = 'group' AND removed_members_json IS NOT NULL`).all();
     const candidateConvIds = new Set(memberConvRows.map((r) => r.conversation_id));
-    for (const r of removedGroupRows) {
-      try {
-        const parsed = JSON.parse(r.removed_members_json);
-        if (parsed && parsed[userId]) {
-          candidateConvIds.add(r.id);
-        }
-      } catch {
-      }
-    }
     const directMap = /* @__PURE__ */ new Map();
-    const groupList = [];
     for (const convId of candidateConvIds) {
       const deletedRow = db.prepare("SELECT 1 FROM deleted_conversations WHERE conversation_id = ? AND user_id IN (?, ?) LIMIT 1").get(convId, userId, "*");
       if (deletedRow) continue;
       const convObj = buildConversationObject(convId, userId);
       if (!convObj) continue;
-      if (convObj.type === "group") {
-        groupList.push(convObj);
-      } else {
-        const otherId = convObj.other_member?.id || userId;
-        const existing = directMap.get(otherId);
-        if (!existing || new Date(convObj.updated_at).getTime() >= new Date(existing.updated_at).getTime()) {
-          directMap.set(otherId, convObj);
-        }
+      const otherId = convObj.other_member?.id;
+      if (otherId && otherId !== userId && isBlocked(userId, otherId)) continue;
+      const mapKey = otherId || userId;
+      const existing = directMap.get(mapKey);
+      if (!existing || new Date(convObj.updated_at).getTime() >= new Date(existing.updated_at).getTime()) {
+        directMap.set(mapKey, convObj);
       }
     }
-    const result = [...Array.from(directMap.values()), ...groupList];
+    const result = Array.from(directMap.values());
     result.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
     return res.json({ conversations: result });
   } catch {
     return res.status(500).json({ error: "Failed to list conversations" });
   }
 });
-app.post("/api/users/search", (req, res) => {
+app.post("/api/users/search", async (req, res) => {
   try {
     const { query = "", userId } = req.body || {};
+    const viewerId = await getOptionalAuthUserId(req) || (userId ? String(userId) : "");
     const cleanQuery = String(query || "").trim().toLowerCase().replace(/^@/, "");
     let rows;
     if (!cleanQuery) {
       rows = db.prepare(
-        userId ? "SELECT * FROM profiles WHERE id != ? ORDER BY updated_at DESC LIMIT 50" : "SELECT * FROM profiles ORDER BY updated_at DESC LIMIT 50"
-      ).all(...userId ? [userId] : []);
+        viewerId ? "SELECT * FROM profiles WHERE id != ? ORDER BY updated_at DESC LIMIT 50" : "SELECT * FROM profiles ORDER BY updated_at DESC LIMIT 50"
+      ).all(...viewerId ? [viewerId] : []);
     } else {
       const likePattern = `%${cleanQuery}%`;
-      if (userId) {
+      if (viewerId) {
         rows = db.prepare(
           `SELECT * FROM profiles
              WHERE id != ? AND (LOWER(username) LIKE ? OR LOWER(display_name) LIKE ? OR LOWER(id) = ?)
              ORDER BY is_online DESC, updated_at DESC LIMIT 50`
-        ).all(userId, likePattern, likePattern, cleanQuery);
+        ).all(viewerId, likePattern, likePattern, cleanQuery);
       } else {
         rows = db.prepare(
           `SELECT * FROM profiles
@@ -2877,15 +2981,20 @@ app.post("/api/users/search", (req, res) => {
         ).all(likePattern, likePattern, cleanQuery);
       }
     }
-    return res.json({ users: rows.map(formatProfile).filter(Boolean) });
+    const visibleUsers = rows.filter((r) => !viewerId || !isBlocked(viewerId, r.id)).map(formatProfile).filter(Boolean);
+    return res.json({ users: visibleUsers });
   } catch {
     return res.status(500).json({ error: "Failed to search users" });
   }
 });
-app.get("/api/users/profile/:userId", (req, res) => {
+app.get("/api/users/profile/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
     if (!userId) return res.status(400).json({ error: "userId is required" });
+    const viewerId = await getOptionalAuthUserId(req) || String(req.query.viewerId || "");
+    if (viewerId && viewerId !== userId && isBlocked(viewerId, userId)) {
+      return res.status(404).json({ error: "User not found" });
+    }
     const profile = getProfileCachedOrDb(userId);
     if (!profile) {
       return res.status(404).json({ error: "User not found" });
@@ -2893,302 +3002,6 @@ app.get("/api/users/profile/:userId", (req, res) => {
     return res.json({ profile });
   } catch {
     return res.status(500).json({ error: "Failed to fetch user profile" });
-  }
-});
-app.post("/api/groups/create", (req, res) => {
-  try {
-    const { name, description, avatarUrl, memberIds, creatorId, creatorProfile } = req.body || {};
-    if (!name || !creatorId) {
-      return res.status(400).json({ error: "Group name and creatorId are required" });
-    }
-    const groupId = generateUUID();
-    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
-    if (creatorProfile) ensureProfileRecord(creatorId, creatorProfile);
-    const allMembers = Array.from(/* @__PURE__ */ new Set([creatorId, ...Array.isArray(memberIds) ? memberIds : []]));
-    db.prepare(`
-      INSERT INTO conversations (id, type, name, description, avatar_url, owner_id, removed_members_json, created_at, updated_at)
-      VALUES (?, 'group', ?, ?, ?, ?, '{}', ?, ?)
-    `).run(groupId, name.trim(), (description || "").trim(), avatarUrl || null, creatorId, nowIso, nowIso);
-    const memStmt = db.prepare(
-      "INSERT OR REPLACE INTO conversation_members (conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)"
-    );
-    for (const mId of allMembers) {
-      memStmt.run(groupId, mId, mId === creatorId ? "admin" : "member", nowIso);
-    }
-    const cProf = getProfileCachedOrDb(creatorId) || creatorProfile;
-    const creatorDisplayName = cProf?.display_name || cProf?.username || "Admin";
-    const creatorUsername = cProf?.username || "admin";
-    const otherMemberIds = allMembers.filter((id) => id !== creatorId);
-    let createSysMsgContent = `[SYSTEM:GROUP_CREATED:${creatorId}:${creatorDisplayName}:${creatorUsername}:${name}] ${creatorUsername} created this group`;
-    if (otherMemberIds.length > 0) {
-      const addedMembersList = otherMemberIds.map((mId) => {
-        const meta = getProfileCachedOrDb(mId);
-        const dName = (meta?.display_name || meta?.username || "Member").replace(/[:|;]/g, " ");
-        const uName = (meta?.username || "user").replace(/[:|;]/g, " ");
-        return `${mId}|${dName}|${uName}`;
-      });
-      createSysMsgContent = `[SYSTEM:MEMBERS_ADDED:${creatorId}:${creatorDisplayName}:${creatorUsername}:${addedMembersList.join(";")}] ${creatorUsername} added ${otherMemberIds.length} member(s)`;
-    }
-    const sysMsgId = generateUUID();
-    db.prepare(`
-      INSERT INTO messages (id, conversation_id, sender_id, content, is_read, created_at, updated_at)
-      VALUES (?, ?, ?, ?, 1, ?, ?)
-    `).run(sysMsgId, groupId, creatorId, createSysMsgContent, nowIso, nowIso);
-    const groupConv = buildConversationObject(groupId, creatorId);
-    return res.json({ success: true, conversationId: groupId, conversation: groupConv });
-  } catch (err) {
-    console.error("[Create Group Error]:", err);
-    return res.status(500).json({ error: "Failed to create group" });
-  }
-});
-app.post("/api/groups/details", (req, res) => {
-  try {
-    const { conversationId } = req.body || {};
-    if (!conversationId) return res.status(400).json({ error: "conversationId required" });
-    const group = buildConversationObject(conversationId);
-    if (!group || group.type !== "group") {
-      return res.status(404).json({ error: "Group not found" });
-    }
-    return res.json({ success: true, conversation: group });
-  } catch {
-    return res.status(500).json({ error: "Failed to fetch group details" });
-  }
-});
-app.post("/api/groups/update", (req, res) => {
-  try {
-    const { conversationId, userId, name, description, avatarUrl } = req.body || {};
-    if (!conversationId || !userId) {
-      return res.status(400).json({ error: "conversationId and userId required" });
-    }
-    const group = buildConversationObject(conversationId, userId);
-    if (!group || group.type !== "group") {
-      return res.status(404).json({ error: "Group not found" });
-    }
-    const role = group.member_roles?.[userId];
-    const isOwner = group.owner_id === userId;
-    if (role !== "admin" && !isOwner) {
-      return res.status(403).json({ error: "Only admins can update group details" });
-    }
-    const nextName = name ? name.trim() : group.name;
-    const nextDesc = description !== void 0 ? description.trim() : group.description;
-    const nextAvatar = avatarUrl !== void 0 ? avatarUrl : group.avatar_url;
-    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
-    db.prepare(
-      "UPDATE conversations SET name = ?, description = ?, avatar_url = ?, updated_at = ? WHERE id = ?"
-    ).run(nextName, nextDesc, nextAvatar || null, nowIso, conversationId);
-    return res.json({ success: true, conversation: buildConversationObject(conversationId, userId) });
-  } catch {
-    return res.status(500).json({ error: "Failed to update group" });
-  }
-});
-app.post("/api/groups/members/add", (req, res) => {
-  try {
-    const { conversationId, userId, memberIds, profilesMap } = req.body || {};
-    if (!conversationId || !userId || !Array.isArray(memberIds)) {
-      return res.status(400).json({ error: "conversationId, userId, and memberIds required" });
-    }
-    const group = buildConversationObject(conversationId, userId);
-    if (!group || group.type !== "group") {
-      return res.status(404).json({ error: "Group not found" });
-    }
-    const role = group.member_roles?.[userId];
-    const isOwner = group.owner_id === userId;
-    if (role !== "admin" && !isOwner) {
-      return res.status(403).json({ error: "Only admins can add members" });
-    }
-    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
-    const newAdded = [];
-    const addedNamesList = [];
-    const removedMembers = { ...group.removed_members || {} };
-    const insertStmt = db.prepare(
-      "INSERT OR REPLACE INTO conversation_members (conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)"
-    );
-    for (const mId of memberIds) {
-      if (profilesMap?.[mId]) {
-        ensureProfileRecord(mId, profilesMap[mId]);
-      }
-      if (!group.member_ids?.includes(mId)) {
-        insertStmt.run(conversationId, mId, "member", nowIso);
-        delete removedMembers[mId];
-        db.prepare("DELETE FROM deleted_conversations WHERE conversation_id = ? AND user_id = ?").run(
-          conversationId,
-          mId
-        );
-        const meta = profilesMap?.[mId] || getProfileCachedOrDb(mId);
-        addedNamesList.push(meta?.display_name || meta?.username || "User");
-        newAdded.push(mId);
-      }
-    }
-    db.prepare("UPDATE conversations SET removed_members_json = ?, updated_at = ? WHERE id = ?").run(
-      JSON.stringify(removedMembers),
-      nowIso,
-      conversationId
-    );
-    if (newAdded.length > 0) {
-      const actorProfile = group.members_meta?.[userId] || getProfileCachedOrDb(userId);
-      const actorDisplayName = actorProfile?.display_name || actorProfile?.username || "Admin";
-      const actorUsername = actorProfile?.username || "admin";
-      const namesJoined = addedNamesList.length > 0 ? addedNamesList.join(", ") : `${newAdded.length} new member(s)`;
-      const addedMembersList = newAdded.map((mId) => {
-        const meta = profilesMap?.[mId] || getProfileCachedOrDb(mId);
-        const dName = (meta?.display_name || meta?.username || "Member").replace(/[:|;]/g, " ");
-        const uName = (meta?.username || "user").replace(/[:|;]/g, " ");
-        return `${mId}|${dName}|${uName}`;
-      });
-      const sysMsgContent = `[SYSTEM:MEMBERS_ADDED:${userId}:${actorDisplayName}:${actorUsername}:${addedMembersList.join(";")}] ${actorUsername} added ${namesJoined}`;
-      db.prepare(`
-        INSERT INTO messages (id, conversation_id, sender_id, content, is_read, created_at, updated_at)
-        VALUES (?, ?, ?, ?, 1, ?, ?)
-      `).run(generateUUID(), conversationId, userId, sysMsgContent, nowIso, nowIso);
-    }
-    return res.json({ success: true, conversation: buildConversationObject(conversationId, userId) });
-  } catch {
-    return res.status(500).json({ error: "Failed to add members" });
-  }
-});
-app.post("/api/groups/members/remove", (req, res) => {
-  try {
-    const { conversationId, actorId, memberId } = req.body || {};
-    if (!conversationId || !actorId || !memberId) {
-      return res.status(400).json({ error: "conversationId, actorId, and memberId required" });
-    }
-    const group = buildConversationObject(conversationId, actorId);
-    if (!group || group.type !== "group") {
-      return res.status(404).json({ error: "Group not found" });
-    }
-    const isSelfLeaving = actorId === memberId;
-    const actorRole = group.member_roles?.[actorId];
-    const isOwner = group.owner_id === actorId;
-    if (!isSelfLeaving && actorRole !== "admin" && !isOwner) {
-      return res.status(403).json({ error: "Only group admins can remove members" });
-    }
-    if (!isSelfLeaving && memberId === group.owner_id) {
-      return res.status(403).json({ error: "The group creator/owner cannot be removed from the group" });
-    }
-    const removedProfile = group.members_meta?.[memberId] || getProfileCachedOrDb(memberId);
-    const actorProfile = group.members_meta?.[actorId] || getProfileCachedOrDb(actorId);
-    const removedDisplayName = removedProfile?.display_name || removedProfile?.username || "Member";
-    const removedUsername = removedProfile?.username || "user";
-    const actorDisplayName = actorProfile?.display_name || actorProfile?.username || "Admin";
-    const actorUsername = actorProfile?.username || "admin";
-    db.prepare("DELETE FROM conversation_members WHERE conversation_id = ? AND user_id = ?").run(
-      conversationId,
-      memberId
-    );
-    const remainingIds = (group.member_ids || []).filter((id) => id !== memberId);
-    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
-    if (remainingIds.length === 0) {
-      db.prepare("DELETE FROM messages WHERE conversation_id = ?").run(conversationId);
-      db.prepare("DELETE FROM conversations WHERE id = ?").run(conversationId);
-      return res.json({ success: true, groupDeleted: true });
-    }
-    const removedMembers = { ...group.removed_members || {} };
-    if (!isSelfLeaving) {
-      removedMembers[memberId] = {
-        removed_at: nowIso,
-        removed_by: actorId,
-        admin_name: actorDisplayName,
-        admin_username: actorUsername,
-        member_name: removedDisplayName,
-        member_username: removedUsername
-      };
-    }
-    let nextOwnerId = group.owner_id;
-    if (memberId === group.owner_id) {
-      const remainingAdmins = Object.entries(group.member_roles || {}).filter(([id, r]) => r === "admin" && id !== memberId && remainingIds.includes(id)).map(([id]) => id);
-      nextOwnerId = remainingAdmins.length > 0 ? remainingAdmins[0] : remainingIds[0];
-      db.prepare("UPDATE conversation_members SET role = ? WHERE conversation_id = ? AND user_id = ?").run(
-        "admin",
-        conversationId,
-        nextOwnerId
-      );
-    }
-    db.prepare(
-      "UPDATE conversations SET owner_id = ?, removed_members_json = ?, updated_at = ? WHERE id = ?"
-    ).run(nextOwnerId || null, JSON.stringify(removedMembers), nowIso, conversationId);
-    const sysMsgContent = isSelfLeaving ? `[SYSTEM:MEMBER_LEFT:${memberId}:${removedDisplayName}:${removedUsername}] ${removedUsername} left the group` : `[SYSTEM:MEMBER_REMOVED:${actorId}:${actorDisplayName}:${actorUsername}:${memberId}:${removedDisplayName}:${removedUsername}] ${actorUsername} removed ${removedUsername}`;
-    db.prepare(`
-      INSERT INTO messages (id, conversation_id, sender_id, content, is_read, created_at, updated_at)
-      VALUES (?, ?, ?, ?, 1, ?, ?)
-    `).run(generateUUID(), conversationId, actorId, sysMsgContent, nowIso, nowIso);
-    return res.json({
-      success: true,
-      conversation: buildConversationObject(conversationId, actorId),
-      message: sysMsgContent
-    });
-  } catch {
-    return res.status(500).json({ error: "Failed to remove member" });
-  }
-});
-app.post("/api/groups/members/role", (req, res) => {
-  try {
-    const { conversationId, actorId, memberId, role } = req.body || {};
-    if (!conversationId || !actorId || !memberId || !["admin", "member"].includes(role)) {
-      return res.status(400).json({ error: "Valid arguments required" });
-    }
-    const group = buildConversationObject(conversationId, actorId);
-    if (!group || group.type !== "group") {
-      return res.status(404).json({ error: "Group not found" });
-    }
-    const actorRole = group.member_roles?.[actorId];
-    const isOwner = group.owner_id === actorId;
-    if (actorRole !== "admin" && !isOwner) {
-      return res.status(403).json({ error: "Only admins can manage roles" });
-    }
-    if (memberId === group.owner_id && role === "member" && actorId !== group.owner_id) {
-      return res.status(403).json({ error: "The group creator/owner cannot be demoted from admin" });
-    }
-    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
-    db.prepare("UPDATE conversation_members SET role = ? WHERE conversation_id = ? AND user_id = ?").run(
-      role,
-      conversationId,
-      memberId
-    );
-    db.prepare("UPDATE conversations SET updated_at = ? WHERE id = ?").run(nowIso, conversationId);
-    const targetProfile = group.members_meta?.[memberId] || getProfileCachedOrDb(memberId);
-    const actorProfile = group.members_meta?.[actorId] || getProfileCachedOrDb(actorId);
-    const targetDisplayName = targetProfile?.display_name || targetProfile?.username || "Member";
-    const targetUsername = targetProfile?.username || "user";
-    const actorDisplayName = actorProfile?.display_name || actorProfile?.username || "Admin";
-    const actorUsername = actorProfile?.username || "admin";
-    const sysMsgContent = role === "admin" ? `[SYSTEM:ROLE_CHANGED:admin:${actorId}:${actorDisplayName}:${actorUsername}:${memberId}:${targetDisplayName}:${targetUsername}] ${actorUsername} made ${targetUsername} a group admin` : `[SYSTEM:ROLE_CHANGED:member:${actorId}:${actorDisplayName}:${actorUsername}:${memberId}:${targetDisplayName}:${targetUsername}] ${actorUsername} dismissed ${targetUsername} from group admin`;
-    db.prepare(`
-      INSERT INTO messages (id, conversation_id, sender_id, content, is_read, created_at, updated_at)
-      VALUES (?, ?, ?, ?, 1, ?, ?)
-    `).run(generateUUID(), conversationId, actorId, sysMsgContent, nowIso, nowIso);
-    return res.json({
-      success: true,
-      conversation: buildConversationObject(conversationId, actorId),
-      message: sysMsgContent
-    });
-  } catch {
-    return res.status(500).json({ error: "Failed to change role" });
-  }
-});
-app.post("/api/groups/delete", (req, res) => {
-  try {
-    const { conversationId, actorId } = req.body || {};
-    if (!conversationId || !actorId) {
-      return res.status(400).json({ error: "conversationId and actorId required" });
-    }
-    const group = buildConversationObject(conversationId, actorId);
-    if (!group) return res.status(404).json({ error: "Group not found" });
-    const actorRole = group.member_roles?.[actorId];
-    const isOwner = group.owner_id === actorId;
-    if (actorRole !== "admin" && !isOwner) {
-      return res.status(403).json({ error: "Only group admins can delete the group" });
-    }
-    db.prepare("DELETE FROM messages WHERE conversation_id = ?").run(conversationId);
-    db.prepare("DELETE FROM conversation_members WHERE conversation_id = ?").run(conversationId);
-    db.prepare("DELETE FROM conversations WHERE id = ?").run(conversationId);
-    db.prepare("INSERT OR IGNORE INTO deleted_conversations (user_id, conversation_id, deleted_at) VALUES (?, ?, ?)").run(
-      "*",
-      conversationId,
-      (/* @__PURE__ */ new Date()).toISOString()
-    );
-    return res.json({ success: true });
-  } catch {
-    return res.status(500).json({ error: "Failed to delete group" });
   }
 });
 app.post("/api/messages/typing", (req, res) => {
@@ -3211,8 +3024,15 @@ app.post("/api/messages/react", (req, res) => {
     if (!messageId || !userId || !emoji) {
       return res.status(400).json({ error: "messageId, userId, and emoji required" });
     }
-    const row = db.prepare("SELECT reactions_json FROM messages WHERE id = ?").get(messageId);
+    const row = db.prepare("SELECT conversation_id, sender_id, reactions_json FROM messages WHERE id = ?").get(messageId);
     if (!row) return res.json({ success: true });
+    if (row.sender_id && isBlocked(userId, row.sender_id)) {
+      return res.status(403).json({ error: "Cannot interact with blocked user" });
+    }
+    const memberRows = db.prepare("SELECT user_id FROM conversation_members WHERE conversation_id = ?").all(row.conversation_id);
+    if (memberRows.some((m) => m.user_id !== userId && isBlocked(userId, m.user_id))) {
+      return res.status(403).json({ error: "Cannot interact with blocked user" });
+    }
     let reactions = {};
     if (row.reactions_json) {
       try {
@@ -3248,30 +3068,16 @@ app.post("/api/messages/send", (req, res) => {
     const nowIso = message.created_at || (/* @__PURE__ */ new Date()).toISOString();
     db.prepare("DELETE FROM deleted_conversations WHERE conversation_id = ?").run(convId);
     const existingConv = buildConversationObject(convId, senderId);
-    const isGroupChat = existingConv?.type === "group" || req.body.isGroup === true || req.body.conversationType === "group" || Boolean(req.body.groupName);
-    let targetRecipient = isGroupChat ? void 0 : recipientId || receiverId;
-    if (!isGroupChat && !targetRecipient && existingConv?.member_ids) {
+    let targetRecipient = recipientId || receiverId;
+    if (!targetRecipient && existingConv?.member_ids) {
       targetRecipient = existingConv.member_ids.find((id) => id !== senderId);
     }
-    if (isGroupChat) {
-      if (existingConv) {
-        if (existingConv.removed_members?.[senderId]) {
-          return res.status(403).json({
-            error: "You cannot send messages because you were removed from this group by an admin"
-          });
-        }
-        if (Array.isArray(existingConv.member_ids) && !existingConv.member_ids.includes(senderId)) {
-          return res.status(403).json({ error: "You are not a member of this group" });
-        }
+    if (targetRecipient && targetRecipient !== senderId) {
+      if (isBlocked(senderId, targetRecipient)) {
+        return res.status(403).json({ error: "Cannot message blocked user" });
       }
-    } else {
-      if (targetRecipient && targetRecipient !== senderId) {
-        if (isBlocked(senderId, targetRecipient)) {
-          return res.status(403).json({ error: "Cannot message blocked user" });
-        }
-        if (!isMutualFollow(senderId, targetRecipient)) {
-          return res.status(403).json({ error: "Mutual follow is required to send direct messages" });
-        }
+      if (!isMutualFollow(senderId, targetRecipient)) {
+        return res.status(403).json({ error: "Mutual follow is required to send direct messages" });
       }
     }
     const recProfile = recipientProfile || receiverProfile;
@@ -3280,11 +3086,11 @@ app.post("/api/messages/send", (req, res) => {
     if (!existingConv) {
       db.prepare(
         "INSERT OR IGNORE INTO conversations (id, type, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)"
-      ).run(convId, isGroupChat ? "group" : "direct", isGroupChat ? req.body.groupName || "Group Chat" : null, nowIso, nowIso);
+      ).run(convId, "direct", null, nowIso, nowIso);
       db.prepare(
         "INSERT OR IGNORE INTO conversation_members (conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)"
       ).run(convId, senderId, "member", nowIso);
-      if (!isGroupChat && targetRecipient && targetRecipient !== senderId) {
+      if (targetRecipient && targetRecipient !== senderId) {
         db.prepare(
           "INSERT OR IGNORE INTO conversation_members (conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)"
         ).run(convId, targetRecipient, "member", nowIso);
@@ -3330,14 +3136,7 @@ app.post("/api/messages/send", (req, res) => {
     else if (notifPreview.startsWith("[VOICE:")) notifPreview = "Sent a voice note";
     else if (notifPreview.startsWith("[VIDEO:")) notifPreview = "Sent a video";
     else if (notifPreview.startsWith("[STICKER:")) notifPreview = "Sent a sticker";
-    if (isGroupChat && existingConv?.member_ids) {
-      const groupName = existingConv.name || "Group";
-      for (const mId of existingConv.member_ids) {
-        if (mId !== senderId) {
-          addNotification(mId, senderId, "message", `${senderName} in ${groupName}`, notifPreview, convId, senderProf);
-        }
-      }
-    } else if (targetRecipient && targetRecipient !== senderId) {
+    if (targetRecipient && targetRecipient !== senderId) {
       addNotification(
         targetRecipient,
         senderId,
@@ -3361,17 +3160,21 @@ app.post("/api/messages/list", (req, res) => {
     if (!conversationId && (!Array.isArray(candidateIds) || candidateIds.length === 0)) {
       return res.status(400).json({ error: "conversationId required" });
     }
-    const targetConv = conversationId ? buildConversationObject(conversationId) : null;
-    const isTargetGroup = targetConv?.type === "group";
-    const allIds = isTargetGroup ? [conversationId] : Array.from(new Set([conversationId, ...Array.isArray(candidateIds) ? candidateIds : []].filter(Boolean)));
+    const allIds = Array.from(new Set([conversationId, ...Array.isArray(candidateIds) ? candidateIds : []].filter(Boolean)));
     const placeholders = allIds.map(() => "?").join(",");
+    if (userId) {
+      const memberRows = db.prepare(`SELECT user_id FROM conversation_members WHERE conversation_id IN (${placeholders})`).all(...allIds);
+      if (memberRows.some((m) => m.user_id !== userId && isBlocked(userId, m.user_id))) {
+        return res.json({ messages: [], typingUserIds: [] });
+      }
+    }
     const rows = db.prepare(
       `SELECT m.* FROM messages m
          LEFT JOIN deleted_messages dm ON m.id = dm.message_id
          WHERE m.conversation_id IN (${placeholders}) AND dm.message_id IS NULL
          ORDER BY m.created_at ASC LIMIT 250`
     ).all(...allIds);
-    const messages = rows.map(formatMessageRow).filter(Boolean);
+    const messages = rows.filter((r) => !userId || !isBlocked(userId, r.sender_id)).map(formatMessageRow).filter(Boolean);
     const now = Date.now();
     const typingUserIds = [];
     for (const cId of allIds) {
@@ -3489,22 +3292,6 @@ app.post("/api/conversations/delete", (req, res) => {
     }
     const { conversationId, userId } = body || {};
     if (!conversationId) return res.status(400).json({ error: "conversationId required" });
-    const convObj = buildConversationObject(conversationId, userId);
-    if (convObj && convObj.type === "group" && userId) {
-      db.prepare("INSERT OR IGNORE INTO deleted_conversations (user_id, conversation_id, deleted_at) VALUES (?, ?, ?)").run(
-        userId,
-        conversationId,
-        (/* @__PURE__ */ new Date()).toISOString()
-      );
-      db.prepare("DELETE FROM conversation_members WHERE conversation_id = ? AND user_id = ?").run(
-        conversationId,
-        userId
-      );
-      const remainingCount = db.prepare("SELECT COUNT(*) as cnt FROM conversation_members WHERE conversation_id = ?").get(conversationId);
-      if (remainingCount.cnt > 0) {
-        return res.json({ success: true, conversationId, deletedForUser: true });
-      }
-    }
     db.prepare("INSERT OR IGNORE INTO deleted_conversations (user_id, conversation_id, deleted_at) VALUES (?, ?, ?)").run(
       userId || "*",
       conversationId,

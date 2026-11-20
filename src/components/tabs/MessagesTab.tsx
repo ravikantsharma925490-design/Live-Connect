@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Search, MessageSquarePlus, Radio, Trash2, Users } from 'lucide-react';
+import { Search, MessageSquarePlus, Radio, Trash2 } from 'lucide-react';
 import { Conversation, Profile, CallType, UserRelationStatus } from '@/src/types';
 import { ConversationItem } from '../chat/ConversationItem';
 import { ChatWindow } from '../chat/ChatWindow';
@@ -13,8 +13,6 @@ interface MessagesTabProps {
   currentUser: Profile | null;
   onSelectConversation: (id: string | null) => void;
   onOpenSearch: () => void;
-  onOpenCreateGroup?: () => void;
-  onOpenGroupProfile?: (conversation: Conversation) => void;
   onOpenForwardModal?: (message: any) => void;
   onStartCall: (peer: Profile, type: CallType) => void;
   onOpenProfileView: (profile: Profile) => void;
@@ -33,8 +31,6 @@ export const MessagesTab: React.FC<MessagesTabProps> = ({
   currentUser,
   onSelectConversation,
   onOpenSearch,
-  onOpenCreateGroup,
-  onOpenGroupProfile,
   onOpenForwardModal,
   onStartCall,
   onOpenProfileView,
@@ -139,16 +135,6 @@ export const MessagesTab: React.FC<MessagesTabProps> = ({
           </div>
 
           <div className="flex items-center gap-1.5">
-            {onOpenCreateGroup && (
-              <button
-                onClick={onOpenCreateGroup}
-                title="Create Family / Group Chat"
-                className="p-2.5 rounded-2xl bg-blue-50 hover:bg-blue-100 dark:bg-neutral-800 dark:hover:bg-neutral-700 text-blue-600 dark:text-blue-400 shadow-xs transition-all hover:scale-105 active:scale-95 flex items-center gap-1.5 text-xs font-semibold"
-              >
-                <Users className="w-4 h-4" />
-                <span className="hidden sm:inline">Group</span>
-              </button>
-            )}
             <button
               onClick={onOpenSearch}
               title="Start new chat"
@@ -219,7 +205,6 @@ export const MessagesTab: React.FC<MessagesTabProps> = ({
           onBack={() => onSelectConversation(null)}
           onStartCall={onStartCall}
           onOpenProfileView={onOpenProfileView}
-          onOpenGroupProfile={onOpenGroupProfile}
           onDeleteConversation={onDeleteConversation}
           relationStatus={activeRelationStatus}
           onFollow={onFollow}

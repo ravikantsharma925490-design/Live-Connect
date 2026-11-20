@@ -105,7 +105,6 @@ export async function insertCallLogIntoChat({
         conversationId,
         content,
         senderProfile: caller,
-        isGroup: false,
         receiverId: callee.id,
         receiverProfile: callee,
       }).catch(() => {});
@@ -122,7 +121,6 @@ export async function insertCallLogIntoChat({
               conversationId,
               content,
               senderProfile: callee,
-              isGroup: false,
               receiverId: caller.id,
               receiverProfile: caller,
             }).catch(() => {});

@@ -10,13 +10,11 @@ import {
   Sparkles,
   Trash2,
   Eraser,
-  Lock,
   UserPlus,
   UserCheck,
   ShieldAlert,
   ShieldCheck,
   UserMinus,
-  Copy,
   Heart,
   CheckCircle2,
   RefreshCw,
@@ -35,7 +33,6 @@ import { UserAvatar } from '../ui/UserAvatar';
 import { useMessages } from '@/src/hooks/useMessages';
 import { isFirebaseSessionActive } from '@/src/lib/firebase/client';
 import {
-  fetchPublicProfileFs,
   fetchRelationStatusFs,
   followUserFs,
 } from '@/src/lib/firebase/services';
@@ -48,7 +45,6 @@ interface ChatWindowProps {
   onBack: () => void;
   onStartCall: (peer: Profile, type: CallType) => void;
   onOpenProfileView?: (profile: Profile) => void;
-  onOpenGroupProfile?: (conversation: Conversation) => void;
   onDeleteConversation?: (conversationId: string) => void;
   relationStatus?: UserRelationStatus;
   onFollow?: (peer: Profile) => Promise<boolean>;
@@ -63,7 +59,6 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   onBack,
   onStartCall,
   onOpenProfileView,
-  onOpenGroupProfile,
   onDeleteConversation,
   relationStatus,
   onFollow,
@@ -74,7 +69,6 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   const [followLoading, setFollowLoading] = useState(false);
   const [localFollowed, setLocalFollowed] = useState(false);
   const [liveRelation, setLiveRelation] = useState<UserRelationStatus | null>(null);
-  const [isRefreshingStatus, setIsRefreshingStatus] = useState(false);
   const [viewingImage, setViewingImage] = useState<{ url: string; caption?: string } | null>(null);
   const [pinnedMessage, setPinnedMessage] = useState<Message | null>(conversation?.pinned_message || null);
   const [replyingToMessage, setReplyingToMessage] = useState<Message | null>(null);
@@ -185,178 +179,18 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     }
   }, [conversation?.id, currentUser?.id, messages.length, markMessagesAsRead]);
 
-  const isGroup =
-    conversation?.type === 'group' ||
-    Boolean(conversation?.name) ||
-    Boolean(conversation?.owner_id) ||
-    Boolean((conversation as any)?.member_roles) ||
-    (Array.isArray((conversation as any)?.member_ids) && (conversation as any).member_ids.length > 2);
-  const otherUser = isGroup ? null : conversation?.other_member;
-  const isSelf = Boolean(!isGroup && currentUser && otherUser && otherUser.id === currentUser.id);
-  const rawDisplayName = isGroup
-    ? (conversation?.name || 'Group Chat')
-    : (otherUser?.display_name || otherUser?.username || 'Chat');
+  const otherUser = conversation?.other_member;
+  const isSelf = Boolean(currentUser && otherUser && otherUser.id === currentUser.id);
+  const rawDisplayName = otherUser?.display_name || otherUser?.username || 'Chat';
   const displayName = isSelf ? `${rawDisplayName} (You)` : rawDisplayName;
-  const username = isGroup ? '' : (otherUser?.username || '');
-  const avatarUrl = isGroup ? (conversation?.avatar_url || null) : otherUser?.avatar_url;
-  const memberCount =
-    conversation?.member_ids?.length ||
-    (conversation?.members_meta ? Object.keys(conversation.members_meta).length : 0) ||
-    1;
-
-  const isCurrentUserMember = Boolean(
-    isGroup && currentUser?.id && Array.isArray(conversation?.member_ids)
-      ? conversation.member_ids.includes(currentUser.id)
-      : true
-  );
-
-  const isRemovedFromGroup = Boolean(
-    isGroup &&
-    currentUser?.id &&
-    (!isCurrentUserMember || conversation?.is_removed || conversation?.removed_members?.[currentUser.id])
-  );
-
-  const removalDetails = useMemo(() => {
-    if (!isRemovedFromGroup || !currentUser?.id) return null;
-
-    if (conversation?.removal_info) {
-      return {
-        adminId: conversation.removal_info.removed_by,
-        adminName: conversation.removal_info.admin_name || 'Group Admin',
-        adminUsername: conversation.removal_info.admin_username || 'admin',
-        memberId: currentUser.id,
-        memberName: conversation.removal_info.member_name || currentUser.display_name || 'You',
-        memberUsername: conversation.removal_info.member_username || currentUser.username || 'user',
-        removedAt: conversation.removal_info.removed_at,
-      };
-    }
-
-    if (conversation?.removed_members?.[currentUser.id]) {
-      const info = conversation.removed_members[currentUser.id];
-      return {
-        adminId: info.removed_by,
-        adminName: info.admin_name || 'Group Admin',
-        adminUsername: info.admin_username || 'admin',
-        memberId: currentUser.id,
-        memberName: info.member_name || currentUser.display_name || 'You',
-        memberUsername: info.member_username || currentUser.username || 'user',
-        removedAt: info.removed_at,
-      };
-    }
-
-    // Search messages in reverse for tagged removal
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const m = messages[i];
-      if (m?.content?.startsWith('[SYSTEM:MEMBER_REMOVED:')) {
-        const endTag = m.content.indexOf(']');
-        if (endTag !== -1) {
-          const parts = m.content.substring(23, endTag).split(':');
-          if (parts[3] === currentUser.id || !isCurrentUserMember) {
-            return {
-              adminId: parts[0] || conversation?.owner_id || 'admin',
-              adminName: parts[1] || 'Group Admin',
-              adminUsername: parts[2] || 'admin',
-              memberId: parts[3] || currentUser.id,
-              memberName: parts[4] || currentUser.display_name || 'You',
-              memberUsername: parts[5] || currentUser.username || 'user',
-              removedAt: m.created_at,
-            };
-          }
-        }
-      }
-    }
-
-    return {
-      adminId: conversation?.owner_id || 'Admin',
-      adminName: 'Group Admin',
-      adminUsername: 'admin',
-      memberId: currentUser.id,
-      memberName: currentUser.display_name || 'You',
-      memberUsername: currentUser.username || 'user',
-      removedAt: conversation?.updated_at || new Date().toISOString(),
-    };
-  }, [isRemovedFromGroup, currentUser, conversation, messages, isCurrentUserMember]);
-
-  const [copiedIdField, setCopiedIdField] = useState<'admin' | 'member' | null>(null);
-
-  const handleCopyId = (text: string, field: 'admin' | 'member') => {
-    if (!text) return;
-    navigator.clipboard.writeText(text);
-    setCopiedIdField(field);
-    setTimeout(() => {
-      setCopiedIdField((prev) => (prev === field ? null : prev));
-    }, 2000);
-  };
-
-  const handleOpenUserProfile = async (
-    userId?: string,
-    fallbackMeta?: { name?: string; username?: string; avatar_url?: string }
-  ) => {
-    if (!userId || !onOpenProfileView) return;
-
-    if (currentUser && currentUser.id === userId) {
-      onOpenProfileView(currentUser);
-      return;
-    }
-
-    if (otherUser && otherUser.id === userId) {
-      onOpenProfileView(otherUser);
-      return;
-    }
-
-    const cached = conversation?.members_meta?.[userId];
-    if (cached) {
-      onOpenProfileView({
-        id: userId,
-        display_name: cached.display_name || fallbackMeta?.name || 'User',
-        username: cached.username || fallbackMeta?.username || 'user',
-        avatar_url: cached.avatar_url || fallbackMeta?.avatar_url || null,
-        bio: cached.bio || 'Hey there! I am using LiveConnect.',
-        is_online: false,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-        ...cached,
-      });
-      return;
-    }
-
-    try {
-      if (isFirebaseSessionActive(currentUser?.id)) {
-        const prof = await fetchPublicProfileFs(userId);
-        if (prof) {
-          onOpenProfileView(prof);
-          return;
-        }
-      } else {
-        const res = await fetch(`/api/users/profile/${encodeURIComponent(userId)}`);
-        if (res.ok) {
-          const data = await res.json();
-          if (data?.profile) {
-            onOpenProfileView(data.profile);
-            return;
-          }
-        }
-      }
-    } catch (e) {}
-
-    onOpenProfileView({
-      id: userId,
-      display_name: fallbackMeta?.name || 'User',
-      username: fallbackMeta?.username || 'user',
-      avatar_url: fallbackMeta?.avatar_url || null,
-      bio: 'Hey there! I am using LiveConnect.',
-      is_online: false,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    });
-  };
+  const username = otherUser?.username || '';
+  const avatarUrl = otherUser?.avatar_url;
 
   const currentConvIdRef = useRef<string | null>(null);
 
   // Direct Live Relation Check from backend (only for direct 1-on-1 chats)
   const checkLiveRelation = useCallback(async () => {
-    if (isGroup || !currentUser?.id || !otherUser?.id || isSelf) return;
-    setIsRefreshingStatus(true);
+    if (!currentUser?.id || !otherUser?.id || isSelf) return;
     try {
       if (isFirebaseSessionActive(currentUser.id)) {
         const data = await fetchRelationStatusFs(currentUser.id, otherUser.id);
@@ -379,10 +213,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
       }
     } catch (e) {
       // ignore
-    } finally {
-      setIsRefreshingStatus(false);
     }
-  }, [isGroup, currentUser?.id, currentUser?.username, otherUser?.id, otherUser?.username, isSelf]);
+  }, [currentUser?.id, currentUser?.username, otherUser?.id, otherUser?.username, isSelf]);
 
   useEffect(() => {
     const convId = conversation?.id || null;
@@ -398,12 +230,12 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
   // Polling check relation while chat window is open
   useEffect(() => {
-    if (isGroup || !otherUser?.id || isSelf) return;
+    if (!otherUser?.id || isSelf) return;
     const interval = setInterval(() => {
       checkLiveRelation();
     }, 2000);
     return () => clearInterval(interval);
-  }, [isGroup, otherUser?.id, isSelf, checkLiveRelation]);
+  }, [otherUser?.id, isSelf, checkLiveRelation]);
 
   if (!conversation) {
     return (
@@ -413,7 +245,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     );
   }
 
-  const isBlocked = Boolean(!isGroup && (liveRelation ? liveRelation.isBlocked : relationStatus?.isBlocked));
+  const isBlocked = Boolean(liveRelation ? liveRelation.isBlocked : relationStatus?.isBlocked);
   const isFollowingUser = Boolean(
     localFollowed ||
     (liveRelation !== null ? liveRelation.isFollowing : relationStatus?.isFollowing)
@@ -422,7 +254,6 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     liveRelation !== null ? liveRelation.isFollowedBy : relationStatus?.isFollowedBy
   );
   const isMutual =
-    isGroup ||
     isSelf ||
     Boolean(
       (liveRelation && (liveRelation.isMutual || (liveRelation.isFollowing && liveRelation.isFollowedBy))) ||
@@ -430,9 +261,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
       (isFollowingUser && isFollowedByUser)
     );
 
-  // canChat: Disabled if removed from group; otherwise enabled for groups or mutual follow
-  const canChat = !isRemovedFromGroup && (isGroup || (!isBlocked && (isSelf || isMutual)));
-  const canCall = !isRemovedFromGroup && !isGroup && (!isBlocked && (isSelf || isMutual));
+  const canChat = !isBlocked && (isSelf || isMutual);
+  const canCall = !isBlocked && (isSelf || isMutual);
 
   const handleSendMessage = async (content: string) => {
     if (!content.trim() || sending) return;
@@ -442,8 +272,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     sendMessage(
       content,
       currentUser || undefined,
-      isGroup ? undefined : otherUser?.id,
-      isGroup ? undefined : (otherUser || undefined)
+      otherUser?.id,
+      otherUser || undefined
     );
     snapToBottom();
   };
@@ -532,19 +362,11 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
             <div className="text-center space-y-1">
               <h3 className="text-base font-bold text-neutral-900 dark:text-neutral-100">
-                {confirmAction === 'clear'
-                  ? 'Clear All Messages?'
-                  : isGroup
-                  ? 'Delete Group?'
-                  : 'Delete Conversation?'}
+                {confirmAction === 'clear' ? 'Clear All Messages?' : 'Delete Conversation?'}
               </h3>
               <p className="text-xs text-neutral-500 dark:text-neutral-400">
                 {confirmAction === 'clear'
                   ? 'All messages in this chat will be permanently deleted for you.'
-                  : isRemovedFromGroup
-                  ? `This will remove "${displayName}" completely from your chats list. This cannot be undone.`
-                  : isGroup
-                  ? `Are you sure you want to delete or leave "${displayName}"?`
                   : `Are you sure you want to delete the chat with ${displayName}? This cannot be undone.`}
               </p>
             </div>
@@ -560,7 +382,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                 onClick={confirmAction === 'clear' ? handleClearMessages : handleDeleteConversation}
                 className="py-2.5 px-4 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-xs shadow-md shadow-red-500/20 transition-all active:scale-95 cursor-pointer"
               >
-                {confirmAction === 'clear' ? 'Clear Messages' : isGroup ? 'Delete Group' : 'Delete Chat'}
+                {confirmAction === 'clear' ? 'Clear Messages' : 'Delete Chat'}
               </button>
             </div>
           </div>
@@ -581,9 +403,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
           {/* Avatar */}
           <div
             onClick={() => {
-              if (isGroup) {
-                onOpenGroupProfile?.(conversation);
-              } else if (otherUser) {
+              if (otherUser) {
                 onOpenProfileView?.(otherUser);
               }
             }}
@@ -592,9 +412,9 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             <UserAvatar
               src={avatarUrl}
               name={displayName}
-              id={isGroup ? conversation.id : (otherUser?.id || conversation.id)}
+              id={otherUser?.id || conversation.id}
               className="w-10 h-10 border border-neutral-200 dark:border-neutral-700"
-              showStatus={!isGroup}
+              showStatus
               isOnline={isOnline}
             />
           </div>
@@ -602,9 +422,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
           {/* Details */}
           <div
             onClick={() => {
-              if (isGroup) {
-                onOpenGroupProfile?.(conversation);
-              } else if (otherUser) {
+              if (otherUser) {
                 onOpenProfileView?.(otherUser);
               }
             }}
@@ -614,36 +432,14 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
               <h3 className="font-bold text-sm text-neutral-900 dark:text-neutral-100 truncate hover:text-blue-600 transition-colors">
                 {displayName}
               </h3>
-              {isGroup ? (
-                isRemovedFromGroup ? (
-                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-500/15 text-red-600 dark:text-red-400 border border-red-500/30">
-                    <Lock className="w-3 h-3" /> Removed • Locked
-                  </span>
-                ) : (
-                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20">
-                    <Users className="w-3 h-3" /> Group
-                  </span>
-                )
-              ) : !isSelf && isMutual && !isBlocked ? (
+              {!isSelf && isMutual && !isBlocked ? (
                 <span className="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
                   <UserCheck className="w-3 h-3" /> Mutual Follow
                 </span>
               ) : null}
             </div>
             <p className="text-xs text-neutral-500 dark:text-neutral-400 truncate flex items-center gap-1.5">
-              {isGroup ? (
-                isRemovedFromGroup ? (
-                  <span className="text-red-600 dark:text-red-400 font-semibold flex items-center gap-1">
-                    <Lock className="w-3 h-3 shrink-0" />
-                    Chat Locked • You were removed by admin
-                  </span>
-                ) : (
-                  <span>
-                    {memberCount} member{memberCount === 1 ? '' : 's'}
-                    {conversation.description ? ` • ${conversation.description}` : ''}
-                  </span>
-                )
-              ) : isSelf ? (
+              {isSelf ? (
                 <span className="text-blue-600 dark:text-blue-400 font-medium">Message yourself (Personal notes)</span>
               ) : isOnline ? (
                 <span className="text-emerald-600 dark:text-emerald-400 font-medium">Online</span>
@@ -657,15 +453,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
         {/* Call Controls & Actions Dropdown */}
         <div className="flex items-center gap-1.5 shrink-0 relative">
-          {isGroup ? (
-            <button
-              onClick={() => onOpenGroupProfile?.(conversation)}
-              className="px-3 py-2 rounded-xl bg-neutral-100 dark:bg-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-700 text-neutral-700 dark:text-neutral-200 text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer"
-            >
-              <Users className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Group Info</span>
-            </button>
-          ) : isSelf ? (
+          {isSelf ? (
             <button
               onClick={() => {
                 if (!currentUser) return;
@@ -736,19 +524,6 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                   onClick={() => setShowOptionsDropdown(false)}
                 />
                 <div className="absolute right-0 top-full mt-1.5 w-48 bg-white dark:bg-neutral-900 rounded-2xl border border-neutral-200 dark:border-neutral-800 shadow-xl py-1.5 z-30 animate-in fade-in slide-in-from-top-2 duration-150">
-                  {isGroup && (
-                    <button
-                      onClick={() => {
-                        setShowOptionsDropdown(false);
-                        onOpenGroupProfile?.(conversation);
-                      }}
-                      className="w-full px-3.5 py-2 text-left text-xs font-semibold text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 flex items-center gap-2 transition-colors"
-                    >
-                      <Users className="w-3.5 h-3.5 text-neutral-400" />
-                      <span>Group Details</span>
-                    </button>
-                  )}
-
                   <button
                     onClick={() => {
                       setShowOptionsDropdown(false);
@@ -768,7 +543,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                     className="w-full px-3.5 py-2 text-left text-xs font-semibold text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 flex items-center gap-2 transition-colors border-t border-neutral-100 dark:border-neutral-800"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
-                    <span>{isGroup ? 'Delete / Leave Group' : 'Delete Conversation'}</span>
+                    <span>Delete Conversation</span>
                   </button>
                 </div>
               </>
@@ -894,45 +669,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
       {/* Footer Area */}
       <footer className="p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] bg-white dark:bg-neutral-900 border-t border-neutral-200 dark:border-neutral-800 space-y-2">
-        {/* Case 0: Removed from Group (Chat Locked) */}
-        {isRemovedFromGroup ? (
-          <div className="rounded-2xl bg-linear-to-b from-red-50/90 via-white to-red-50/30 dark:from-red-950/40 dark:via-neutral-900 dark:to-neutral-900 border border-red-200 dark:border-red-900/60 p-4 space-y-3 shadow-md animate-in fade-in duration-200">
-            {/* Lock Header */}
-            <div className="flex items-center justify-between gap-2 border-b border-red-200/60 dark:border-red-900/40 pb-2.5">
-              <div className="flex items-center gap-2.5 min-w-0">
-                <div className="p-2 rounded-xl bg-red-600 text-white shadow-xs shrink-0">
-                  <Lock className="w-4 h-4" />
-                </div>
-                <div className="min-w-0">
-                  <h4 className="text-xs font-black uppercase tracking-wider text-red-700 dark:text-red-300 truncate">
-                    Chat Locked • You were removed from this group
-                  </h4>
-                  <p className="text-[11px] text-neutral-600 dark:text-neutral-400 truncate">
-                    An admin has removed you. You cannot send or receive messages.
-                  </p>
-                </div>
-              </div>
-              <span className="px-2 py-0.5 rounded-full bg-red-100 dark:bg-red-900/60 text-red-700 dark:text-red-300 font-mono text-[10px] font-black shrink-0">
-                LOCKED
-              </span>
-            </div>
-
-            {/* Bottom Delete Button: "NICHE AAYE GA DELTE OR DELTE KRNE KE BAAD DELTED HOGA VO" */}
-            <div className="pt-1 flex flex-col sm:flex-row items-center justify-between gap-2.5">
-              <p className="text-[11px] text-neutral-500 dark:text-neutral-400 text-center sm:text-left">
-                To remove this group permanently from your chats list, click Delete Group below.
-              </p>
-              <button
-                type="button"
-                onClick={() => setConfirmAction('delete')}
-                className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 active:scale-95 text-white text-xs font-bold flex items-center justify-center gap-2 shadow-md shadow-red-500/20 transition-all cursor-pointer shrink-0"
-              >
-                <Trash2 className="w-4 h-4" />
-                <span>Delete Group</span>
-              </button>
-            </div>
-          </div>
-        ) : isBlocked ? (
+        {isBlocked ? (
           <div className="p-3.5 rounded-2xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/50 flex items-center justify-between gap-3 text-xs text-rose-700 dark:text-rose-300">
             <div className="flex items-center gap-2">
               <ShieldAlert className="w-4 h-4 shrink-0 text-rose-500" />
@@ -1006,7 +743,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
             {typingUserId && (
               <div className="px-4 pb-1 text-xs text-neutral-500 dark:text-neutral-400 italic animate-pulse">
-                {otherUser?.full_name || otherUser?.username || 'Someone'} is typing...
+                {otherUser?.display_name || otherUser?.username || 'Someone'} is typing...
               </div>
             )}
 
@@ -1019,7 +756,6 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
               conversation={conversation}
               replyingToMessage={replyingToMessage}
               onCancelReply={() => setReplyingToMessage(null)}
-              groupMembers={conversation?.group_members?.map((m) => m.user).filter(Boolean) as Profile[]}
             />
           </div>
         )}

@@ -16,14 +16,13 @@ import { SearchTab } from '@/src/components/tabs/SearchTab';
 import { CallsTab } from '@/src/components/tabs/CallsTab';
 import { ProfileTab } from '@/src/components/tabs/ProfileTab';
 import { UserSearchModal } from '@/src/components/chat/UserSearchModal';
-import { CreateGroupModal } from '@/src/components/chat/CreateGroupModal';
-import { GroupProfileModal } from '@/src/components/chat/GroupProfileModal';
 import { ForwardMessageModal } from '@/src/components/chat/ForwardMessageModal';
 import { IncomingCallModal } from '@/src/components/calls/IncomingCallModal';
 import { AudioCallScreen } from '@/src/components/calls/AudioCallScreen';
 import { VideoCallScreen } from '@/src/components/calls/VideoCallScreen';
 import { ProfileModal } from '@/src/components/profile/ProfileModal';
 import { SettingsModal } from '@/src/components/settings/SettingsModal';
+import { BlockedUsersModal } from '@/src/components/settings/BlockedUsersModal';
 import { NotificationModal } from '@/src/components/notifications/NotificationModal';
 import { LanguageSelectorModal } from '@/src/components/language/LanguageSelectorModal';
 import { Toast } from '@/src/components/ui/Toast';
@@ -33,7 +32,7 @@ import { PrivacyPolicy } from '@/src/components/legal/PrivacyPolicy';
 import { DeleteAccountPage } from '@/src/components/legal/DeleteAccountPage';
 import { OnboardingScreen } from '@/src/components/auth/OnboardingScreen';
 import { BannedScreen } from '@/src/components/auth/BannedScreen';
-import { Profile, Conversation, Message } from '@/src/types';
+import { Profile, Message } from '@/src/types';
 
 // Ensures the cinematic launch animation plays strictly once on cold app launch
 let launchSplashCompleted = false;
@@ -86,14 +85,14 @@ export default function App() {
   // Social Relations (Follow, Follow-Back, Mutual, Block/Unblock)
   const socialRelations = useSocialRelations(readyProfile);
 
-  // Real-time In-App Notifications
+  // Real-time In-App Notifications (excluding blocked actors)
   const {
     notifications,
     unreadCount: unreadNotificationsCount,
     markAsRead: markNotificationAsRead,
     markAllAsRead: markAllNotificationsAsRead,
     deleteNotification,
-  } = useNotifications(readyUserId);
+  } = useNotifications(readyUserId, socialRelations.isBlocked);
 
   const [isNotificationOpen, setIsNotificationOpen] = useState(false);
 
@@ -108,10 +107,8 @@ export default function App() {
     fetchConversations,
     searchUsers,
     startConversation,
-    createGroup,
     deleteConversation,
     markConversationAsRead,
-    updateConversation,
   } = useConversations(readyUserId, activeTab);
 
   const {
@@ -145,16 +142,52 @@ export default function App() {
 
   // Modals state
   const [isSearchOpen, setIsSearchOpen] = useState(false);
-  const [isCreateGroupOpen, setIsCreateGroupOpen] = useState(false);
-  const [viewingGroup, setViewingGroup] = useState<Conversation | null>(null);
   const [forwardingMessage, setForwardingMessage] = useState<any>(null);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isBlockedModalOpen, setIsBlockedModalOpen] = useState(false);
   const [viewingProfile, setViewingProfile] = useState<Profile | null>(null);
+
+  // Two-way visibility: exclude blocked peers from conversations, unread badge, search, and calls
+  const visibleConversations = useMemo(() => {
+    return conversations.filter((c) => !c.other_member?.id || !socialRelations.isBlocked(c.other_member.id));
+  }, [conversations, socialRelations.isBlocked]);
+
+  useEffect(() => {
+    if (!activeConversationId) return;
+    const activeConv = conversations.find((c) => c.id === activeConversationId);
+    if (activeConv?.other_member?.id && socialRelations.isBlocked(activeConv.other_member.id)) {
+      setActiveConversationId(null);
+    }
+  }, [activeConversationId, conversations, socialRelations.isBlocked, setActiveConversationId]);
+
+  const filteredSearchUsers = useCallback(
+    async (queryText: string) => {
+      const results = await searchUsers(queryText);
+      return results.filter((u) => !socialRelations.isBlocked(u.id));
+    },
+    [searchUsers, socialRelations.isBlocked]
+  );
+
+  const safeStartConversation = useCallback(
+    async (targetId: string, targetProfile?: Profile) => {
+      if (socialRelations.isBlocked(targetId)) return null;
+      return startConversation(targetId, targetProfile);
+    },
+    [startConversation, socialRelations.isBlocked]
+  );
+
+  const safeStartCall = useCallback(
+    (peer: Profile, callType: 'audio' | 'video') => {
+      if (peer?.id && socialRelations.isBlocked(peer.id)) return;
+      startCall(peer, callType);
+    },
+    [startCall, socialRelations.isBlocked]
+  );
 
   // Calculate total unread messages count (active open chat messages are only excluded if currently viewing messages tab)
   const totalUnreadCount = useMemo(() => {
-    return conversations.reduce((acc, c) => {
+    return visibleConversations.reduce((acc, c) => {
       const isActivelyViewingThisChat =
         typeof document !== 'undefined' &&
         !document.hidden &&
@@ -164,7 +197,7 @@ export default function App() {
       if (isActivelyViewingThisChat) return acc;
       return acc + (c.unread_count || 0);
     }, 0);
-  }, [conversations, activeConversationId, activeTab]);
+  }, [visibleConversations, activeConversationId, activeTab]);
 
   // Sync browser path simulation for routing consistency
   useEffect(() => {
@@ -359,16 +392,14 @@ export default function App() {
         {/* Tab 1: Messages (💬) */}
         {activeTab === 'messages' && (
           <MessagesTab
-            conversations={conversations}
+            conversations={visibleConversations}
             activeConversationId={activeConversationId}
             loading={convLoading}
             currentUser={profile}
             onSelectConversation={(id) => setActiveConversationId(id)}
             onOpenSearch={() => setIsSearchOpen(true)}
-            onOpenCreateGroup={() => setIsCreateGroupOpen(true)}
-            onOpenGroupProfile={(c) => setViewingGroup(c)}
             onOpenForwardModal={(m) => setForwardingMessage(m)}
-            onStartCall={startCall}
+            onStartCall={safeStartCall}
             onOpenProfileView={(p) => {
               setViewingProfile(p);
               setIsProfileOpen(true);
@@ -386,15 +417,15 @@ export default function App() {
         {activeTab === 'search' && (
           <SearchTab
             currentUser={profile}
-            onSearchUsers={searchUsers}
+            onSearchUsers={filteredSearchUsers}
             onStartChat={async (targetId, targetProfile) => {
               setActiveTab('messages');
-              const convId = await startConversation(targetId, targetProfile);
+              const convId = await safeStartConversation(targetId, targetProfile);
               if (convId) {
                 setActiveConversationId(convId);
               }
             }}
-            onStartCall={startCall}
+            onStartCall={safeStartCall}
             onViewProfile={(p) => {
               setViewingProfile(p);
               setIsProfileOpen(true);
@@ -411,8 +442,8 @@ export default function App() {
         {(activeTab === 'calls' || (activeTab as any) === 'call-history') && (
           <CallsTab
             currentUser={profile}
-            conversations={conversations}
-            onStartCall={startCall}
+            conversations={visibleConversations}
+            onStartCall={safeStartCall}
             onOpenProfileView={(p) => {
               setViewingProfile(p);
               setIsProfileOpen(true);
@@ -429,7 +460,7 @@ export default function App() {
             missedCallsCount={missedCallsCount}
             onStartChat={async (targetId, targetProfile) => {
               setActiveTab('messages');
-              const convId = await startConversation(targetId, targetProfile);
+              const convId = await safeStartConversation(targetId, targetProfile);
               if (convId) {
                 setActiveConversationId(convId);
               }
@@ -535,7 +566,7 @@ export default function App() {
         onOpenChat={async (userId) => {
           setIsNotificationOpen(false);
           setActiveTab('messages');
-          const convId = await startConversation(userId);
+          const convId = await safeStartConversation(userId);
           if (convId) {
             setActiveConversationId(convId);
           }
@@ -548,16 +579,16 @@ export default function App() {
         onSelectUser={async (targetUser) => {
           setIsSearchOpen(false);
           setActiveTab('messages');
-          const convId = await startConversation(targetUser.id, targetUser);
+          const convId = await safeStartConversation(targetUser.id, targetUser);
           if (convId) {
             setActiveConversationId(convId);
           }
         }}
         onStartCall={(targetUser, type) => {
           setIsSearchOpen(false);
-          startCall(targetUser, type);
+          safeStartCall(targetUser, type);
         }}
-        onSearch={searchUsers}
+        onSearch={filteredSearchUsers}
         isUserOnline={isUserOnline}
       />
 
@@ -580,7 +611,7 @@ export default function App() {
           setIsProfileOpen(false);
           setViewingProfile(null);
           setActiveTab('messages');
-          const convId = await startConversation(targetId);
+          const convId = await safeStartConversation(targetId);
           if (convId) {
             setActiveConversationId(convId);
           }
@@ -588,12 +619,12 @@ export default function App() {
         onStartAudioCall={(peer) => {
           setIsProfileOpen(false);
           setViewingProfile(null);
-          startCall(peer, 'audio');
+          safeStartCall(peer, 'audio');
         }}
         onStartVideoCall={(peer) => {
           setIsProfileOpen(false);
           setViewingProfile(null);
-          startCall(peer, 'video');
+          safeStartCall(peer, 'video');
         }}
         relationStatus={
           viewingProfile
@@ -625,46 +656,11 @@ export default function App() {
         onUnblock={socialRelations.unblockUser}
       />
 
-      <CreateGroupModal
-        isOpen={isCreateGroupOpen}
-        onClose={() => setIsCreateGroupOpen(false)}
-        currentUser={profile}
-        onCreateGroup={createGroup}
-        onGroupCreated={(groupId) => {
-          setIsCreateGroupOpen(false);
-          setActiveTab('messages');
-          setActiveConversationId(groupId);
-          fetchConversations();
-        }}
-      />
-
-      <GroupProfileModal
-        isOpen={Boolean(viewingGroup)}
-        onClose={() => setViewingGroup(null)}
-        conversation={viewingGroup}
-        currentUser={profile}
-        onGroupUpdated={(updatedConv) => {
-          if (updatedConv) {
-            setViewingGroup(updatedConv);
-            updateConversation(updatedConv);
-          }
-          fetchConversations();
-        }}
-        onGroupDeleted={() => {
-          if (viewingGroup) {
-            deleteConversation(viewingGroup.id);
-          }
-          setViewingGroup(null);
-          setActiveConversationId(null);
-          fetchConversations();
-        }}
-      />
-
       <ForwardMessageModal
         isOpen={Boolean(forwardingMessage)}
         onClose={() => setForwardingMessage(null)}
         messageToForward={forwardingMessage}
-        conversations={conversations}
+        conversations={visibleConversations}
         currentUser={profile}
         onForwardSuccess={() => {
           setForwardingMessage(null);
@@ -677,6 +673,16 @@ export default function App() {
         onClose={() => setIsSettingsOpen(false)}
         currentUser={profile}
         onSignOut={signOut}
+        blockedCount={socialRelations.blockedByMeSet.size}
+        onOpenBlockedUsers={() => setIsBlockedModalOpen(true)}
+      />
+
+      <BlockedUsersModal
+        isOpen={isBlockedModalOpen}
+        onClose={() => setIsBlockedModalOpen(false)}
+        blockedUserIds={socialRelations.blockedByMeSet}
+        onUnblock={socialRelations.unblockUser}
+        currentUserId={profile?.id}
       />
 
       <LanguageSelectorModal />

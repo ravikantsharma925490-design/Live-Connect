@@ -28,6 +28,7 @@ import {
   unblockUserFs,
   fetchMultiplePublicProfilesFs,
 } from '@/src/lib/firebase/services';
+import { getAuthHeaders } from '@/src/lib/authHeader';
 
 export function useSocialRelations(currentProfile?: Profile | null) {
   const currentUserId = currentProfile?.id;
@@ -74,10 +75,11 @@ export function useSocialRelations(currentProfile?: Profile | null) {
       const cMap: Record<string, { followers: number; following: number }> = {};
       let fetchedFromNetwork = false;
 
+      const authHeaders = await getAuthHeaders();
       const [overviewResult, countsResult] = await Promise.allSettled([
         fetch('/api/relations/user-overview', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...authHeaders },
           body: JSON.stringify({
             userId: currentUserId,
             username: currentProfile?.username,
@@ -328,6 +330,9 @@ export function useSocialRelations(currentProfile?: Profile | null) {
       if (!targetUserId || !currentUserId || targetUserId === currentUserId) {
         return 'self';
       }
+      if (isBlocked(targetUserId)) {
+        return 'not_following';
+      }
 
       let followsTarget = followingSet.has(targetUserId);
       let targetFollowsMe = followerSet.has(targetUserId);
@@ -352,7 +357,7 @@ export function useSocialRelations(currentProfile?: Profile | null) {
       }
       return 'not_following';
     },
-    [currentUserId, followingSet, followerSet]
+    [currentUserId, followingSet, followerSet, isBlocked]
   );
 
   // Authoritative follow status
@@ -448,7 +453,9 @@ export function useSocialRelations(currentProfile?: Profile | null) {
       const mutual = following && followed;
 
       const baseCounts = countsMap[targetUserId];
-      const targetFollowers = isSelf
+      const targetFollowers = blocked
+        ? 0
+        : isSelf
         ? followerSet.size
         : typeof baseCounts?.followers === 'number'
         ? baseCounts.followers
@@ -456,7 +463,9 @@ export function useSocialRelations(currentProfile?: Profile | null) {
         ? 1
         : 0;
 
-      const targetFollowing = isSelf
+      const targetFollowing = blocked
+        ? 0
+        : isSelf
         ? followingSet.size
         : typeof baseCounts?.following === 'number'
         ? baseCounts.following
@@ -653,35 +662,38 @@ export function useSocialRelations(currentProfile?: Profile | null) {
     [currentUserId, followerSet, followingSet, countsMap, fetchRelations]
   );
 
-  // 3. Fetch Followers list
+  // 3. Fetch Followers list (excluding blocked users)
   const fetchFollowersList = useCallback(
     async (userId: string): Promise<Profile[]> => {
-      if (!userId) return [];
+      if (!userId || (userId !== currentUserId && isBlocked(userId))) return [];
 
       if (isFirebaseSessionActive(currentUserId)) {
         if (userId === currentUserId) {
-          const profilesMap = await fetchMultiplePublicProfilesFs(Array.from(followerSet));
-          const list = Object.values(profilesMap);
+          const visibleIds = Array.from<string>(followerSet).filter((id) => !isBlocked(id));
+          const profilesMap = await fetchMultiplePublicProfilesFs(visibleIds);
+          const list = Object.values(profilesMap).filter((u) => !isBlocked(u.id));
           saveCachedFollowersList(userId, list);
           saveMultipleCachedProfiles(list);
           return list;
         }
-        return loadCachedFollowersList(userId);
+        return loadCachedFollowersList(userId).filter((u) => !isBlocked(u.id));
       }
 
-      const cachedList = loadCachedFollowersList(userId);
+      const cachedList = loadCachedFollowersList(userId).filter((u) => !isBlocked(u.id));
       try {
+        const authHeaders = await getAuthHeaders();
         const sRes = await fetch('/api/relations/user-overview', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...authHeaders },
           body: JSON.stringify({ userId }),
         });
         if (sRes.ok) {
           const sData = await sRes.json();
           if (Array.isArray(sData.followerProfiles)) {
-            saveCachedFollowersList(userId, sData.followerProfiles);
-            saveMultipleCachedProfiles(sData.followerProfiles);
-            return sData.followerProfiles;
+            const filtered = (sData.followerProfiles as Profile[]).filter((u) => !isBlocked(u.id));
+            saveCachedFollowersList(userId, filtered);
+            saveMultipleCachedProfiles(filtered);
+            return filtered;
           }
         }
       } catch (err) {
@@ -690,38 +702,41 @@ export function useSocialRelations(currentProfile?: Profile | null) {
 
       return cachedList;
     },
-    [currentUserId, followerSet]
+    [currentUserId, followerSet, isBlocked]
   );
 
-  // 4. Fetch Following list
+  // 4. Fetch Following list (excluding blocked users)
   const fetchFollowingList = useCallback(
     async (userId: string): Promise<Profile[]> => {
-      if (!userId) return [];
+      if (!userId || (userId !== currentUserId && isBlocked(userId))) return [];
 
       if (isFirebaseSessionActive(currentUserId)) {
         if (userId === currentUserId) {
-          const profilesMap = await fetchMultiplePublicProfilesFs(Array.from(followingSet));
-          const list = Object.values(profilesMap);
+          const visibleIds = Array.from<string>(followingSet).filter((id) => !isBlocked(id));
+          const profilesMap = await fetchMultiplePublicProfilesFs(visibleIds);
+          const list = Object.values(profilesMap).filter((u) => !isBlocked(u.id));
           saveCachedFollowingList(userId, list);
           saveMultipleCachedProfiles(list);
           return list;
         }
-        return loadCachedFollowingList(userId);
+        return loadCachedFollowingList(userId).filter((u) => !isBlocked(u.id));
       }
 
-      const cachedList = loadCachedFollowingList(userId);
+      const cachedList = loadCachedFollowingList(userId).filter((u) => !isBlocked(u.id));
       try {
+        const authHeaders = await getAuthHeaders();
         const sRes = await fetch('/api/relations/user-overview', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...authHeaders },
           body: JSON.stringify({ userId }),
         });
         if (sRes.ok) {
           const sData = await sRes.json();
           if (Array.isArray(sData.followingProfiles)) {
-            saveCachedFollowingList(userId, sData.followingProfiles);
-            saveMultipleCachedProfiles(sData.followingProfiles);
-            return sData.followingProfiles;
+            const filtered = (sData.followingProfiles as Profile[]).filter((u) => !isBlocked(u.id));
+            saveCachedFollowingList(userId, filtered);
+            saveMultipleCachedProfiles(filtered);
+            return filtered;
           }
         }
       } catch (err) {
@@ -730,10 +745,10 @@ export function useSocialRelations(currentProfile?: Profile | null) {
 
       return cachedList;
     },
-    [currentUserId, followingSet]
+    [currentUserId, followingSet, isBlocked]
   );
 
-  // 5. Block User
+  // 5. Block User (removes follows in both directions; sends zero notifications to target)
   const blockUser = useCallback(
     async (targetUser: Profile): Promise<boolean> => {
       if (!currentUserId || !targetUser?.id || currentUserId === targetUser.id) {
@@ -741,6 +756,9 @@ export function useSocialRelations(currentProfile?: Profile | null) {
       }
 
       const targetId = targetUser.id;
+      const prevBlockedByMe = new Set(blockedByMeSet);
+      const prevFollowing = new Set(followingSet);
+      const prevFollowers = new Set(followerSet);
 
       setBlockedByMeSet((prev) => new Set([...prev, targetId]));
       setFollowingSet((prev) => {
@@ -756,39 +774,46 @@ export function useSocialRelations(currentProfile?: Profile | null) {
 
       try {
         if (isFirebaseSessionActive(currentUserId)) {
-          await blockUserFs(currentUserId, targetId, 'User block & account restriction notice');
+          await blockUserFs(currentUserId, targetId);
           return true;
         }
 
-        await fetch('/api/relations/block', {
+        const authHeaders = await getAuthHeaders();
+        const res = await fetch('/api/blocks', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...authHeaders },
           body: JSON.stringify({
             userId: currentUserId,
             targetUserId: targetId,
-            targetEmail: (targetUser as any).email || undefined,
-            targetUsername: targetUser.username,
-            targetDisplayName: targetUser.display_name,
-            sendEmail: true,
-            reason: 'User block & account restriction notice',
           }),
         });
+
+        if (!res.ok) {
+          setBlockedByMeSet(prevBlockedByMe);
+          setFollowingSet(prevFollowing);
+          setFollowerSet(prevFollowers);
+          return false;
+        }
 
         socialBusRef.current?.postMessage({ type: 'BLOCK_UPDATED', userId: currentUserId, targetId });
         fetchRelations();
         return true;
       } catch {
-        return true;
+        setBlockedByMeSet(prevBlockedByMe);
+        setFollowingSet(prevFollowing);
+        setFollowerSet(prevFollowers);
+        return false;
       }
     },
-    [currentUserId, fetchRelations]
+    [currentUserId, blockedByMeSet, followingSet, followerSet, fetchRelations]
   );
 
-  // 6. Unblock User
+  // 6. Unblock User (deletes block entry only; old follow connections are NOT restored)
   const unblockUser = useCallback(
     async (targetUserId: string): Promise<boolean> => {
       if (!currentUserId || !targetUserId) return false;
 
+      const prevBlockedByMe = new Set(blockedByMeSet);
       setBlockedByMeSet((prev) => {
         const next = new Set(prev);
         next.delete(targetUserId);
@@ -801,104 +826,52 @@ export function useSocialRelations(currentProfile?: Profile | null) {
           return true;
         }
 
-        await fetch('/api/relations/unblock', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+        const authHeaders = await getAuthHeaders();
+        const res = await fetch(`/api/blocks/${encodeURIComponent(targetUserId)}`, {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json', ...authHeaders },
           body: JSON.stringify({
             userId: currentUserId,
             targetUserId,
           }),
         });
 
+        if (!res.ok) {
+          setBlockedByMeSet(prevBlockedByMe);
+          return false;
+        }
+
         socialBusRef.current?.postMessage({ type: 'UNBLOCK_UPDATED', userId: currentUserId, targetUserId });
         fetchRelations();
         return true;
       } catch {
-        return true;
+        setBlockedByMeSet(prevBlockedByMe);
+        return false;
       }
     },
-    [currentUserId, fetchRelations]
-  );
-
-  // 7. Ban User (Admin action)
-  const banUser = useCallback(
-    async (targetUser: Profile, reason?: string): Promise<{ success: boolean; emailSent: boolean; message: string }> => {
-      if (!currentUserId || !targetUser?.id) {
-        return { success: false, emailSent: false, message: 'Invalid user or session' };
-      }
-
-      setBlockedByMeSet((prev) => new Set([...prev, targetUser.id]));
-      setFollowingSet((prev) => {
-        const next = new Set(prev);
-        next.delete(targetUser.id);
-        return next;
-      });
-      setFollowerSet((prev) => {
-        const next = new Set(prev);
-        next.delete(targetUser.id);
-        return next;
-      });
-
-      if (isFirebaseSessionActive(currentUserId)) {
-        await blockUserFs(
-          currentUserId,
-          targetUser.id,
-          reason || 'Violation of LiveConnect Community Guidelines & Safety Policies'
-        ).catch(() => {});
-        return {
-          success: true,
-          emailSent: false,
-          message: 'User blocked and restricted.',
-        };
-      }
-
-      try {
-        const response = await fetch('/api/admin/ban-user', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            adminId: currentUserId,
-            targetUserId: targetUser.id,
-            targetEmail: (targetUser as any).email || undefined,
-            targetUsername: targetUser.username,
-            targetDisplayName: targetUser.display_name,
-            reason: reason || 'Violation of LiveConnect Community Guidelines & Safety Policies',
-          }),
-        });
-        const data = await response.json();
-        socialBusRef.current?.postMessage({ type: 'BAN_UPDATED', targetId: targetUser.id });
-        return {
-          success: Boolean(data.success),
-          emailSent: Boolean(data.emailSent),
-          message: data.message || 'User banned successfully.',
-        };
-      } catch {
-        return {
-          success: true,
-          emailSent: false,
-          message: 'User banned and restriction applied.',
-        };
-      }
-    },
-    [currentUserId]
+    [currentUserId, blockedByMeSet, fetchRelations]
   );
 
   const getFollowersCount = useCallback(
     (userId: string): number => {
-      if (!userId) return 0;
-      if (userId === currentUserId) return followerSet.size;
+      if (!userId || (userId !== currentUserId && isBlocked(userId))) return 0;
+      if (userId === currentUserId) {
+        return Array.from(followerSet).filter((id) => !isBlocked(id)).length;
+      }
       return countsMap[userId]?.followers || 0;
     },
-    [currentUserId, followerSet, countsMap]
+    [currentUserId, followerSet, countsMap, isBlocked]
   );
 
   const getFollowingCount = useCallback(
     (userId: string): number => {
-      if (!userId) return 0;
-      if (userId === currentUserId) return followingSet.size;
+      if (!userId || (userId !== currentUserId && isBlocked(userId))) return 0;
+      if (userId === currentUserId) {
+        return Array.from(followingSet).filter((id) => !isBlocked(id)).length;
+      }
       return countsMap[userId]?.following || 0;
     },
-    [currentUserId, followingSet, countsMap]
+    [currentUserId, followingSet, countsMap, isBlocked]
   );
 
   return {
@@ -908,8 +881,8 @@ export function useSocialRelations(currentProfile?: Profile | null) {
     blockedByMeSet,
     blockedByThemSet,
     countsMap,
-    followersCount: followerSet.size,
-    followingCount: followingSet.size,
+    followersCount: Array.from(followerSet).filter((id) => !isBlocked(id)).length,
+    followingCount: Array.from(followingSet).filter((id) => !isBlocked(id)).length,
     isFollowing,
     isFollowedBy,
     isMutualFollow,
@@ -927,7 +900,6 @@ export function useSocialRelations(currentProfile?: Profile | null) {
     unfollowUser,
     blockUser,
     unblockUser,
-    banUser,
     refreshRelations: fetchRelations,
   };
 }

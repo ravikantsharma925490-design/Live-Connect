@@ -13,6 +13,7 @@ import { Profile } from '@/src/types';
 import { cn, getAvatarColor, getInitials } from '@/src/lib/utils';
 import { isFirebaseSessionActive } from '@/src/lib/firebase/client';
 import { fetchMultiplePublicProfilesFs } from '@/src/lib/firebase/services';
+import { getAuthHeaders } from '@/src/lib/authHeader';
 
 interface BlockedUsersModalProps {
   isOpen: boolean;
@@ -52,10 +53,10 @@ export const BlockedUsersModal: React.FC<BlockedUsersModalProps> = ({
         const profilesMap = await fetchMultiplePublicProfilesFs(blockedIdsArray);
         setBlockedUsers(Object.values(profilesMap));
       } else {
-        const res = await fetch('/api/relations/blocked-profiles', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ userId: currentUserId, ids: blockedIdsArray }),
+        const authHeaders = await getAuthHeaders();
+        const res = await fetch('/api/blocks', {
+          method: 'GET',
+          headers: { ...authHeaders },
         });
         const data = await res.json().catch(() => null);
 
@@ -136,7 +137,7 @@ export const BlockedUsersModal: React.FC<BlockedUsersModalProps> = ({
                   Unblock {userToUnblock.display_name || `@${userToUnblock.username}`}?
                 </h4>
                 <p className="text-xs text-neutral-500 dark:text-neutral-400 leading-relaxed">
-                  They will be able to search for your profile, message you, and initiate calls again.
+                  They will be able to find your profile and follow you again. Previous follow connections are not restored.
                 </p>
               </div>
 
@@ -327,7 +328,7 @@ export const BlockedUsersModal: React.FC<BlockedUsersModalProps> = ({
         <div className="p-3.5 px-5 bg-neutral-50 dark:bg-neutral-800/40 border-t border-neutral-200/80 dark:border-neutral-800 text-[11px] text-neutral-500 flex items-center gap-2">
           <ShieldAlert className="w-4 h-4 text-neutral-400 shrink-0" />
           <span>
-            When you unblock a user, they will be able to see your profile and initiate chats or calls again.
+            Unblocking removes the block entry only. Previous follow connections are not restored automatically.
           </span>
         </div>
       </div>

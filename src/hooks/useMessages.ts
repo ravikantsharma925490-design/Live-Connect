@@ -177,45 +177,29 @@ export function useMessages(
     const ids = new Set<string>();
     if (conversationId) ids.add(conversationId);
     if (conversationObj?.id) ids.add(conversationObj.id);
-
-    const isGroup =
-      conversationObj?.type === 'group' ||
-      Boolean(conversationObj?.name) ||
-      Boolean(conversationObj?.owner_id) ||
-      Boolean((conversationObj as any)?.member_roles);
-
-    if (!isGroup) {
-      if ((conversationObj as any)?.original_id) ids.add((conversationObj as any).original_id);
-      if ((conversationObj as any)?.canonical_id) ids.add((conversationObj as any).canonical_id);
-      if (Array.isArray((conversationObj as any)?.alias_ids)) {
-        (conversationObj as any).alias_ids.forEach((id: string) => {
-          if (id) ids.add(id);
-        });
-      }
-      if (currentUserId && conversationObj?.other_member?.id) {
-        ids.add(getDeterministicDirectConvId(currentUserId, conversationObj.other_member.id));
-      }
+    if ((conversationObj as any)?.original_id) ids.add((conversationObj as any).original_id);
+    if ((conversationObj as any)?.canonical_id) ids.add((conversationObj as any).canonical_id);
+    if (Array.isArray((conversationObj as any)?.alias_ids)) {
+      (conversationObj as any).alias_ids.forEach((id: string) => {
+        if (id) ids.add(id);
+      });
+    }
+    if (currentUserId && conversationObj?.other_member?.id) {
+      ids.add(getDeterministicDirectConvId(currentUserId, conversationObj.other_member.id));
     }
     return Array.from(ids).filter(Boolean);
   }, [conversationId, conversationObj, currentUserId]);
 
   const [messages, setMessages] = useState<Message[]>(() => {
-    const isGroup =
-      conversationObj?.type === 'group' ||
-      Boolean(conversationObj?.name) ||
-      Boolean(conversationObj?.owner_id);
-
     const candidateIds = conversationId
       ? Array.from(
           new Set(
-            isGroup
-              ? ([conversationId, conversationObj?.id].filter(Boolean) as string[])
-              : ([
-                  conversationId,
-                  conversationObj?.id,
-                  (conversationObj as any)?.original_id,
-                  (conversationObj as any)?.canonical_id,
-                ].filter(Boolean) as string[])
+            [
+              conversationId,
+              conversationObj?.id,
+              (conversationObj as any)?.original_id,
+              (conversationObj as any)?.canonical_id,
+            ].filter(Boolean) as string[]
           )
         )
       : [];
@@ -223,22 +207,15 @@ export function useMessages(
   });
 
   const [loading, setLoading] = useState<boolean>(() => {
-    const isGroup =
-      conversationObj?.type === 'group' ||
-      Boolean(conversationObj?.name) ||
-      Boolean(conversationObj?.owner_id);
-
     const candidateIds = conversationId
       ? Array.from(
           new Set(
-            isGroup
-              ? ([conversationId, conversationObj?.id].filter(Boolean) as string[])
-              : ([
-                  conversationId,
-                  conversationObj?.id,
-                  (conversationObj as any)?.original_id,
-                  (conversationObj as any)?.canonical_id,
-                ].filter(Boolean) as string[])
+            [
+              conversationId,
+              conversationObj?.id,
+              (conversationObj as any)?.original_id,
+              (conversationObj as any)?.canonical_id,
+            ].filter(Boolean) as string[]
           )
         )
       : [];
@@ -479,14 +456,12 @@ export function useMessages(
     lastTypingEmitRef.current = now;
 
     if (isFirebaseSessionActive(currentUserId)) {
-      if (!conversationObj?.is_removed) {
-        setDoc(doc(db, 'conversations', conversationId, 'typing', currentUserId), {
-          userId: currentUserId,
-          conversationId,
-          expiresAt: Math.floor(now + 4000),
-          updatedAt: serverTimestamp(),
-        }).catch(() => {});
-      }
+      setDoc(doc(db, 'conversations', conversationId, 'typing', currentUserId), {
+        userId: currentUserId,
+        conversationId,
+        expiresAt: Math.floor(now + 4000),
+        updatedAt: serverTimestamp(),
+      }).catch(() => {});
       return;
     }
 
@@ -501,7 +476,7 @@ export function useMessages(
       conversationId,
       userId: currentUserId,
     });
-  }, [conversationId, currentUserId, conversationObj?.is_removed]);
+  }, [conversationId, currentUserId]);
 
   useEffect(() => {
     if (!conversationId || !currentUserId || !isViewingChat) return;
@@ -572,34 +547,32 @@ export function useMessages(
 
       // Single-doc typing listeners (uses allow get rather than allow list)
       const typingUnsubs: (() => void)[] = [];
-      if (!conversationObj?.is_removed) {
-        const peerIds: string[] = [];
-        if (conversationObj?.other_member?.id && conversationObj.other_member.id !== currentUserId) {
-          peerIds.push(conversationObj.other_member.id);
-        } else if (Array.isArray(conversationObj?.member_ids)) {
-          conversationObj.member_ids
-            .filter((id) => id && id !== currentUserId)
-            .slice(0, 15)
-            .forEach((id) => peerIds.push(id));
-        }
-
-        peerIds.forEach((peerId) => {
-          const unsubTyping = onSnapshot(
-            doc(db, 'conversations', conversationId, 'typing', peerId),
-            (tSnap) => {
-              if (!tSnap.exists()) return;
-              const td = tSnap.data();
-              if (td?.expiresAt && td.expiresAt > Date.now()) {
-                applyServerTyping([peerId]);
-              }
-            },
-            () => {
-              // Silent ignore for typing status if conversation hasn't been created on disk yet
-            }
-          );
-          typingUnsubs.push(unsubTyping);
-        });
+      const peerIds: string[] = [];
+      if (conversationObj?.other_member?.id && conversationObj.other_member.id !== currentUserId) {
+        peerIds.push(conversationObj.other_member.id);
+      } else if (Array.isArray(conversationObj?.member_ids)) {
+        conversationObj.member_ids
+          .filter((id) => id && id !== currentUserId)
+          .slice(0, 15)
+          .forEach((id) => peerIds.push(id));
       }
+
+      peerIds.forEach((peerId) => {
+        const unsubTyping = onSnapshot(
+          doc(db, 'conversations', conversationId, 'typing', peerId),
+          (tSnap) => {
+            if (!tSnap.exists()) return;
+            const td = tSnap.data();
+            if (td?.expiresAt && td.expiresAt > Date.now()) {
+              applyServerTyping([peerId]);
+            }
+          },
+          () => {
+            // Silent ignore for typing status if conversation hasn't been created on disk yet
+          }
+        );
+        typingUnsubs.push(unsubTyping);
+      });
 
       return () => {
         unsubMsgs();
@@ -760,7 +733,6 @@ export function useMessages(
     conversationId,
     currentUserId,
     conversationObj?.other_member?.id,
-    conversationObj?.is_removed,
     conversationObj?.member_ids,
     getCandidateConvIds,
     scrollToBottom,
@@ -841,13 +813,6 @@ export function useMessages(
 
     updateMessagesState((prev) => [...prev, optimisticMessage]);
 
-    const isGroup =
-      conversationObj?.type === 'group' ||
-      Boolean(conversationObj?.name) ||
-      Boolean(conversationObj?.owner_id) ||
-      Boolean((conversationObj as any)?.member_roles) ||
-      !receiverId;
-
     if (isFirebaseSessionActive(currentUserId)) {
       try {
         const senderProf: Profile = senderProfile || {
@@ -867,10 +832,8 @@ export function useMessages(
           conversationId,
           content: processedContent,
           senderProfile: senderProf,
-          isGroup,
-          receiverId: isGroup ? undefined : receiverId,
-          receiverProfile: isGroup ? undefined : receiverProfile,
-          groupName: conversationObj?.name,
+          receiverId,
+          receiverProfile,
         });
 
         updateMessagesState((prev) =>
@@ -901,13 +864,10 @@ export function useMessages(
         body: JSON.stringify({
           message: optimisticMessage,
           conversationId,
-          isGroup,
-          conversationType: isGroup ? 'group' : 'direct',
-          groupName: conversationObj?.name,
-          receiverId: isGroup ? undefined : receiverId,
-          recipientId: isGroup ? undefined : receiverId,
+          receiverId,
+          recipientId: receiverId,
           senderProfile,
-          receiverProfile: isGroup ? undefined : receiverProfile,
+          receiverProfile,
         }),
       });
 

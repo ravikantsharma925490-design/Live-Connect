@@ -26,7 +26,7 @@ import {
 } from '@/src/lib/firebase/client';
 import { generateUUID } from '@/src/lib/utils';
 
-export function useNotifications(currentUserId?: string) {
+export function useNotifications(currentUserId?: string, isBlocked?: (userId: string) => boolean) {
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const seenIdsRef = useRef<Set<string>>(new Set());
@@ -56,7 +56,7 @@ export function useNotifications(currentUserId?: string) {
       if (res.ok) {
         const apiData = await res.json();
         const rawNotifs: AppNotification[] = (apiData.notifications || [])
-          .filter((n: any) => n && n.title !== 'LIVE_CALL_SIGNAL')
+          .filter((n: any) => n && n.title !== 'LIVE_CALL_SIGNAL' && (!n.actor_id || !isBlocked?.(n.actor_id)))
           .map((n: any) => ({
             ...n,
             is_read: Boolean(n.is_read),
@@ -113,6 +113,7 @@ export function useNotifications(currentUserId?: string) {
           snap.forEach((docSnap) => {
             const d = docSnap.data();
             if (!d || d.title === 'LIVE_CALL_SIGNAL') return;
+            if (d.actorId && isBlocked?.(d.actorId)) return;
             const createdAt = tsToIso(d.createdAt);
             list.push({
               id: docSnap.id,
@@ -336,10 +337,13 @@ export function useNotifications(currentUserId?: string) {
     []
   );
 
-  const unreadCount = notifications.filter((n) => !n.is_read).length;
+  const visibleNotifications = isBlocked
+    ? notifications.filter((n) => !n.actor_id || !isBlocked(n.actor_id))
+    : notifications;
+  const unreadCount = visibleNotifications.filter((n) => !n.is_read).length;
 
   return {
-    notifications,
+    notifications: visibleNotifications,
     unreadCount,
     loading,
     fetchNotifications,

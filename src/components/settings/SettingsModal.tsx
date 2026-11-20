@@ -11,6 +11,8 @@ import {
   Trash2,
   AlertTriangle,
   Loader2,
+  UserX,
+  ChevronRight,
 } from 'lucide-react';
 import { cn } from '@/src/lib/utils';
 import { Profile } from '@/src/types';
@@ -22,6 +24,8 @@ interface SettingsModalProps {
   onClose: () => void;
   currentUser?: Profile | null;
   onSignOut?: () => void;
+  blockedCount?: number;
+  onOpenBlockedUsers?: () => void;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -29,6 +33,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onClose,
   currentUser,
   onSignOut,
+  blockedCount = 0,
+  onOpenBlockedUsers,
 }) => {
   // User-controlled explicit toggle states (default OFF until user turns them ON)
   const [micEnabled, setMicEnabled] = useState<boolean>(() => {
@@ -394,6 +400,40 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </div>
             )}
           </div>
+
+          {/* Blocked Users Management */}
+          {onOpenBlockedUsers && (
+            <div className="pt-2 border-t border-neutral-200 dark:border-neutral-800">
+              <button
+                type="button"
+                onClick={() => {
+                  onClose();
+                  onOpenBlockedUsers();
+                }}
+                className="w-full p-4 rounded-2xl bg-neutral-50 dark:bg-neutral-800/50 border border-neutral-200 dark:border-neutral-700/60 hover:bg-neutral-100 dark:hover:bg-neutral-800 flex items-center justify-between gap-3 transition-colors cursor-pointer"
+              >
+                <div className="flex items-center gap-3.5 min-w-0 text-left">
+                  <div className="p-2.5 rounded-2xl shrink-0 bg-red-500/10 text-red-600 dark:text-red-400">
+                    <UserX className="w-5 h-5" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <h4 className="text-sm font-bold text-neutral-900 dark:text-neutral-100">
+                        Blocked Users
+                      </h4>
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-700 dark:bg-red-950/60 dark:text-red-300">
+                        {blockedCount}
+                      </span>
+                    </div>
+                    <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-0.5 truncate">
+                      View and unblock accounts you have blocked
+                    </p>
+                  </div>
+                </div>
+                <ChevronRight className="w-4 h-4 text-neutral-400 shrink-0" />
+              </button>
+            </div>
+          )}
 
           {/* Danger Zone / Account Management */}
           <div className="pt-4 border-t border-neutral-200 dark:border-neutral-800 space-y-3">

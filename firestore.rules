@@ -382,7 +382,8 @@ service cloud.firestore {
                        !isBlockedPair(incoming().followerId, incoming().followingId) &&
                        exists(/databases/$(database)/documents/public_profiles/$(incoming().followingId));
       allow update: if false;
-      allow delete: if isSignedIn() && isValidId(followId) && existing().followerId == request.auth.uid;
+      allow delete: if isSignedIn() && isValidId(followId) &&
+                       (existing().followerId == request.auth.uid || existing().followingId == request.auth.uid);
     }
 
     // Block graph

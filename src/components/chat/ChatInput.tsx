@@ -181,7 +181,7 @@ export const STICKER_PACKS = [
   },
 ];
 
-import { Conversation, Message, Profile } from '@/src/types';
+import { Conversation, Message } from '@/src/types';
 
 interface ChatInputProps {
   onSendMessage: (content: string) => Promise<boolean> | void;
@@ -192,7 +192,6 @@ interface ChatInputProps {
   conversation?: Conversation | null;
   replyingToMessage?: Message | null;
   onCancelReply?: () => void;
-  groupMembers?: Profile[];
 }
 
 export const ChatInput: React.FC<ChatInputProps> = ({
@@ -204,13 +203,10 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   conversation,
   replyingToMessage,
   onCancelReply,
-  groupMembers = [],
 }) => {
   const [inputText, setInputText] = useState('');
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showStickerPicker, setShowStickerPicker] = useState(false);
-  const [showMentionsPopover, setShowMentionsPopover] = useState(false);
-  const [mentionQuery, setMentionQuery] = useState('');
   const [activeCategory, setActiveCategory] = useState(0);
 
   // Staged Image Attachment State
@@ -281,9 +277,9 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   const processSelectedImage = (file: File) => {
     if (!file.type.startsWith('image/')) return;
 
-    const maxBytes = conversation?.type === 'group' ? 2 * 1024 * 1024 : 5 * 1024 * 1024;
+    const maxBytes = 5 * 1024 * 1024;
     if (file.size > maxBytes) {
-      alert(`Photo size must be ${conversation?.type === 'group' ? '2 MB' : '5 MB'} or less.`);
+      alert('Photo size must be 5 MB or less.');
       return;
     }
 
@@ -514,17 +510,6 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
       if (!audioBlob || audioBlob.size < 300) {
         console.warn('No valid audio data recorded in voice note (size too small)');
-        setIsRecording(false);
-        setRecordingSeconds(0);
-        audioChunksRef.current = [];
-        try {
-          mediaRecorder.stream.getTracks().forEach((t) => t.stop());
-        } catch {}
-        return;
-      }
-
-      if (conversation?.type === 'group' && audioBlob.size > 10 * 1024 * 1024) {
-        alert('Group voice note must be 10 MB or less.');
         setIsRecording(false);
         setRecordingSeconds(0);
         audioChunksRef.current = [];

@@ -9,7 +9,6 @@ import {
   Phone,
   Radio,
   SlidersHorizontal,
-  Users,
 } from 'lucide-react';
 import { Conversation, Profile } from '@/src/types';
 import { ConversationItem } from './ConversationItem';
@@ -25,7 +24,6 @@ interface SidebarProps {
   currentUser: Profile | null;
   onSelectConversation: (id: string) => void;
   onOpenSearch: () => void;
-  onOpenCreateGroup?: () => void;
   onOpenProfile: () => void;
   onOpenSettings: () => void;
   onSignOut: () => void;
@@ -40,7 +38,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
   currentUser,
   onSelectConversation,
   onOpenSearch,
-  onOpenCreateGroup,
   onOpenProfile,
   onOpenSettings,
   onSignOut,
@@ -51,7 +48,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   const filteredConversations = conversations.filter((c) => {
     if (!filterQuery.trim()) return true;
-    const name = c.type === 'group' ? c.name || '' : c.other_member?.display_name || '';
+    const name = c.other_member?.display_name || '';
     const uname = c.other_member?.username || '';
     const lastContent = c.last_message?.content || '';
     const q = filterQuery.toLowerCase();
@@ -82,15 +79,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
 
         <div className="flex items-center gap-1.5">
-          {onOpenCreateGroup && (
-            <button
-              onClick={onOpenCreateGroup}
-              title="Create Family / Group Chat"
-              className="p-2.5 rounded-xl bg-blue-50 hover:bg-blue-100 dark:bg-neutral-800 dark:hover:bg-neutral-700 text-blue-600 dark:text-blue-400 transition-all hover:scale-105 active:scale-95 shadow-sm"
-            >
-              <Users className="w-5 h-5" />
-            </button>
-          )}
           <button
             onClick={onOpenSearch}
             title="New direct chat"

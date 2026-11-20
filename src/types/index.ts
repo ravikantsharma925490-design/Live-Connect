@@ -52,22 +52,9 @@ export interface Profile {
   updated_at: string;
 }
 
-export interface RemovedMemberInfo {
-  removed_at: string;
-  removed_by: string;
-  admin_name?: string;
-  admin_username?: string;
-  member_name?: string;
-  member_username?: string;
-}
-
 export interface Conversation {
   id: string;
-  type: 'direct' | 'group';
-  name?: string | null;
-  description?: string | null;
-  avatar_url?: string | null;
-  owner_id?: string | null;
+  type: 'direct';
   pinned_message_id?: string | null;
   pinned_message?: Message | null;
   created_at: string;
@@ -75,22 +62,8 @@ export interface Conversation {
   other_member?: Profile;
   last_message?: Message;
   unread_count?: number;
-  members?: ConversationMember[];
   member_ids?: string[];
   members_meta?: Record<string, Profile>;
-  member_roles?: Record<string, 'admin' | 'member'>;
-  removed_members?: Record<string, RemovedMemberInfo>;
-  is_removed?: boolean;
-  removal_info?: RemovedMemberInfo | null;
-}
-
-export interface ConversationMember {
-  id: string;
-  conversation_id: string;
-  user_id: string;
-  joined_at: string;
-  role?: 'admin' | 'member';
-  profile?: Profile;
 }
 
 export interface Message {

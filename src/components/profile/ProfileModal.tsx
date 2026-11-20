@@ -20,7 +20,6 @@ import {
   Users,
   UserCheck,
   UserPlus,
-  Mail,
   Camera,
   Upload,
   Trash2,
@@ -327,12 +326,19 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   const handleBlockToggle = async () => {
     if (!targetUser || actionLoading) return;
     setActionLoading(true);
+    setErrorMessage(null);
     try {
       if (relationStatus?.isBlockedByMe) {
-        if (onUnblock) await onUnblock(targetUser.id);
+        const ok = onUnblock ? await onUnblock(targetUser.id) : true;
+        if (ok === false) {
+          setErrorMessage('Unable to unblock user right now. Please try again.');
+        }
         setShowBlockConfirm(false);
       } else {
-        if (onBlock) await onBlock(targetUser);
+        const ok = onBlock ? await onBlock(targetUser) : true;
+        if (ok === false) {
+          setErrorMessage('Unable to block user right now. Please wait a moment and try again.');
+        }
         setShowBlockConfirm(false);
       }
     } finally {
@@ -362,6 +368,28 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
         </div>
 
         {/* Content */}
+        {!isEditingSelf && relationStatus?.isBlocked ? (
+          <div className="p-8 text-center space-y-4">
+            <div className="w-16 h-16 rounded-3xl bg-neutral-100 dark:bg-neutral-800 text-neutral-400 flex items-center justify-center mx-auto border border-neutral-200 dark:border-neutral-700">
+              <User className="w-8 h-8" />
+            </div>
+            <div className="space-y-1.5">
+              <h4 className="text-lg font-extrabold text-neutral-900 dark:text-neutral-100">
+                User not found
+              </h4>
+              <p className="text-xs text-neutral-500 dark:text-neutral-400 max-w-xs mx-auto leading-relaxed">
+                This profile is not available.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-6 py-2.5 text-xs font-semibold text-neutral-700 dark:text-neutral-200 bg-neutral-100 hover:bg-neutral-200 dark:bg-neutral-800 dark:hover:bg-neutral-700 rounded-2xl transition-colors cursor-pointer"
+            >
+              Close
+            </button>
+          </div>
+        ) : (
         <div className="p-6 overflow-y-auto space-y-5">
           {/* Avatar preview */}
           <div className="flex flex-col items-center">
@@ -867,36 +895,38 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
               {/* Block / Unblock Management */}
               <div className="pt-2 border-t border-neutral-200 dark:border-neutral-800 flex items-center justify-between">
                 {showBlockConfirm ? (
-                  <div className="w-full p-3.5 rounded-2xl bg-rose-500/10 border border-rose-500/30 space-y-2.5">
-                    <p className="text-xs text-rose-600 dark:text-rose-400 font-medium leading-relaxed">
-                      Block & Ban <strong>@{targetUser.username}</strong>? This will restrict their communication and send an <strong>official Ban Notice email to their Gmail inbox</strong>.
-                    </p>
-                    <div className="flex items-center justify-between pt-1">
-                      <span className="text-[11px] text-neutral-400 flex items-center gap-1">
-                        <Mail className="w-3.5 h-3.5 text-blue-400" />
-                        <span>Gmail Notice Enabled</span>
-                      </span>
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={() => setShowBlockConfirm(false)}
-                          className="px-3 py-1.5 text-xs rounded-xl bg-neutral-200 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300 font-medium"
-                        >
-                          Cancel
-                        </button>
-                        <button
-                          onClick={handleBlockToggle}
-                          disabled={actionLoading}
-                          className="px-3.5 py-1.5 text-xs rounded-xl bg-rose-600 text-white font-bold hover:bg-rose-700 shadow-sm flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-                        >
-                          {actionLoading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                          <span>Ban & Send Email</span>
-                        </button>
-                      </div>
+                  <div className="w-full p-4 rounded-2xl bg-rose-500/10 border border-rose-500/30 space-y-3">
+                    <div className="space-y-1">
+                      <p className="text-xs font-bold text-rose-700 dark:text-rose-300">
+                        Block @{targetUser.username}?
+                      </p>
+                      <p className="text-xs text-rose-600/90 dark:text-rose-400 leading-relaxed">
+                        They will no longer be able to view your profile, find you in search, follow you, message you, or call you. Any existing follows between you will be removed, and they will not be notified. You can unblock them anytime in Settings.
+                      </p>
+                    </div>
+                    <div className="flex items-center justify-end gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => setShowBlockConfirm(false)}
+                        className="px-3.5 py-1.5 text-xs rounded-xl bg-neutral-200 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300 font-medium cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleBlockToggle}
+                        disabled={actionLoading}
+                        className="px-4 py-1.5 text-xs rounded-xl bg-rose-600 text-white font-bold hover:bg-rose-700 shadow-sm flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                      >
+                        {actionLoading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                        <span>Block</span>
+                      </button>
                     </div>
                   </div>
                 ) : (
                   <>
                     <button
+                      type="button"
                       onClick={() => {
                         if (relationStatus?.isBlockedByMe) {
                           handleBlockToggle();
@@ -920,6 +950,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                     </button>
 
                     <button
+                      type="button"
                       onClick={onClose}
                       className="px-5 py-2 text-xs font-semibold text-neutral-700 dark:text-neutral-300 bg-neutral-100 hover:bg-neutral-200 dark:bg-neutral-800 dark:hover:bg-neutral-700 rounded-2xl transition-colors cursor-pointer"
                     >
@@ -931,6 +962,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
             </div>
           )}
         </div>
+        )}
       </div>
 
       {/* Follows List Modal for viewing followers / following */}

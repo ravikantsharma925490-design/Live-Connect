@@ -13,7 +13,6 @@ import {
   writeBatch,
   serverTimestamp,
   increment,
-  deleteField,
 } from 'firebase/firestore';
 import { deleteUser } from 'firebase/auth';
 import {
@@ -37,10 +36,8 @@ import {
 import {
   Profile,
   Conversation,
-  ConversationMember,
   Message,
   UserRelationStatus,
-  RemovedMemberInfo,
 } from '@/src/types';
 import { generateUUID } from '@/src/lib/utils';
 
@@ -101,7 +98,6 @@ export function buildConversationFromDocs(
   convData?: Record<string, any> | null,
   memberProfiles?: Record<string, Profile>
 ): Conversation {
-  const type = (convData?.type || inboxData.type || 'direct') as 'direct' | 'group';
   const memberRoles: Record<string, 'admin' | 'member'> | undefined = convData?.memberRoles || undefined;
   const memberIds = memberRoles ? Object.keys(memberRoles) : undefined;
 
@@ -109,7 +105,7 @@ export function buildConversationFromDocs(
   const updatedAt = tsToIso(inboxData.updatedAt || convData?.updatedAt);
 
   let otherMember: Profile | undefined;
-  if (type === 'direct' && inboxData.otherMemberId) {
+  if (inboxData.otherMemberId) {
     const resolved = memberProfiles?.[inboxData.otherMemberId];
     otherMember = resolved || {
       id: inboxData.otherMemberId,
@@ -138,23 +134,9 @@ export function buildConversationFromDocs(
     };
   }
 
-  let removalInfo: RemovedMemberInfo | null = null;
-  if (inboxData.isRemoved) {
-    removalInfo = {
-      removed_at: inboxData.removedAt || updatedAt,
-      removed_by: '',
-      admin_name: inboxData.removalAdminName || 'Admin',
-      admin_username: inboxData.removalAdminUsername || 'admin',
-    };
-  }
-
   return {
     id: convId,
-    type,
-    name: convData?.name ?? inboxData.name ?? null,
-    description: convData?.description ?? inboxData.description ?? null,
-    avatar_url: convData?.avatarUrl ?? inboxData.avatarUrl ?? null,
-    owner_id: convData?.ownerId ?? inboxData.groupOwnerId ?? null,
+    type: 'direct',
     pinned_message_id: convData?.pinnedMessageId ?? null,
     created_at: createdAt,
     updated_at: updatedAt,
@@ -162,11 +144,7 @@ export function buildConversationFromDocs(
     last_message: lastMessage,
     unread_count: typeof inboxData.unreadCount === 'number' ? inboxData.unreadCount : 0,
     member_ids: memberIds,
-    member_roles: memberRoles,
     members_meta: memberProfiles,
-    removed_members: convData?.removedMembers || undefined,
-    is_removed: Boolean(inboxData.isRemoved),
-    removal_info: removalInfo,
   };
 }
 
@@ -189,10 +167,19 @@ async function getDocDataWithRestFallback(
   }
 }
 
-export async function fetchPublicProfileFs(userId: string): Promise<Profile | null> {
+export async function fetchPublicProfileFs(userId: string, viewerId?: string): Promise<Profile | null> {
   if (!userId || !isValidFirestoreId(userId)) return null;
   const path = `public_profiles/${userId}`;
   try {
+    if (viewerId && viewerId !== userId && isValidFirestoreId(viewerId)) {
+      const [b1, b2] = await Promise.all([
+        getDoc(doc(db, 'blocks', `${viewerId}_${userId}`)).catch(() => null),
+        getDoc(doc(db, 'blocks', `${userId}_${viewerId}`)).catch(() => null),
+      ]);
+      if (b1?.exists() || b2?.exists()) {
+        return null;
+      }
+    }
     const res = await getDocDataWithRestFallback(path, 'public_profiles', userId);
     if (!res.exists || !res.data) return null;
     return publicProfileDocToProfile(res.data, userId);
@@ -608,20 +595,54 @@ export async function updateUserProfileDocsFs(
   return refreshed;
 }
 
+export async function fetchBlockedUserIdsFs(userId: string): Promise<{
+  blockedByMe: Set<string>;
+  blockedByThem: Set<string>;
+  allBlocked: Set<string>;
+}> {
+  const blockedByMe = new Set<string>();
+  const blockedByThem = new Set<string>();
+  if (!userId || !isValidFirestoreId(userId)) {
+    return { blockedByMe, blockedByThem, allBlocked: new Set() };
+  }
+
+  try {
+    const [byMeSnap, byThemSnap] = await Promise.all([
+      getDocs(query(collection(db, 'blocks'), where('blockerId', '==', userId))),
+      getDocs(query(collection(db, 'blocks'), where('blockedId', '==', userId))),
+    ]);
+
+    byMeSnap.forEach((docSnap) => {
+      const targetId = docSnap.data()?.blockedId;
+      if (targetId) blockedByMe.add(targetId);
+    });
+    byThemSnap.forEach((docSnap) => {
+      const blockerId = docSnap.data()?.blockerId;
+      if (blockerId) blockedByThem.add(blockerId);
+    });
+  } catch {
+    // Non-fatal fallback: client hook listener still maintains real-time sets
+  }
+
+  return {
+    blockedByMe,
+    blockedByThem,
+    allBlocked: new Set([...blockedByMe, ...blockedByThem]),
+  };
+}
+
 export async function searchPublicProfilesFs(queryText: string, currentUserId: string): Promise<Profile[]> {
   const clean = queryText.trim().replace(/^@/, '').toLowerCase();
   const path = 'public_profiles';
   try {
-    const q = query(
-      collection(db, 'public_profiles'),
-      where('isPublic', '==', true),
-      limit(100)
-    );
-    const snap = await getDocs(q);
+    const [snap, { allBlocked }] = await Promise.all([
+      getDocs(query(collection(db, 'public_profiles'), where('isPublic', '==', true), limit(100))),
+      fetchBlockedUserIdsFs(currentUserId),
+    ]);
     const results: Profile[] = [];
     snap.forEach((docSnap) => {
       const p = publicProfileDocToProfile(docSnap.data(), docSnap.id);
-      if (p.id === currentUserId) return;
+      if (p.id === currentUserId || allBlocked.has(p.id)) return;
       if (!clean) {
         results.push(p);
         return;
@@ -691,6 +712,14 @@ export async function followUserFs(
   targetUserId: string,
   userMeta?: Profile | null
 ): Promise<{ isFollowedBy: boolean; isMutual: boolean }> {
+  if (!userId || !targetUserId || userId === targetUserId) {
+    throw new Error('You cannot follow yourself.');
+  }
+  const rel = await fetchRelationStatusFs(userId, targetUserId);
+  if (rel.isBlocked) {
+    throw new Error('Cannot follow this user.');
+  }
+
   const followId = `${userId}_${targetUserId}`;
   const path = `follows/${followId}`;
 
@@ -744,23 +773,26 @@ export async function unfollowUserFs(userId: string, targetUserId: string): Prom
 
 export async function blockUserFs(
   userId: string,
-  targetUserId: string,
-  reason?: string
+  targetUserId: string
 ): Promise<void> {
+  if (!userId || !targetUserId || userId === targetUserId) {
+    throw new Error('You cannot block yourself.');
+  }
   const blockId = `${userId}_${targetUserId}`;
   const path = `blocks/${blockId}`;
 
   try {
     const batch = writeBatch(db);
+    // Deterministic document ID {blockerId}_{blockedId} prevents duplicate entries
     batch.set(doc(db, 'blocks', blockId), {
       id: blockId,
       blockerId: userId,
       blockedId: targetUserId,
-      reason: sanitizeOptionalStr(reason, 300),
       createdAt: serverTimestamp(),
     });
-    // Clean up our follow link in same atomic batch
+    // Atomically remove both follow directions between A and B without notifying B
     batch.delete(doc(db, 'follows', `${userId}_${targetUserId}`));
+    batch.delete(doc(db, 'follows', `${targetUserId}_${userId}`));
     await batch.commit();
   } catch (err) {
     handleFirestoreError(err, OperationType.WRITE, path);
@@ -768,9 +800,11 @@ export async function blockUserFs(
 }
 
 export async function unblockUserFs(userId: string, targetUserId: string): Promise<void> {
+  if (!userId || !targetUserId || userId === targetUserId) return;
   const blockId = `${userId}_${targetUserId}`;
   const path = `blocks/${blockId}`;
   try {
+    // Only deletes the block entry; old follow connections are never restored
     await deleteDoc(doc(db, 'blocks', blockId));
   } catch (err) {
     handleFirestoreError(err, OperationType.DELETE, path);
@@ -778,14 +812,13 @@ export async function unblockUserFs(userId: string, targetUserId: string): Promi
 }
 
 // ============================================================================
-// CONVERSATIONS & GROUPS
+// CONVERSATIONS
 // ============================================================================
 
 async function upsertPeerInboxOnMessage(
   peerId: string,
   convId: string,
   senderId: string,
-  convType: 'direct' | 'group',
   lastMessageId: string,
   lastMessageContent: string,
   inboxCreateExtras: {
@@ -793,11 +826,6 @@ async function upsertPeerInboxOnMessage(
     otherDisplayName?: string | null;
     otherUsername?: string | null;
     otherAvatarUrl?: string | null;
-    name?: string | null;
-    description?: string | null;
-    avatarUrl?: string | null;
-    groupOwnerId?: string | null;
-    myRole?: 'admin' | 'member' | null;
   }
 ) {
   const inboxRef = doc(db, 'users', peerId, 'inbox', convId);
@@ -817,7 +845,7 @@ async function upsertPeerInboxOnMessage(
       await setDoc(inboxRef, {
         id: convId,
         ownerId: peerId,
-        type: convType,
+        type: 'direct',
         ...(inboxCreateExtras.otherMemberId ? { otherMemberId: inboxCreateExtras.otherMemberId } : {}),
         ...(inboxCreateExtras.otherDisplayName !== undefined
           ? { otherDisplayName: sanitizeOptionalStr(inboxCreateExtras.otherDisplayName, 80) }
@@ -828,17 +856,6 @@ async function upsertPeerInboxOnMessage(
         ...(inboxCreateExtras.otherAvatarUrl !== undefined
           ? { otherAvatarUrl: sanitizeOptionalStr(inboxCreateExtras.otherAvatarUrl, 1024) }
           : {}),
-        ...(inboxCreateExtras.name !== undefined
-          ? { name: sanitizeOptionalStr(inboxCreateExtras.name, 100) }
-          : {}),
-        ...(inboxCreateExtras.description !== undefined
-          ? { description: sanitizeOptionalStr(inboxCreateExtras.description, 500) }
-          : {}),
-        ...(inboxCreateExtras.avatarUrl !== undefined
-          ? { avatarUrl: sanitizeOptionalStr(inboxCreateExtras.avatarUrl, 1024) }
-          : {}),
-        ...(inboxCreateExtras.groupOwnerId ? { groupOwnerId: inboxCreateExtras.groupOwnerId } : {}),
-        ...(inboxCreateExtras.myRole ? { myRole: inboxCreateExtras.myRole } : {}),
         lastMessageId,
         lastMessageContent: sanitizeStr(lastMessageContent, FIREBASE_CONSTRAINTS.MAX_LAST_MESSAGE_PREVIEW),
         lastMessageSenderId: senderId,
@@ -862,6 +879,13 @@ export async function createOrGetDirectConversationFs(
   const userId = currentUserProfile.id;
   const targetUserId = targetProfile.id;
   const isSelf = userId === targetUserId;
+
+  if (!isSelf) {
+    const rel = await fetchRelationStatusFs(userId, targetUserId);
+    if (rel.isBlocked) {
+      throw new Error('Cannot start conversation with a blocked user.');
+    }
+  }
 
   const convRef = doc(db, 'conversations', convId);
   const existingConv = await getDoc(convRef).catch(() => null);
@@ -964,455 +988,12 @@ export async function createOrGetDirectConversationFs(
   return {
     id: convId,
     type: 'direct',
-    owner_id: userId,
     created_at: nowIso,
     updated_at: nowIso,
     other_member: targetProfile,
     unread_count: 0,
     member_ids: isSelf ? [userId] : [userId, targetUserId],
   };
-}
-
-export async function createGroupConversationFs(
-  name: string,
-  description: string,
-  avatarUrl: string | null,
-  memberIds: string[],
-  creatorProfile: Profile
-): Promise<Conversation> {
-  const convId = `grp_${generateUUID().replace(/-/g, '').slice(0, 24)}`;
-  const allMemberIds = Array.from(new Set([creatorProfile.id, ...memberIds.filter(Boolean)])).slice(0, 50);
-  const profilesMap = await fetchMultiplePublicProfilesFs(allMemberIds);
-  profilesMap[creatorProfile.id] = creatorProfile;
-
-  const memberRoles: Record<string, 'admin' | 'member'> = {};
-  allMemberIds.forEach((uid) => {
-    memberRoles[uid] = uid === creatorProfile.id ? 'admin' : 'member';
-  });
-
-  const cleanName = sanitizeStr(name, FIREBASE_CONSTRAINTS.MAX_GROUP_NAME) || 'New Group';
-  const cleanDesc = sanitizeOptionalStr(description, FIREBASE_CONSTRAINTS.MAX_GROUP_DESC);
-  const cleanAvatar = sanitizeOptionalStr(avatarUrl, FIREBASE_CONSTRAINTS.MAX_AVATAR_URL);
-
-  const batch = writeBatch(db);
-  batch.set(doc(db, 'conversations', convId), {
-    id: convId,
-    type: 'group',
-    name: cleanName,
-    description: cleanDesc,
-    avatarUrl: cleanAvatar,
-    ownerId: creatorProfile.id,
-    memberRoles,
-    removedMembers: {},
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  });
-
-  allMemberIds.forEach((uid) => {
-    const p = profilesMap[uid];
-    const role = uid === creatorProfile.id ? 'admin' : 'member';
-    batch.set(doc(db, 'conversations', convId, 'members', uid), {
-      userId: uid,
-      conversationId: convId,
-      role,
-      displayName: sanitizeOptionalStr(p?.display_name, 80),
-      username: sanitizeOptionalStr(p?.username, 32),
-      avatarUrl: sanitizeOptionalStr(p?.avatar_url, 1024),
-      joinedAt: serverTimestamp(),
-    });
-
-    batch.set(doc(db, 'users', uid, 'inbox', convId), {
-      id: convId,
-      ownerId: uid,
-      type: 'group',
-      name: cleanName,
-      description: cleanDesc,
-      avatarUrl: cleanAvatar,
-      groupOwnerId: creatorProfile.id,
-      myRole: role,
-      unreadCount: 0,
-      isRemoved: false,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
-  });
-
-  try {
-    await batch.commit();
-  } catch (err) {
-    handleFirestoreError(err, OperationType.WRITE, `conversations/${convId}`);
-  }
-
-  // Send system creation message
-  const sysMsgId = `sys_${generateUUID().replace(/-/g, '').slice(0, 20)}`;
-  const sysContent = `[SYSTEM:${creatorProfile.display_name || creatorProfile.username} (@${creatorProfile.username}) created group "${cleanName}"]`;
-  const msgBatch = writeBatch(db);
-  allMemberIds.forEach((uid) => {
-    msgBatch.set(doc(db, 'users', uid, 'inbox', convId, 'messages', sysMsgId), {
-      id: sysMsgId,
-      conversationId: convId,
-      senderId: creatorProfile.id,
-      senderDisplayName: sanitizeOptionalStr(creatorProfile.display_name, 80),
-      senderUsername: sanitizeOptionalStr(creatorProfile.username, 32),
-      senderAvatarUrl: sanitizeOptionalStr(creatorProfile.avatar_url, 1024),
-      content: sysContent,
-      isRead: uid === creatorProfile.id,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
-  });
-  await msgBatch.commit().catch(() => {});
-
-  const nowIso = new Date().toISOString();
-  return {
-    id: convId,
-    type: 'group',
-    name: cleanName,
-    description: cleanDesc,
-    avatar_url: cleanAvatar,
-    owner_id: creatorProfile.id,
-    member_roles: memberRoles,
-    member_ids: allMemberIds,
-    members_meta: profilesMap,
-    unread_count: 0,
-    created_at: nowIso,
-    updated_at: nowIso,
-  };
-}
-
-export async function fetchGroupDetailsFs(conversationId: string): Promise<Conversation | null> {
-  const path = `conversations/${conversationId}`;
-  try {
-    const convSnap = await getDoc(doc(db, 'conversations', conversationId));
-    if (!convSnap.exists()) return null;
-    const convData = convSnap.data();
-    const memberRoles: Record<string, 'admin' | 'member'> = convData.memberRoles || {};
-    const memberIds = Object.keys(memberRoles);
-    const membersMeta = await fetchMultiplePublicProfilesFs(memberIds);
-
-    return {
-      id: convSnap.id,
-      type: convData.type || 'group',
-      name: convData.name || null,
-      description: convData.description || null,
-      avatar_url: convData.avatarUrl || null,
-      owner_id: convData.ownerId || null,
-      member_roles: memberRoles,
-      member_ids: memberIds,
-      members_meta: membersMeta,
-      removed_members: convData.removedMembers || undefined,
-      pinned_message_id: convData.pinnedMessageId || null,
-      created_at: tsToIso(convData.createdAt),
-      updated_at: tsToIso(convData.updatedAt),
-    };
-  } catch (err) {
-    handleFirestoreError(err, OperationType.GET, path);
-  }
-}
-
-export async function updateGroupInfoFs(
-  conversationId: string,
-  updates: { name: string; description?: string; avatarUrl?: string | null }
-): Promise<Conversation | null> {
-  const path = `conversations/${conversationId}`;
-  const cleanName = sanitizeStr(updates.name, FIREBASE_CONSTRAINTS.MAX_GROUP_NAME);
-  const cleanDesc = sanitizeOptionalStr(updates.description, FIREBASE_CONSTRAINTS.MAX_GROUP_DESC);
-  const cleanAvatar = sanitizeOptionalStr(updates.avatarUrl, FIREBASE_CONSTRAINTS.MAX_AVATAR_URL);
-
-  try {
-    const convSnap = await getDoc(doc(db, 'conversations', conversationId));
-    if (!convSnap.exists()) throw new Error('Group not found');
-    const convData = convSnap.data();
-    const memberIds = Object.keys(convData.memberRoles || {});
-
-    const batch = writeBatch(db);
-    batch.update(doc(db, 'conversations', conversationId), {
-      name: cleanName,
-      description: cleanDesc,
-      avatarUrl: cleanAvatar,
-      updatedAt: serverTimestamp(),
-    });
-
-    memberIds.forEach((uid) => {
-      batch.update(doc(db, 'users', uid, 'inbox', conversationId), {
-        name: cleanName,
-        description: cleanDesc,
-        avatarUrl: cleanAvatar,
-        updatedAt: serverTimestamp(),
-      });
-    });
-
-    await batch.commit();
-    return await fetchGroupDetailsFs(conversationId);
-  } catch (err) {
-    handleFirestoreError(err, OperationType.UPDATE, path);
-  }
-}
-
-export async function addGroupMembersFs(
-  conversationId: string,
-  actorProfile: Profile,
-  newMemberIds: string[],
-  profilesMap: Record<string, Profile>
-): Promise<Conversation | null> {
-  const path = `conversations/${conversationId}`;
-  try {
-    const convSnap = await getDoc(doc(db, 'conversations', conversationId));
-    if (!convSnap.exists()) throw new Error('Group not found');
-    const convData = convSnap.data();
-    const currentRoles: Record<string, 'admin' | 'member'> = { ...(convData.memberRoles || {}) };
-    const cleanToAdd = newMemberIds.filter((id) => id && !currentRoles[id]);
-    if (cleanToAdd.length === 0) return await fetchGroupDetailsFs(conversationId);
-
-    const updatedRoles = { ...currentRoles };
-    const updatedRemoved = { ...(convData.removedMembers || {}) };
-    cleanToAdd.forEach((uid) => {
-      updatedRoles[uid] = 'member';
-      delete updatedRemoved[uid];
-    });
-
-    const batch1 = writeBatch(db);
-    batch1.update(doc(db, 'conversations', conversationId), {
-      memberRoles: updatedRoles,
-      removedMembers: updatedRemoved,
-      updatedAt: serverTimestamp(),
-    });
-
-    cleanToAdd.forEach((uid) => {
-      const p = profilesMap[uid];
-      batch1.set(doc(db, 'conversations', conversationId, 'members', uid), {
-        userId: uid,
-        conversationId,
-        role: 'member',
-        displayName: sanitizeOptionalStr(p?.display_name, 80),
-        username: sanitizeOptionalStr(p?.username, 32),
-        avatarUrl: sanitizeOptionalStr(p?.avatar_url, 1024),
-        joinedAt: serverTimestamp(),
-      });
-
-      batch1.set(doc(db, 'users', uid, 'inbox', conversationId), {
-        id: conversationId,
-        ownerId: uid,
-        type: 'group',
-        name: sanitizeOptionalStr(convData.name, 100),
-        description: sanitizeOptionalStr(convData.description, 500),
-        avatarUrl: sanitizeOptionalStr(convData.avatarUrl, 1024),
-        groupOwnerId: convData.ownerId,
-        myRole: 'member',
-        unreadCount: 0,
-        isRemoved: false,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-    });
-
-    await batch1.commit();
-
-    // Send centered [SYSTEM:...] notification messages for each added user
-    const allCurrentMembers = Object.keys(updatedRoles);
-    for (const addedUid of cleanToAdd) {
-      const addedProf = profilesMap[addedUid];
-      const addedName = addedProf?.display_name || addedProf?.username || addedUid;
-      const addedUsername = addedProf?.username || '';
-      const actorName = actorProfile.display_name || actorProfile.username;
-      const sysId = `sys_${generateUUID().replace(/-/g, '').slice(0, 20)}`;
-      const content = `[SYSTEM:USER_ADDED:${actorProfile.id}:${actorName}:${actorProfile.username}:${addedUid}:${addedName}:${addedUsername}]`;
-
-      const msgBatch = writeBatch(db);
-      allCurrentMembers.forEach((mUid) => {
-        msgBatch.set(doc(db, 'users', mUid, 'inbox', conversationId, 'messages', sysId), {
-          id: sysId,
-          conversationId,
-          senderId: actorProfile.id,
-          senderDisplayName: sanitizeOptionalStr(actorProfile.display_name, 80),
-          senderUsername: sanitizeOptionalStr(actorProfile.username, 32),
-          senderAvatarUrl: sanitizeOptionalStr(actorProfile.avatar_url, 1024),
-          content,
-          isRead: mUid === actorProfile.id,
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
-      });
-      await msgBatch.commit().catch(() => {});
-    }
-
-    return await fetchGroupDetailsFs(conversationId);
-  } catch (err) {
-    handleFirestoreError(err, OperationType.UPDATE, path);
-  }
-}
-
-export async function removeGroupMemberFs(
-  conversationId: string,
-  actorProfile: Profile,
-  targetMemberId: string
-): Promise<Conversation | null> {
-  const path = `conversations/${conversationId}`;
-  try {
-    const convSnap = await getDoc(doc(db, 'conversations', conversationId));
-    if (!convSnap.exists()) throw new Error('Group not found');
-    const convData = convSnap.data();
-    const currentRoles: Record<string, 'admin' | 'member'> = { ...(convData.memberRoles || {}) };
-    const existingMemberIds = Object.keys(currentRoles);
-    const isSelfLeave = actorProfile.id === targetMemberId;
-
-    const targetProfile = isSelfLeave ? actorProfile : await fetchPublicProfileFs(targetMemberId);
-    const targetName = targetProfile?.display_name || targetProfile?.username || targetMemberId;
-    const targetUsername = targetProfile?.username || '';
-    const actorName = actorProfile.display_name || actorProfile.username;
-
-    const sysId = `sys_${generateUUID().replace(/-/g, '').slice(0, 20)}`;
-    const content = isSelfLeave
-      ? `[SYSTEM:USER_LEFT:${targetMemberId}:${targetName}:${targetUsername}]`
-      : `[SYSTEM:USER_REMOVED:${actorProfile.id}:${actorName}:${actorProfile.username}:${targetMemberId}:${targetName}:${targetUsername}]`;
-
-    const remainingMembers = existingMemberIds.filter((id) => id !== targetMemberId);
-
-    // If the last member is leaving the group, delete the conversation instead of leaving memberRoles empty
-    if (isSelfLeave && remainingMembers.length === 0) {
-      const cleanupBatch = writeBatch(db);
-      cleanupBatch.delete(doc(db, 'conversations', conversationId, 'members', targetMemberId));
-      cleanupBatch.delete(doc(db, 'users', targetMemberId, 'inbox', conversationId));
-      cleanupBatch.delete(doc(db, 'conversations', conversationId));
-      await cleanupBatch.commit();
-      return null;
-    }
-
-    const batch = writeBatch(db);
-
-    // 1. Write centered system notification message before member removal commits
-    remainingMembers.forEach((mUid) => {
-      batch.set(doc(db, 'users', mUid, 'inbox', conversationId, 'messages', sysId), {
-        id: sysId,
-        conversationId,
-        senderId: actorProfile.id,
-        senderDisplayName: sanitizeOptionalStr(actorProfile.display_name, 80),
-        senderUsername: sanitizeOptionalStr(actorProfile.username, 32),
-        senderAvatarUrl: sanitizeOptionalStr(actorProfile.avatar_url, 1024),
-        content,
-        isRead: mUid === actorProfile.id,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-    });
-
-    // 2. Update conversation metadata
-    if (isSelfLeave) {
-      if (convData.ownerId === targetMemberId && remainingMembers.length > 0) {
-        const nextOwnerId = remainingMembers[0];
-        const nextRoles = { ...currentRoles };
-        delete nextRoles[targetMemberId];
-        nextRoles[nextOwnerId] = 'admin';
-        batch.update(doc(db, 'conversations', conversationId), {
-          ownerId: nextOwnerId,
-          memberRoles: nextRoles,
-          updatedAt: serverTimestamp(),
-        });
-        batch.update(doc(db, 'conversations', conversationId, 'members', nextOwnerId), {
-          role: 'admin',
-        });
-      } else {
-        batch.update(doc(db, 'conversations', conversationId), {
-          [`memberRoles.${targetMemberId}`]: deleteField(),
-          updatedAt: serverTimestamp(),
-        });
-      }
-    } else {
-      const nextRoles = { ...currentRoles };
-      delete nextRoles[targetMemberId];
-      const nextRemoved = {
-        ...(convData.removedMembers || {}),
-        [targetMemberId]: {
-          removed_at: new Date().toISOString(),
-          removed_by: actorProfile.id,
-          admin_name: actorName,
-          admin_username: actorProfile.username,
-          member_name: targetName,
-          member_username: targetUsername,
-        },
-      };
-      batch.update(doc(db, 'conversations', conversationId), {
-        memberRoles: nextRoles,
-        removedMembers: nextRemoved,
-        updatedAt: serverTimestamp(),
-      });
-
-      // Mark target's inbox item as removed (so UI deletes/notifies)
-      batch.update(doc(db, 'users', targetMemberId, 'inbox', conversationId), {
-        isRemoved: true,
-        removalAdminName: sanitizeOptionalStr(actorName, 80),
-        removalAdminUsername: sanitizeOptionalStr(actorProfile.username, 32),
-        removedAt: new Date().toISOString(),
-        updatedAt: serverTimestamp(),
-      });
-    }
-
-    // 3. Remove from Master Gate members subcollection
-    batch.delete(doc(db, 'conversations', conversationId, 'members', targetMemberId));
-
-    await batch.commit();
-
-    if (isSelfLeave) {
-      await deleteDoc(doc(db, 'users', targetMemberId, 'inbox', conversationId)).catch(() => {});
-      return null;
-    }
-    return await fetchGroupDetailsFs(conversationId);
-  } catch (err) {
-    handleFirestoreError(err, OperationType.UPDATE, path);
-  }
-}
-
-export async function updateGroupMemberRoleFs(
-  conversationId: string,
-  targetMemberId: string,
-  role: 'admin' | 'member'
-): Promise<Conversation | null> {
-  const path = `conversations/${conversationId}`;
-  try {
-    const convSnap = await getDoc(doc(db, 'conversations', conversationId));
-    if (!convSnap.exists()) throw new Error('Group not found');
-    const convData = convSnap.data();
-    const nextRoles = { ...(convData.memberRoles || {}), [targetMemberId]: role };
-
-    const batch = writeBatch(db);
-    batch.update(doc(db, 'conversations', conversationId), {
-      memberRoles: nextRoles,
-      updatedAt: serverTimestamp(),
-    });
-    batch.update(doc(db, 'conversations', conversationId, 'members', targetMemberId), {
-      role,
-    });
-    batch.update(doc(db, 'users', targetMemberId, 'inbox', conversationId), {
-      myRole: role,
-      updatedAt: serverTimestamp(),
-    });
-    await batch.commit();
-
-    return await fetchGroupDetailsFs(conversationId);
-  } catch (err) {
-    handleFirestoreError(err, OperationType.UPDATE, path);
-  }
-}
-
-export async function deleteGroupFs(conversationId: string): Promise<void> {
-  const path = `conversations/${conversationId}`;
-  try {
-    const convSnap = await getDoc(doc(db, 'conversations', conversationId));
-    if (convSnap.exists()) {
-      const convData = convSnap.data();
-      const memberIds = Object.keys(convData.memberRoles || {});
-      for (const mUid of memberIds) {
-        await updateDoc(doc(db, 'users', mUid, 'inbox', conversationId), {
-          isRemoved: true,
-          removedAt: new Date().toISOString(),
-          updatedAt: serverTimestamp(),
-        }).catch(() => {});
-      }
-      await deleteDoc(doc(db, 'conversations', conversationId));
-    }
-  } catch (err) {
-    handleFirestoreError(err, OperationType.DELETE, path);
-  }
 }
 
 // ============================================================================
@@ -1424,10 +1005,8 @@ export async function sendMessageToFirestoreFs(params: {
   conversationId: string;
   content: string;
   senderProfile: Profile;
-  isGroup: boolean;
   receiverId?: string;
   receiverProfile?: Profile;
-  groupName?: string | null;
   replyToMessageId?: string | null;
   mentions?: string[];
   mediaType?: string | null;
@@ -1440,7 +1019,6 @@ export async function sendMessageToFirestoreFs(params: {
     conversationId,
     content,
     senderProfile,
-    isGroup,
     receiverId,
     receiverProfile,
     replyToMessageId,
@@ -1456,7 +1034,7 @@ export async function sendMessageToFirestoreFs(params: {
   if (!cleanContent) throw new Error('Message content cannot be empty.');
 
   // For direct chats with another user, verify mutual follow & ensure conversation exists
-  if (!isGroup && receiverId && receiverId !== senderId) {
+  if (receiverId && receiverId !== senderId) {
     const rel = await fetchRelationStatusFs(senderId, receiverId);
     if (rel.isBlocked) {
       throw new Error('Messaging is unavailable because one of you has blocked the other.');
@@ -1468,7 +1046,7 @@ export async function sendMessageToFirestoreFs(params: {
     const peerProf = receiverProfile || (await fetchPublicProfileFs(receiverId));
     if (!peerProf) throw new Error('Recipient profile not found.');
     await createOrGetDirectConversationFs(conversationId, senderProfile, peerProf);
-  } else if (!isGroup && (!receiverId || receiverId === senderId)) {
+  } else {
     await createOrGetDirectConversationFs(conversationId, senderProfile, senderProfile);
   }
 
@@ -1478,7 +1056,6 @@ export async function sendMessageToFirestoreFs(params: {
     throw new Error('Conversation not found.');
   }
   const convData = convSnap.data();
-  const convType = (convData.type || (isGroup ? 'group' : 'direct')) as 'direct' | 'group';
   const memberRoles: Record<string, 'admin' | 'member'> = convData.memberRoles || { [senderId]: 'admin' };
   const memberIds = Object.keys(memberRoles);
   if (!memberIds.includes(senderId)) {
@@ -1524,22 +1101,17 @@ export async function sendMessageToFirestoreFs(params: {
   // 2. Update each participant's inbox preview & unread counter
   await Promise.all(
     memberIds.map((mUid) =>
-      upsertPeerInboxOnMessage(mUid, conversationId, senderId, convType, messageId, cleanContent, {
-        otherMemberId: convType === 'direct' ? (mUid === senderId ? receiverId || senderId : senderId) : undefined,
-        otherDisplayName: convType === 'direct' && mUid !== senderId ? senderProfile.display_name : receiverProfile?.display_name,
-        otherUsername: convType === 'direct' && mUid !== senderId ? senderProfile.username : receiverProfile?.username,
-        otherAvatarUrl: convType === 'direct' && mUid !== senderId ? senderProfile.avatar_url : receiverProfile?.avatar_url,
-        name: convData.name ?? params.groupName ?? null,
-        description: convData.description ?? null,
-        avatarUrl: convData.avatarUrl ?? null,
-        groupOwnerId: convData.ownerId ?? null,
-        myRole: memberRoles[mUid] || 'member',
+      upsertPeerInboxOnMessage(mUid, conversationId, senderId, messageId, cleanContent, {
+        otherMemberId: mUid === senderId ? receiverId || senderId : senderId,
+        otherDisplayName: mUid !== senderId ? senderProfile.display_name : receiverProfile?.display_name,
+        otherUsername: mUid !== senderId ? senderProfile.username : receiverProfile?.username,
+        otherAvatarUrl: mUid !== senderId ? senderProfile.avatar_url : receiverProfile?.avatar_url,
       }).catch(() => {})
     )
   );
 
   // 3. Dispatch notification to recipients (for non-call-log messages)
-  if (!cleanContent.startsWith('[CALL_LOG:') && !cleanContent.startsWith('[SYSTEM:')) {
+  if (!cleanContent.startsWith('[CALL_LOG:')) {
     const senderName = senderProfile.display_name || senderProfile.username || 'Someone';
     await Promise.all(
       memberIds
@@ -1554,7 +1126,7 @@ export async function sendMessageToFirestoreFs(params: {
             actorUsername: sanitizeOptionalStr(senderProfile.username, 32),
             actorAvatarUrl: sanitizeOptionalStr(senderProfile.avatar_url, 1024),
             type: 'message',
-            title: convType === 'group' ? `${senderName} in ${convData.name || 'Group'}` : `Message from ${senderName}`,
+            title: `Message from ${senderName}`,
             message: cleanContent.slice(0, 200),
             referenceId: conversationId,
             isRead: false,

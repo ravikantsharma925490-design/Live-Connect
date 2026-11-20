@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Share2, X, Send, Users, Check, Loader2 } from 'lucide-react';
+import { Share2, X, Send, Check, Loader2 } from 'lucide-react';
 import { Conversation, Message, Profile } from '@/src/types';
 import { UserAvatar } from '../ui/UserAvatar';
 import { isFirebaseSessionActive } from '@/src/lib/firebase/client';
@@ -45,10 +45,8 @@ export const ForwardMessageModal: React.FC<ForwardMessageModalProps> = ({
           conversationId: targetConv.id,
           content: forwardedContent,
           senderProfile: currentUser,
-          isGroup: targetConv.type === 'group',
-          receiverId: targetConv.type === 'direct' ? targetConv.other_member?.id : undefined,
-          receiverProfile: targetConv.type === 'direct' ? targetConv.other_member : undefined,
-          groupName: targetConv.name || null,
+          receiverId: targetConv.other_member?.id,
+          receiverProfile: targetConv.other_member,
         });
       } else {
         const res = await fetch('/api/messages/send', {
@@ -62,7 +60,7 @@ export const ForwardMessageModal: React.FC<ForwardMessageModalProps> = ({
               content: forwardedContent,
               created_at: new Date().toISOString(),
             },
-            recipientId: targetConv.type === 'direct' ? targetConv.other_member?.id : undefined,
+            recipientId: targetConv.other_member?.id,
             senderProfile: currentUser,
           }),
         });
@@ -126,11 +124,8 @@ export const ForwardMessageModal: React.FC<ForwardMessageModalProps> = ({
             {conversations.length > 0 ? (
               conversations.map((conv) => {
                 const isSelected = selectedConvId === conv.id;
-                const isGroup = conv.type === 'group';
-                const displayName = isGroup
-                  ? conv.name || 'Group Chat'
-                  : conv.other_member?.display_name || 'User';
-                const avatar = isGroup ? conv.avatar_url : conv.other_member?.avatar_url;
+                const displayName = conv.other_member?.display_name || 'User';
+                const avatar = conv.other_member?.avatar_url;
 
                 return (
                   <div
@@ -154,8 +149,7 @@ export const ForwardMessageModal: React.FC<ForwardMessageModalProps> = ({
                           {displayName}
                         </p>
                         <p className="text-[10px] text-neutral-400 flex items-center gap-1">
-                          {isGroup ? <Users className="w-3 h-3 text-blue-500" /> : null}
-                          {isGroup ? `${conv.member_ids?.length || 0} members` : 'Direct Chat'}
+                          Direct Chat
                         </p>
                       </div>
                     </div>

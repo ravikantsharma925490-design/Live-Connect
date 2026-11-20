@@ -24,10 +24,9 @@ import {
   fetchMultiplePublicProfilesFs,
   searchPublicProfilesFs,
   createOrGetDirectConversationFs,
-  createGroupConversationFs,
-  removeGroupMemberFs,
   markMessagesAsReadFs,
 } from '@/src/lib/firebase/services';
+import { getAuthHeaders } from '@/src/lib/authHeader';
 
 function getLocalConvCacheKey(userId?: string) {
   return `liveconnect_convs_${userId || 'anon'}`;
@@ -89,7 +88,7 @@ function loadLocalConversations(userId?: string): Conversation[] {
   return [];
 }
 
-export function isGroupConversation(c: any): boolean {
+export function isLegacyGroupConversation(c: any): boolean {
   if (!c) return false;
   return (
     c.type === 'group' ||
@@ -114,47 +113,9 @@ export function cleanAndDeduplicateConversations(convs: Conversation[], userId?:
   };
 
   const directByOtherId = new Map<string, Conversation>();
-  const groupConvs = new Map<string, Conversation>();
-  const seenIds = new Set<string>();
 
   for (const c of convs) {
-    if (!c || !c.id || deleted.has(c.id)) continue;
-
-    if (isGroupConversation(c)) {
-      const normalizedGroup: Conversation = {
-        ...c,
-        type: 'group',
-        other_member: undefined,
-      };
-
-      if (!groupConvs.has(c.id)) {
-        groupConvs.set(c.id, normalizedGroup);
-      } else {
-        const existing = groupConvs.get(c.id)!;
-        const existingTime = Math.max(
-          new Date(existing.updated_at || 0).getTime(),
-          new Date(existing.last_message?.created_at || 0).getTime()
-        );
-        const cTime = Math.max(
-          new Date(c.updated_at || 0).getTime(),
-          new Date(c.last_message?.created_at || 0).getTime()
-        );
-
-        const newestLastMsg =
-          cTime >= existingTime ? c.last_message || existing.last_message : existing.last_message || c.last_message;
-        const newestUpdatedAt =
-          cTime >= existingTime ? c.updated_at || existing.updated_at : existing.updated_at || c.updated_at;
-
-        groupConvs.set(c.id, {
-          ...existing,
-          ...normalizedGroup,
-          last_message: newestLastMsg,
-          updated_at: newestUpdatedAt,
-          unread_count: Math.max(existing.unread_count || 0, c.unread_count || 0),
-        });
-      }
-      continue;
-    }
+    if (!c || !c.id || deleted.has(c.id) || isLegacyGroupConversation(c)) continue;
 
     let otherMemberId = c.other_member?.id;
     const rawMembers = (c as any).members;
@@ -245,20 +206,10 @@ export function cleanAndDeduplicateConversations(convs: Conversation[], userId?:
           unread_count: Math.max(existing.unread_count || 0, c.unread_count || 0),
         } as any);
       }
-    } else {
-      if (!groupConvs.has(c.id)) {
-        groupConvs.set(c.id, c);
-      }
     }
   }
 
-  const directList = Array.from(directByOtherId.values());
-  directList.forEach((d) => seenIds.add(d.id));
-
-  const validGroups = Array.from(groupConvs.values()).filter((g) => !seenIds.has(g.id));
-  const merged = [...directList, ...validGroups];
-
-  return merged.sort((a, b) => {
+  return Array.from(directByOtherId.values()).sort((a, b) => {
     const timeA = Math.max(new Date(a.updated_at || 0).getTime(), new Date(a.last_message?.created_at || 0).getTime());
     const timeB = Math.max(new Date(b.updated_at || 0).getTime(), new Date(b.last_message?.created_at || 0).getTime());
     return timeB - timeA;
@@ -351,9 +302,6 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
               prev[i].unread_count === c.unread_count &&
               prev[i].last_message?.id === c.last_message?.id &&
               prev[i].updated_at === c.updated_at &&
-              prev[i].name === c.name &&
-              prev[i].avatar_url === c.avatar_url &&
-              Boolean(prev[i].is_removed) === Boolean(c.is_removed) &&
               (prev[i].member_ids?.length || 0) === (c.member_ids?.length || 0)
           );
           if (isIdentical) {
@@ -416,7 +364,7 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
 
       const combinedMap = new Map<string, Conversation>();
       rawConvs
-        .filter((c) => !deletedIds.has(c.id))
+        .filter((c) => !deletedIds.has(c.id) && !isLegacyGroupConversation(c))
         .forEach((c) => {
           const isViewing = isActivelyViewing(c.id);
           const uCount = isViewing ? 0 : c.unread_count || 0;
@@ -433,10 +381,7 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
                 markConversationAsRead(c.id);
               } else {
                 notificationService.sendNotification({
-                  title:
-                    c.type === 'group'
-                      ? c.name || 'Group Message'
-                      : c.other_member?.display_name || 'New LiveConnect Message',
+                  title: c.other_member?.display_name || 'New LiveConnect Message',
                   body: c.last_message.content || 'You have received a new message.',
                   tag: `msg-${c.id}`,
                   onClick: () => {
@@ -450,19 +395,6 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
         });
 
       initialSyncDoneRef.current = true;
-
-      for (const [, conv] of combinedMap.entries()) {
-        if (conv.type === 'group' && currentUserId) {
-          const isMember = Array.isArray(conv.member_ids) ? conv.member_ids.includes(currentUserId) : true;
-          const hasRemovalRecord = Boolean(conv.is_removed || conv.removed_members?.[currentUserId]);
-          if (!isMember || hasRemovalRecord) {
-            conv.is_removed = true;
-            if (!conv.removal_info && conv.removed_members?.[currentUserId]) {
-              conv.removal_info = conv.removed_members[currentUserId];
-            }
-          }
-        }
-      }
 
       updateConversationsState((prev) => {
         prev.forEach((localConv) => {
@@ -578,20 +510,18 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
           try {
             const inboxEntries: { id: string; data: Record<string, any> }[] = [];
             snap.forEach((docSnap) => {
-              inboxEntries.push({ id: docSnap.id, data: docSnap.data() });
+              const d = docSnap.data();
+              if (d?.type !== 'group' && !docSnap.id.startsWith('grp_')) {
+                inboxEntries.push({ id: docSnap.id, data: d });
+              }
             });
 
-            // Fetch parent conversation metadata only for non-removed entries
             const convDocs: Record<string, Record<string, any> | null> = {};
             const neededProfileIds = new Set<string>();
 
             await Promise.all(
               inboxEntries.map(async ({ id, data }) => {
                 if (data.otherMemberId) neededProfileIds.add(data.otherMemberId);
-                if (data.isRemoved) {
-                  convDocs[id] = null;
-                  return;
-                }
                 try {
                   const cSnap = await getDoc(doc(db, 'conversations', id));
                   if (cSnap.exists()) {
@@ -614,9 +544,11 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
               Object.assign(profileCacheRef.current, fetched);
             }
 
-            const builtConvs: Conversation[] = inboxEntries.map(({ id, data }) =>
-              buildConversationFromDocs(id, data, convDocs[id], profileCacheRef.current)
-            );
+            const builtConvs: Conversation[] = inboxEntries
+              .filter(({ id }) => convDocs[id]?.type !== 'group')
+              .map(({ id, data }) =>
+                buildConversationFromDocs(id, data, convDocs[id], profileCacheRef.current)
+              );
 
             hydrateAndApplyConversations(builtConvs);
           } finally {
@@ -783,9 +715,10 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
       }
 
       try {
+        const authHeaders = await getAuthHeaders();
         const res = await fetch('/api/users/search', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...authHeaders },
           body: JSON.stringify({ query: cleanQuery, userId: currentUserId }),
         });
         if (!res.ok) return [];
@@ -812,19 +745,25 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
       unrecordDeletedConvId(currentUserId, newConvId);
 
       if (isFirebaseSessionActive(currentUserId)) {
-        const targetProf =
-          targetProfileData ||
-          (isSelfChat ? await fetchPublicProfileFs(currentUserId) : await fetchPublicProfileFs(targetUserId)) || {
-            id: targetUserId,
-            username: isSelfChat ? 'self' : 'user',
-            display_name: isSelfChat ? 'Note to Self (You)' : 'User',
-            avatar_url: null,
-            bio: null,
-            is_online: true,
-            last_seen: new Date().toISOString(),
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          };
+        const resolvedTargetProf = isSelfChat
+          ? await fetchPublicProfileFs(currentUserId)
+          : targetProfileData || (await fetchPublicProfileFs(targetUserId, currentUserId));
+
+        if (!isSelfChat && !resolvedTargetProf) {
+          return null;
+        }
+
+        const targetProf = resolvedTargetProf || {
+          id: targetUserId,
+          username: isSelfChat ? 'self' : 'user',
+          display_name: isSelfChat ? 'Note to Self (You)' : 'User',
+          avatar_url: null,
+          bio: null,
+          is_online: true,
+          last_seen: new Date().toISOString(),
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        };
 
         const myProf = (await fetchPublicProfileFs(currentUserId)) || {
           id: currentUserId,
@@ -849,7 +788,14 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
       let targetProfile = targetProfileData;
       if (!targetProfile) {
         try {
-          const profRes = await fetch(`/api/users/profile/${encodeURIComponent(targetUserId)}`);
+          const authHeaders = await getAuthHeaders();
+          const profRes = await fetch(
+            `/api/users/profile/${encodeURIComponent(targetUserId)}?viewerId=${encodeURIComponent(currentUserId)}`,
+            { headers: authHeaders }
+          );
+          if (profRes.status === 404 || profRes.status === 403) {
+            return null;
+          }
           if (profRes.ok) {
             const profJson = await profRes.json();
             if (profJson?.profile) {
@@ -980,49 +926,10 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
       }
 
       if (isFirebaseSessionActive(currentUserId) && currentUserId) {
-        if (targetConv?.type === 'group') {
-          const isMember = Array.isArray(targetConv.member_ids) ? targetConv.member_ids.includes(currentUserId) : false;
-          if (isMember) {
-            const myProf = (await fetchPublicProfileFs(currentUserId)) || {
-              id: currentUserId,
-              username: 'user',
-              display_name: 'User',
-              avatar_url: null,
-              bio: null,
-              is_online: true,
-              last_seen: new Date().toISOString(),
-              created_at: new Date().toISOString(),
-              updated_at: new Date().toISOString(),
-            };
-            await removeGroupMemberFs(conversationId, myProf, currentUserId).catch(() => {});
-          }
-        }
         await deleteDoc(doc(db, 'users', currentUserId, 'inbox', conversationId)).catch(() => {});
         if (canonicalId && canonicalId !== conversationId) {
           await deleteDoc(doc(db, 'users', currentUserId, 'inbox', canonicalId)).catch(() => {});
         }
-        return true;
-      }
-
-      if (targetConv?.type === 'group' && currentUserId) {
-        const isMember = Array.isArray(targetConv.member_ids) ? targetConv.member_ids.includes(currentUserId) : false;
-        if (isMember) {
-          fetch('/api/groups/members/remove', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              conversationId,
-              actorId: currentUserId,
-              memberId: currentUserId,
-            }),
-          }).catch(() => {});
-        }
-
-        await fetch('/api/conversations/delete', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ conversationId, userId: currentUserId }),
-        }).catch(() => {});
         return true;
       }
 
@@ -1049,120 +956,6 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
 
   const activeConversation = conversations.find((c) => c.id === activeConversationId) || null;
 
-  const createGroup = async (
-    name: string,
-    description: string,
-    avatarUrl: string | null,
-    memberIds: string[],
-    currentUserProfile: Profile
-  ): Promise<string | null> => {
-    if (isFirebaseSessionActive(currentUserProfile.id)) {
-      try {
-        const conv = await createGroupConversationFs(
-          name,
-          description,
-          avatarUrl,
-          memberIds,
-          currentUserProfile
-        );
-        updateConversationsState((prev) =>
-          cleanAndDeduplicateConversations([conv, ...prev], currentUserId)
-        );
-        setActiveConversationId(conv.id);
-        return conv.id;
-      } catch (err: any) {
-        console.error('Error creating Firestore group:', err);
-        return null;
-      }
-    }
-
-    try {
-      const res = await fetch('/api/groups/create', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name,
-          description,
-          avatarUrl,
-          memberIds,
-          creatorId: currentUserProfile.id,
-          creatorProfile: currentUserProfile,
-        }),
-      });
-
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || 'Failed to create group');
-      }
-
-      const data = await res.json();
-      if (data.conversation) {
-        updateConversationsState((prev) =>
-          cleanAndDeduplicateConversations([data.conversation, ...prev], currentUserId)
-        );
-        setActiveConversationId(data.conversationId);
-        msgBusRef.current?.postMessage({ type: 'group_created', conversationId: data.conversationId });
-        return data.conversationId;
-      }
-      return null;
-    } catch (err: any) {
-      console.error('Error creating group:', err);
-      return null;
-    }
-  };
-
-  const leaveGroup = useCallback(
-    async (groupId: string): Promise<boolean> => {
-      if (!groupId || !currentUserId) return false;
-      try {
-        recordDeletedConvId(currentUserId, groupId);
-        updateConversationsState((prev) => prev.filter((c) => c.id !== groupId));
-        if (activeConversationId === groupId) {
-          setActiveConversationId(null);
-          if (typeof window !== 'undefined') {
-            localStorage.removeItem(`liveconnect_active_conv_${currentUserId}`);
-          }
-        }
-        if (typeof window !== 'undefined') {
-          localStorage.removeItem(`liveconnect_msgs_${groupId}`);
-          localStorage.removeItem(`liveconnect_deleted_ids_${groupId}`);
-        }
-
-        if (isFirebaseSessionActive(currentUserId)) {
-          const myProf = (await fetchPublicProfileFs(currentUserId)) || {
-            id: currentUserId,
-            username: 'user',
-            display_name: 'User',
-            avatar_url: null,
-            bio: null,
-            is_online: true,
-            last_seen: new Date().toISOString(),
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          };
-          await removeGroupMemberFs(groupId, myProf, currentUserId).catch(() => {});
-          return true;
-        }
-
-        await fetch('/api/groups/members/remove', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            conversationId: groupId,
-            actorId: currentUserId,
-            memberId: currentUserId,
-          }),
-        }).catch(() => {});
-
-        return true;
-      } catch (err: any) {
-        console.error('Error leaving group:', err.message);
-        return false;
-      }
-    },
-    [currentUserId, activeConversationId, updateConversationsState, setActiveConversationId]
-  );
-
   const updateConversation = useCallback(
     (updatedConv: Conversation) => {
       if (!updatedConv || !updatedConv.id) return;
@@ -1188,8 +981,6 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
     fetchConversations,
     searchUsers,
     startConversation,
-    createGroup,
-    leaveGroup,
     deleteConversation,
     markConversationAsRead,
     updateConversation,
