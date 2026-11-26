@@ -30,7 +30,11 @@ import { checkUsernameAvailability } from '@/src/hooks/useAuth';
 import { WORLD_COUNTRIES } from '@/src/lib/worldData';
 import { FollowButton, FollowStatus } from './FollowButton';
 import { FollowsListModal } from './FollowsListModal';
-import { replaceProfilePictureInCloudinary, removeProfilePictureFromCloudinary } from '@/src/lib/cloudinaryClient';
+import {
+  replaceProfilePictureInCloudinary,
+  removeProfilePictureFromCloudinary,
+  compressProfileImageIfNeeded,
+} from '@/src/lib/cloudinaryClient';
 import { UserAvatar } from '@/src/components/ui/UserAvatar';
 
 interface ProfileModalProps {
@@ -114,31 +118,55 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   const [showFollowsModal, setShowFollowsModal] = useState(false);
   const [followsListInitialTab, setFollowsListInitialTab] = useState<'followers' | 'following'>('followers');
 
-  // Backblaze B2 Avatar Upload state & handlers
+  // Avatar upload state & handlers
   const avatarFileInputRef = useRef<HTMLInputElement>(null);
+  const blobPreviewRef = useRef<string | null>(null);
   const [avatarUploading, setAvatarUploading] = useState(false);
+  const [photoSaved, setPhotoSaved] = useState(false);
 
   // Ref to track modal open transitions
   const prevOpenRef = useRef(false);
 
-  const handleAvatarFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file || !currentUser) return;
-    e.target.value = '';
-
-    if (file.size > 1 * 1024 * 1024) {
-      setErrorMessage('Profile picture size must be 1 MB or less.');
-      return;
+  const revokeBlobPreview = () => {
+    if (blobPreviewRef.current) {
+      URL.revokeObjectURL(blobPreviewRef.current);
+      blobPreviewRef.current = null;
     }
+  };
 
-    // Instant local preview for zero-delay visual response
-    const localPreviewUrl = URL.createObjectURL(file);
-    setAvatarUrl(localPreviewUrl);
+  useEffect(() => {
+    return () => {
+      revokeBlobPreview();
+    };
+  }, []);
+
+  const handleAvatarFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const rawFile = e.target.files?.[0];
+    if (!rawFile || !currentUser) return;
+    e.target.value = '';
 
     setAvatarUploading(true);
     setErrorMessage(null);
+    setPhotoSaved(false);
+
+    const previousAvatarUrl = avatarUrl;
+    let localPreviewUrl: string | null = null;
 
     try {
+      const file = await compressProfileImageIfNeeded(rawFile);
+
+      if (file.size > 1 * 1024 * 1024) {
+        setErrorMessage('Profile picture size must be 1 MB or less.');
+        setAvatarUploading(false);
+        return;
+      }
+
+      // Instant local preview for zero-delay visual response
+      revokeBlobPreview();
+      localPreviewUrl = URL.createObjectURL(file);
+      blobPreviewRef.current = localPreviewUrl;
+      setAvatarUrl(localPreviewUrl);
+
       const newUrl = await replaceProfilePictureInCloudinary({
         file,
         userId: currentUser.id,
@@ -162,11 +190,14 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
           img.src = newUrl;
         });
         setAvatarUrl(newUrl);
+        revokeBlobPreview();
       }
 
-      setSavedSuccess(true);
-      setTimeout(() => setSavedSuccess(false), 2500);
+      setPhotoSaved(true);
+      setTimeout(() => setPhotoSaved(false), 2000);
     } catch (err: any) {
+      setAvatarUrl(previousAvatarUrl);
+      revokeBlobPreview();
       setErrorMessage(err.message || 'Failed to upload profile picture.');
     } finally {
       setAvatarUploading(false);
@@ -177,6 +208,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
     if (!currentUser) return;
     setAvatarUploading(true);
     setErrorMessage(null);
+    setPhotoSaved(false);
 
     try {
       await removeProfilePictureFromCloudinary({
@@ -192,9 +224,10 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
         },
       });
 
+      revokeBlobPreview();
       setAvatarUrl('');
-      setSavedSuccess(true);
-      setTimeout(() => setSavedSuccess(false), 2500);
+      setPhotoSaved(true);
+      setTimeout(() => setPhotoSaved(false), 2000);
     } catch (err: any) {
       setErrorMessage(err.message || 'Failed to remove profile picture.');
     } finally {
@@ -278,7 +311,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!isEditingSelf) return;
+    if (!isEditingSelf || avatarUploading) return;
 
     const cleanUsername = username.trim().toLowerCase().replace(/[^a-z0-9_]/g, '');
     if (cleanUsername.length < 3) {
@@ -295,13 +328,18 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
     setErrorMessage(null);
 
     try {
+      const safeAvatarUrl =
+        avatarUrl && !avatarUrl.startsWith('blob:')
+          ? avatarUrl
+          : currentUser?.avatar_url || null;
+
       await onUpdateProfile({
         display_name: displayName.trim() || cleanUsername,
         username: cleanUsername,
         bio: bio.trim(),
         gender: gender || null,
         country: country || null,
-        avatar_url: avatarUrl || null,
+        avatar_url: safeAvatarUrl,
       });
       setSavedSuccess(true);
       setTimeout(() => {
@@ -351,8 +389,17 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   const selectedGenderObj = GENDER_OPTIONS.find((g) => g.id === (isEditingSelf ? gender : targetUser.gender));
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in">
-      <div className="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 w-full max-w-lg rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[92vh]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+      {isEditingSelf && (
+        <input
+          ref={avatarFileInputRef}
+          type="file"
+          accept="image/png, image/jpeg, image/webp, image/gif"
+          className="hidden"
+          onChange={handleAvatarFileChange}
+        />
+      )}
+      <div className="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 w-full max-w-lg rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90dvh]">
         {/* Header */}
         <div className="flex items-center justify-between p-4 px-6 border-b border-neutral-200 dark:border-neutral-800 bg-neutral-50/70 dark:bg-neutral-800/40">
           <h3 className="font-bold text-base text-neutral-900 dark:text-neutral-100 flex items-center gap-2">
@@ -418,9 +465,17 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
               )}
 
               {/* Camera Hover Overlay when editing self */}
-              {isEditingSelf && !avatarUploading && (
+              {isEditingSelf && !avatarUploading && !photoSaved && (
                 <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white z-10">
                   <Camera className="w-6 h-6" />
+                </div>
+              )}
+
+              {/* Saved Check Overlay */}
+              {isEditingSelf && !avatarUploading && photoSaved && (
+                <div className="absolute inset-0 bg-emerald-600/75 flex flex-col items-center justify-center text-white z-20">
+                  <Check className="w-7 h-7" />
+                  <span className="text-[10px] font-bold mt-0.5">Updated</span>
                 </div>
               )}
 
@@ -519,26 +574,21 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
             )}
 
             {isEditingSelf && (
-              <div className="mt-3 flex flex-wrap items-center justify-center gap-2 min-h-[38px]">
-                <input
-                  ref={avatarFileInputRef}
-                  type="file"
-                  accept="image/png, image/jpeg, image/webp, image/gif"
-                  className="hidden"
-                  onChange={handleAvatarFileChange}
-                />
+              <div className="mt-3 flex items-center justify-center gap-2 flex-nowrap h-[38px]">
                 <button
                   type="button"
                   disabled={avatarUploading}
                   onClick={() => avatarFileInputRef.current?.click()}
-                  className="text-xs font-semibold text-blue-600 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-900/40 flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-blue-50 dark:bg-blue-950/40 border border-blue-200/60 dark:border-blue-900/40 cursor-pointer transition-all disabled:opacity-50"
+                  className="text-xs font-semibold text-blue-600 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-900/40 flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-blue-50 dark:bg-blue-950/40 border border-blue-200/60 dark:border-blue-900/40 cursor-pointer transition-colors whitespace-nowrap disabled:opacity-50"
                 >
                   {avatarUploading ? (
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
                   ) : (
-                    <Upload className="w-3.5 h-3.5" />
+                    <Upload className="w-3.5 h-3.5 shrink-0" />
                   )}
-                  <span>{avatarUploading ? 'Uploading...' : 'Upload Picture'}</span>
+                  <span>
+                    {avatarUploading ? 'Uploading...' : avatarUrl ? 'Change' : 'Upload Photo'}
+                  </span>
                 </button>
 
                 {avatarUrl && (
@@ -546,20 +596,21 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                     type="button"
                     disabled={avatarUploading}
                     onClick={handleRemoveAvatar}
-                    className="text-xs font-semibold text-rose-600 dark:text-rose-400 hover:bg-rose-100 dark:hover:bg-rose-900/40 flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200/60 dark:border-rose-900/40 cursor-pointer transition-all disabled:opacity-50"
+                    className="text-xs font-semibold text-rose-600 dark:text-rose-400 hover:bg-rose-100 dark:hover:bg-rose-900/40 flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200/60 dark:border-rose-900/40 cursor-pointer transition-colors whitespace-nowrap disabled:opacity-50"
                   >
-                    <Trash2 className="w-3.5 h-3.5" />
-                    <span>Remove Picture</span>
+                    <Trash2 className="w-3.5 h-3.5 shrink-0" />
+                    <span>Remove</span>
                   </button>
                 )}
 
                 <button
                   type="button"
+                  disabled={avatarUploading}
                   onClick={setRandomAvatar}
-                  className="text-xs font-semibold text-neutral-600 dark:text-neutral-400 hover:bg-neutral-200 dark:hover:bg-neutral-800 flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-neutral-100 dark:bg-neutral-800/80 border border-neutral-200/60 dark:border-neutral-700/60 cursor-pointer transition-all"
+                  className="text-xs font-semibold text-neutral-600 dark:text-neutral-400 hover:bg-neutral-200 dark:hover:bg-neutral-800 flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-neutral-100 dark:bg-neutral-800/80 border border-neutral-200/60 dark:border-neutral-700/60 cursor-pointer transition-colors whitespace-nowrap disabled:opacity-50"
                 >
-                  <Sparkles className="w-3.5 h-3.5" />
-                  <span>Random Avatar</span>
+                  <Sparkles className="w-3.5 h-3.5 shrink-0" />
+                  <span>Random</span>
                 </button>
               </div>
             )}
@@ -731,8 +782,8 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                 </button>
                 <button
                   type="submit"
-                  disabled={saving}
-                  className="flex items-center gap-2 px-6 py-2.5 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-2xl shadow-md shadow-blue-500/20 transition-all hover:scale-105 active:scale-95 disabled:opacity-50 cursor-pointer"
+                  disabled={saving || avatarUploading}
+                  className="flex items-center justify-center gap-2 min-w-[126px] px-6 py-2.5 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-2xl shadow-md shadow-blue-500/20 transition-colors active:scale-95 disabled:opacity-50 cursor-pointer"
                 >
                   {savedSuccess ? (
                     <>

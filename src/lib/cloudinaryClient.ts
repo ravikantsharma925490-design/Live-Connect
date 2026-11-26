@@ -29,6 +29,73 @@ export function validateClientCloudinaryFileSize(
   }
 }
 
+export async function compressProfileImageIfNeeded(
+  file: File,
+  maxBytes: number = CLOUDINARY_CLIENT_SIZE_LIMITS.profile
+): Promise<File> {
+  if (file.size <= maxBytes || file.type === 'image/gif' || typeof document === 'undefined') {
+    return file;
+  }
+
+  return new Promise((resolve) => {
+    const img = new Image();
+    const objectUrl = URL.createObjectURL(file);
+
+    img.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      try {
+        const maxDim = 720;
+        let width = img.naturalWidth || maxDim;
+        let height = img.naturalHeight || maxDim;
+        if (width > maxDim || height > maxDim) {
+          const scale = maxDim / Math.max(width, height);
+          width = Math.max(1, Math.round(width * scale));
+          height = Math.max(1, Math.round(height * scale));
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve(file);
+          return;
+        }
+        ctx.drawImage(img, 0, 0, width, height);
+
+        const tryEncode = (quality: number) => {
+          canvas.toBlob(
+            (blob) => {
+              if (!blob) {
+                resolve(file);
+                return;
+              }
+              if (blob.size <= maxBytes || quality <= 0.5) {
+                const compressedName = file.name.replace(/\.[^.]+$/, '') + '.jpg';
+                resolve(new File([blob], compressedName, { type: 'image/jpeg' }));
+              } else {
+                tryEncode(Math.max(0.5, quality - 0.15));
+              }
+            },
+            'image/jpeg',
+            quality
+          );
+        };
+        tryEncode(0.86);
+      } catch {
+        resolve(file);
+      }
+    };
+
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve(file);
+    };
+
+    img.src = objectUrl;
+  });
+}
+
 export interface CloudinaryUploadResponse {
   success: boolean;
   cloudinary_public_id: string;

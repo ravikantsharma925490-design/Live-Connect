@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { cn, getAvatarColor, getInitials } from '@/src/lib/utils';
 
 interface UserAvatarProps {
@@ -31,43 +31,68 @@ export const UserAvatar: React.FC<UserAvatarProps> = ({
   showStatus = false,
   size,
 }) => {
-  const [imgLoaded, setImgLoaded] = useState(false);
-  const [imgError, setImgError] = useState(false);
+  const [loadedSrc, setLoadedSrc] = useState<string | null>(src || null);
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  const imgRef = useRef<HTMLImageElement | null>(null);
 
   const displayName = name || 'User';
   const initials = getInitials(displayName);
   const bgColor = getAvatarColor(id || displayName);
 
-  // Reset image status when src changes
   useEffect(() => {
-    setImgLoaded(false);
-    setImgError(false);
+    if (!src) {
+      setLoadedSrc(null);
+      setFailedSrc(null);
+      return;
+    }
+    setFailedSrc(null);
+    if (imgRef.current && imgRef.current.complete && imgRef.current.naturalWidth > 0) {
+      setLoadedSrc(src);
+    }
   }, [src]);
 
   const sizeClass = size ? SIZE_CLASSES[size] : '';
+  const isCurrentLoaded = Boolean(src && loadedSrc === src && failedSrc !== src);
+  const hasPreviousLoaded = Boolean(loadedSrc && loadedSrc !== src && failedSrc !== loadedSrc);
 
   return (
     <div className={cn('relative shrink-0 select-none rounded-full overflow-hidden', sizeClass, className)}>
       {/* Background / Fallback Initials - Always rendered underneath with fixed layout */}
       <div
         className={cn(
-          'w-full h-full flex items-center justify-center font-bold text-white shadow-xs rounded-full',
+          'w-full h-full flex items-center justify-center font-bold text-white shadow-xs rounded-[inherit]',
           bgColor
         )}
       >
         {initials}
       </div>
 
-      {/* Image Layer - Smooth fade-in once loaded, zero layout jumping */}
-      {src && !imgError && (
+      {/* Keep previous image visible while new src loads to prevent flash/flicker */}
+      {src && hasPreviousLoaded && loadedSrc && (
         <img
+          src={loadedSrc}
+          alt={displayName}
+          className={cn(
+            'absolute inset-0 w-full h-full object-cover rounded-[inherit]',
+            imgClassName
+          )}
+        />
+      )}
+
+      {/* Active Image Layer - Smooth fade-in once loaded, zero layout jumping */}
+      {src && failedSrc !== src && (
+        <img
+          ref={imgRef}
           src={src}
           alt={displayName}
-          onLoad={() => setImgLoaded(true)}
-          onError={() => setImgError(true)}
+          onLoad={() => setLoadedSrc(src)}
+          onError={() => {
+            setFailedSrc(src);
+            if (loadedSrc === src) setLoadedSrc(null);
+          }}
           className={cn(
-            'absolute inset-0 w-full h-full object-cover rounded-full transition-opacity duration-200',
-            imgLoaded ? 'opacity-100' : 'opacity-0',
+            'absolute inset-0 w-full h-full object-cover rounded-[inherit] transition-opacity duration-150',
+            isCurrentLoaded ? 'opacity-100' : 'opacity-0',
             imgClassName
           )}
         />

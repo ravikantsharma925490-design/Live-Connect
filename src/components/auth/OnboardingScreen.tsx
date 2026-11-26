@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { WORLD_COUNTRIES } from '@/src/lib/worldData';
 import { checkUsernameAvailability } from '@/src/hooks/useAuth';
 import { User, CheckCircle2, AlertCircle, Camera, Sparkles, Globe, ChevronDown, Upload, Trash2, Loader2 } from 'lucide-react';
-import { uploadMediaToCloudinary } from '@/src/lib/cloudinaryClient';
+import { uploadMediaToCloudinary, compressProfileImageIfNeeded } from '@/src/lib/cloudinaryClient';
 
 interface OnboardingScreenProps {
   prefillName?: string;
@@ -46,21 +46,45 @@ export function OnboardingScreen({
   const [error, setError] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const blobPreviewRef = useRef<string | null>(null);
+
+  const revokeBlobPreview = () => {
+    if (blobPreviewRef.current) {
+      URL.revokeObjectURL(blobPreviewRef.current);
+      blobPreviewRef.current = null;
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      revokeBlobPreview();
+    };
+  }, []);
 
   const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const rawFile = e.target.files?.[0];
+    if (!rawFile) return;
     e.target.value = '';
-
-    if (file.size > 1 * 1024 * 1024) {
-      setError('Profile picture size must be 1 MB or less.');
-      return;
-    }
 
     setUploadingPhoto(true);
     setError(null);
 
+    const previousAvatarUrl = avatarUrl;
+
     try {
+      const file = await compressProfileImageIfNeeded(rawFile);
+
+      if (file.size > 1 * 1024 * 1024) {
+        setError('Profile picture size must be 1 MB or less.');
+        setUploadingPhoto(false);
+        return;
+      }
+
+      revokeBlobPreview();
+      const localPreviewUrl = URL.createObjectURL(file);
+      blobPreviewRef.current = localPreviewUrl;
+      setAvatarUrl(localPreviewUrl);
+
       const res = await uploadMediaToCloudinary({
         fileOrBlob: file,
         category: 'profile',
@@ -70,12 +94,21 @@ export function OnboardingScreen({
       });
 
       if (res?.url) {
+        await new Promise((resolve) => {
+          const img = new Image();
+          img.onload = () => resolve(true);
+          img.onerror = () => resolve(true);
+          img.src = res.url;
+        });
         setAvatarUrl(res.url);
+        revokeBlobPreview();
       } else {
         throw new Error('Failed to get uploaded photo URL.');
       }
     } catch (err: any) {
-      setError(err.message || 'Failed to upload photo to Cloudinary.');
+      setAvatarUrl(previousAvatarUrl);
+      revokeBlobPreview();
+      setError(err.message || 'Failed to upload profile photo.');
     } finally {
       setUploadingPhoto(false);
     }
@@ -174,7 +207,7 @@ export function OnboardingScreen({
   };
 
   return (
-    <div className="min-h-screen-safe w-full flex items-center justify-center p-4 bg-neutral-950 text-white relative overflow-hidden">
+    <div className="min-h-screen-safe w-full flex items-center justify-center p-4 bg-neutral-950 text-white relative overflow-y-auto">
       {/* Glow Effects */}
       <div className="absolute -top-40 -left-40 w-96 h-96 bg-blue-600/15 rounded-full blur-3xl pointer-events-none" />
       <div className="absolute -bottom-40 -right-40 w-96 h-96 bg-indigo-600/15 rounded-full blur-3xl pointer-events-none" />
@@ -246,17 +279,17 @@ export function OnboardingScreen({
             )}
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center justify-center gap-2 flex-nowrap h-[34px]">
             <button
               type="button"
               disabled={uploadingPhoto}
               onClick={() => fileInputRef.current?.click()}
-              className="px-3.5 py-1.5 rounded-xl bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border border-blue-500/30 text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50"
+              className="px-3.5 py-1.5 rounded-xl bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border border-blue-500/30 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap disabled:opacity-50"
             >
               {uploadingPhoto ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
               ) : (
-                <Upload className="w-3.5 h-3.5" />
+                <Upload className="w-3.5 h-3.5 shrink-0" />
               )}
               <span>{uploadingPhoto ? 'Uploading...' : avatarUrl ? 'Change Photo' : 'Upload Photo'}</span>
             </button>
@@ -265,10 +298,13 @@ export function OnboardingScreen({
               <button
                 type="button"
                 disabled={uploadingPhoto}
-                onClick={() => setAvatarUrl('')}
-                className="px-3.5 py-1.5 rounded-xl bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/30 text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50"
+                onClick={() => {
+                  revokeBlobPreview();
+                  setAvatarUrl('');
+                }}
+                className="px-3.5 py-1.5 rounded-xl bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/30 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap disabled:opacity-50"
               >
-                <Trash2 className="w-3.5 h-3.5" />
+                <Trash2 className="w-3.5 h-3.5 shrink-0" />
                 <span>Remove</span>
               </button>
             )}
@@ -276,12 +312,12 @@ export function OnboardingScreen({
 
           <p className="text-[11px] text-neutral-400 font-medium text-center">
             {uploadingPhoto
-              ? 'Uploading to Backblaze B2...'
+              ? 'Uploading profile photo...'
               : avatarUrl
               ? prefillAvatar && avatarUrl === prefillAvatar
                 ? 'Photo imported from Google account (click to change)'
-                : 'Custom photo selected (Backblaze B2)'
-              : 'Upload custom photo or use avatar'}
+                : 'Custom profile photo selected'
+              : 'Upload custom photo or continue with default'}
           </p>
         </div>
 
@@ -411,7 +447,7 @@ export function OnboardingScreen({
           {/* Submit / Continue Button */}
           <button
             type="submit"
-            disabled={loading || checkingUsername || usernameAvailable === false}
+            disabled={loading || uploadingPhoto || checkingUsername || usernameAvailable === false}
             className="w-full py-3.5 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-bold text-sm shadow-lg shadow-blue-600/25 transition-all cursor-pointer hover:scale-[1.01] active:scale-[0.99] mt-2"
           >
             {loading ? (

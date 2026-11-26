@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   onAuthStateChanged,
   signInWithPopup,
@@ -230,8 +230,10 @@ export function useAuth() {
   const [bannedUntilDate, setBannedUntilDate] = useState<string | null>(null);
   const [suspensionInfo, setSuspensionInfo] = useState<SuspensionInfo | null>(null);
   const [restoredNoticePending, setRestoredNoticePending] = useState(false);
+  const profileRef = useRef<Profile | null>(profile);
 
   const updateProfileState = useCallback((newProf: Profile | null) => {
+    profileRef.current = newProf;
     setProfile(newProf);
     if (typeof window !== 'undefined') {
       try {
@@ -367,8 +369,11 @@ export function useAuth() {
   );
 
   const resolveFirebaseUser = useCallback(
-    async (fbUser: FirebaseUser) => {
-      setProfileCheckPending(true);
+    async (fbUser: FirebaseUser, options?: { silent?: boolean }) => {
+      const hasSameUserProfile = Boolean(profileRef.current && profileRef.current.id === fbUser.uid);
+      if (!options?.silent && !hasSameUserProfile) {
+        setProfileCheckPending(true);
+      }
       try {
         void testConnection();
         const token = await fbUser.getIdToken().catch(() => fbUser.uid);
@@ -464,9 +469,10 @@ export function useAuth() {
     [enterSuspensionState, updateProfileState, updateUserState]
   );
 
-  const refreshProfile = useCallback(async () => {
+  const refreshProfile = useCallback(async (options?: { silent?: boolean }) => {
+    const isSilent = options?.silent ?? Boolean(profileRef.current);
     if (auth.currentUser) {
-      await resolveFirebaseUser(auth.currentUser);
+      await resolveFirebaseUser(auth.currentUser, { silent: isSilent });
       return;
     }
 
@@ -477,7 +483,9 @@ export function useAuth() {
       return;
     }
 
-    setProfileCheckPending(true);
+    if (!isSilent) {
+      setProfileCheckPending(true);
+    }
     try {
       const res = await fetch('/api/auth/session', {
         headers: buildAuthHeaders(token),

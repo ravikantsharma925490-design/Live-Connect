@@ -628,11 +628,7 @@ export default function App() {
           setViewingProfile(null);
         }}
         onUpdateProfile={async (updates) => {
-          const success = await updateProfile(updates);
-          if (success) {
-            refreshProfile();
-          }
-          return success;
+          return await updateProfile(updates);
         }}
         onStartChat={async (targetId, targetProfile) => {
           setIsProfileOpen(false);
