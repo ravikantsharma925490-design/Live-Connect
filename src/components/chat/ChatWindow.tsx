@@ -68,6 +68,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   const isNearBottomRef = useRef(true);
   const justSentRef = useRef(false);
   const prevLastMessageKeyRef = useRef<string | null>(null);
+  const isProgrammaticScrollRef = useRef(false);
+  const programmaticRafRef = useRef<number | null>(null);
 
   const isChatVisible = Boolean(conversation?.id) && (typeof document === 'undefined' || !document.hidden);
 
@@ -143,13 +145,34 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   }, []);
 
   const handleContainerScroll = useCallback(() => {
+    if (isProgrammaticScrollRef.current || justSentRef.current) return;
     isNearBottomRef.current = checkIsNearBottom();
   }, [checkIsNearBottom]);
 
   const snapToBottom = useCallback(() => {
-    if (chatContainerRef.current) {
-      chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
+    const el = chatContainerRef.current;
+    if (!el) return;
+    isProgrammaticScrollRef.current = true;
+    el.scrollTop = el.scrollHeight;
+    if (programmaticRafRef.current !== null) {
+      cancelAnimationFrame(programmaticRafRef.current);
     }
+    programmaticRafRef.current = requestAnimationFrame(() => {
+      programmaticRafRef.current = null;
+      if (chatContainerRef.current && isNearBottomRef.current) {
+        chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
+      }
+      isProgrammaticScrollRef.current = false;
+    });
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (programmaticRafRef.current !== null) {
+        cancelAnimationFrame(programmaticRafRef.current);
+        programmaticRafRef.current = null;
+      }
+    };
   }, []);
 
   // Synchronous instant snap on mount & conversation change BEFORE browser paints
@@ -678,7 +701,13 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
       <div
         ref={chatContainerRef}
         onScroll={handleContainerScroll}
-        className="flex-1 overflow-y-auto p-4 [scrollbar-gutter:stable]"
+        onWheel={() => {
+          isProgrammaticScrollRef.current = false;
+        }}
+        onTouchMove={() => {
+          isProgrammaticScrollRef.current = false;
+        }}
+        className="flex-1 overflow-y-auto p-4 [scrollbar-gutter:stable] [overflow-anchor:none]"
       >
         <div className="flex flex-col min-h-full">
           {/* Spacer pushing short message lists to bottom naturally without flex margin bugs */}

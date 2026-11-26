@@ -981,7 +981,7 @@ const MessageBubbleComponent: React.FC<MessageBubbleProps> = ({
       onTouchCancel={handleTouchEnd}
       onContextMenu={handleContextMenu}
       className={cn(
-        'flex items-end gap-1.5 my-1.5 group relative transition-all rounded-2xl p-0.5',
+        'flex items-end gap-1.5 my-1.5 group relative transition-colors rounded-2xl p-0.5',
         shouldAnimateOnMount && 'animate-in fade-in duration-150',
         isMine ? 'justify-end' : 'justify-start'
       )}

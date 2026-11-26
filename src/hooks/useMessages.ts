@@ -209,22 +209,47 @@ export function useMessages(
   isViewingChat: boolean = true,
   conversationObj?: Conversation | null
 ) {
+  const conversationObjRef = useRef(conversationObj);
+  conversationObjRef.current = conversationObj;
+
+  const convObjId = conversationObj?.id || '';
+  const convObjOriginalId = ((conversationObj as any)?.original_id as string) || '';
+  const convObjCanonicalId = ((conversationObj as any)?.canonical_id as string) || '';
+  const otherMemberId = conversationObj?.other_member?.id || '';
+  const aliasIdsKey = Array.isArray((conversationObj as any)?.alias_ids)
+    ? ((conversationObj as any).alias_ids as string[]).filter(Boolean).join(',')
+    : '';
+  const memberIdsKey = Array.isArray(conversationObj?.member_ids)
+    ? conversationObj.member_ids.filter(Boolean).join(',')
+    : '';
+
   const getCandidateConvIds = useCallback((): string[] => {
     const ids = new Set<string>();
     if (conversationId) ids.add(conversationId);
-    if (conversationObj?.id) ids.add(conversationObj.id);
-    if ((conversationObj as any)?.original_id) ids.add((conversationObj as any).original_id);
-    if ((conversationObj as any)?.canonical_id) ids.add((conversationObj as any).canonical_id);
-    if (Array.isArray((conversationObj as any)?.alias_ids)) {
-      (conversationObj as any).alias_ids.forEach((id: string) => {
+    if (convObjId) ids.add(convObjId);
+    if (convObjOriginalId) ids.add(convObjOriginalId);
+    if (convObjCanonicalId) ids.add(convObjCanonicalId);
+    if (aliasIdsKey) {
+      aliasIdsKey.split(',').forEach((id) => {
         if (id) ids.add(id);
       });
     }
-    if (currentUserId && conversationObj?.other_member?.id) {
-      ids.add(getDeterministicDirectConvId(currentUserId, conversationObj.other_member.id));
+    if (currentUserId && otherMemberId) {
+      ids.add(getDeterministicDirectConvId(currentUserId, otherMemberId));
     }
     return Array.from(ids).filter(Boolean);
-  }, [conversationId, conversationObj, currentUserId]);
+  }, [
+    conversationId,
+    currentUserId,
+    convObjId,
+    convObjOriginalId,
+    convObjCanonicalId,
+    otherMemberId,
+    aliasIdsKey,
+  ]);
+
+  const getCandidateConvIdsRef = useRef(getCandidateConvIds);
+  getCandidateConvIdsRef.current = getCandidateConvIds;
 
   const [messages, setMessages] = useState<ClientMessage[]>(() => {
     const candidateIds = conversationId
@@ -232,9 +257,9 @@ export function useMessages(
           new Set(
             [
               conversationId,
-              conversationObj?.id,
-              (conversationObj as any)?.original_id,
-              (conversationObj as any)?.canonical_id,
+              convObjId,
+              convObjOriginalId,
+              convObjCanonicalId,
             ].filter(Boolean) as string[]
           )
         )
@@ -248,9 +273,9 @@ export function useMessages(
           new Set(
             [
               conversationId,
-              conversationObj?.id,
-              (conversationObj as any)?.original_id,
-              (conversationObj as any)?.canonical_id,
+              convObjId,
+              convObjOriginalId,
+              convObjCanonicalId,
             ].filter(Boolean) as string[]
           )
         )
@@ -291,7 +316,7 @@ export function useMessages(
     setTypingUserId(null);
 
     if (conversationId) {
-      const candidateIds = getCandidateConvIds();
+      const candidateIds = getCandidateConvIdsRef.current();
       const cached = loadCombinedLocalMessages(candidateIds);
       knownMsgIdsRef.current = new Set(cached.map((m) => m.id));
       setMessages(cached);
@@ -305,7 +330,7 @@ export function useMessages(
       setMessages([]);
       setLoading(false);
     }
-  }, [conversationId, getCandidateConvIds]);
+  }, [conversationId]);
 
   const updateMessagesState = useCallback(
     (updater: ClientMessage[] | ((prev: ClientMessage[]) => ClientMessage[])) => {
@@ -323,7 +348,9 @@ export function useMessages(
               prev[i].id === m.id &&
               (prev[i].client_id || prev[i].id) === (m.client_id || m.id) &&
               prev[i].content === m.content &&
+              prev[i].created_at === m.created_at &&
               Boolean(prev[i].is_read) === Boolean(m.is_read) &&
+              Boolean(prev[i].is_pending) === Boolean(m.is_pending) &&
               prev[i].sender?.id === m.sender?.id &&
               JSON.stringify(prev[i].reactions || null) === JSON.stringify(m.reactions || null)
           );
@@ -332,7 +359,7 @@ export function useMessages(
           }
         }
 
-        const candidateIds = getCandidateConvIds();
+        const candidateIds = getCandidateConvIdsRef.current();
         candidateIds.forEach((cId) => {
           saveLocalMessages(cId, cleanNext);
         });
@@ -340,7 +367,7 @@ export function useMessages(
         return cleanNext;
       });
     },
-    [conversationId, getCandidateConvIds]
+    [conversationId]
   );
 
   const scrollToBottom = useCallback((_smooth = true) => {
@@ -600,14 +627,35 @@ export function useMessages(
             isViewingChatRef.current && (typeof document === 'undefined' || !document.hidden);
 
           const prevById = new Map<string, ClientMessage>(messagesRef.current.map((m) => [m.id, m]));
+          const prevByClientId = new Map<string, ClientMessage>(
+            messagesRef.current.map((m) => [m.client_id || m.id, m])
+          );
           const wasInitialized = hasLoadedInitialRef.current;
           let receivedNewPeerMessage = false;
+          let lastSnapTimeMs = 0;
 
           const remoteList: ClientMessage[] = [];
           snap.forEach((docSnap) => {
             if (deletedSet.has(docSnap.id)) return;
-            const mapped = inboxMessageDocToMessage(docSnap.data());
-            const existing = prevById.get(mapped.id);
+            const rawData = docSnap.data();
+            const mapped = inboxMessageDocToMessage(rawData);
+            const existing = prevById.get(mapped.id) || prevByClientId.get(mapped.id);
+
+            // Prevent shifting timestamps on local pending writes before serverTimestamp resolves
+            if (!rawData.createdAt) {
+              if (existing?.created_at) {
+                mapped.created_at = existing.created_at;
+              } else {
+                const monoMs = Math.max(Date.now(), lastSnapTimeMs + 1);
+                mapped.created_at = new Date(monoMs).toISOString();
+              }
+            }
+
+            const mappedMs = new Date(mapped.created_at || 0).getTime();
+            if (Number.isFinite(mappedMs) && mappedMs > lastSnapTimeMs) {
+              lastSnapTimeMs = mappedMs;
+            }
+
             const isBrandNew = wasInitialized && !knownMsgIdsRef.current.has(mapped.id);
             knownMsgIdsRef.current.add(mapped.id);
 
@@ -627,6 +675,28 @@ export function useMessages(
             });
           });
 
+          // Preserve any still-in-flight optimistic pending messages so they never vanish during pre-write checks
+          const remoteIds = new Set(remoteList.map((m) => m.id));
+          const remoteClientIds = new Set(remoteList.map((m) => m.client_id || m.id));
+          messagesRef.current.forEach((localMsg) => {
+            if (
+              isMessagePending(localMsg) &&
+              !deletedSet.has(localMsg.id) &&
+              !remoteIds.has(localMsg.id) &&
+              !remoteClientIds.has(localMsg.client_id || localMsg.id)
+            ) {
+              const localMs = new Date(localMsg.created_at || 0).getTime();
+              const monotonicIso =
+                Number.isFinite(localMs) && localMs > lastSnapTimeMs
+                  ? localMsg.created_at
+                  : new Date(++lastSnapTimeMs).toISOString();
+              remoteList.push({
+                ...localMsg,
+                created_at: monotonicIso,
+              });
+            }
+          });
+
           hasLoadedInitialRef.current = true;
           if (receivedNewPeerMessage) {
             clearTyping();
@@ -644,10 +714,17 @@ export function useMessages(
       // Single-doc typing listeners (uses allow get rather than allow list)
       const typingUnsubs: (() => void)[] = [];
       const peerIds: string[] = [];
-      if (conversationObj?.other_member?.id && conversationObj.other_member.id !== currentUserId) {
-        peerIds.push(conversationObj.other_member.id);
-      } else if (Array.isArray(conversationObj?.member_ids)) {
-        conversationObj.member_ids
+      const currentConvObj = conversationObjRef.current;
+      if (otherMemberId && otherMemberId !== currentUserId) {
+        peerIds.push(otherMemberId);
+      } else if (memberIdsKey) {
+        memberIdsKey
+          .split(',')
+          .filter((id) => id && id !== currentUserId)
+          .slice(0, 15)
+          .forEach((id) => peerIds.push(id));
+      } else if (Array.isArray(currentConvObj?.member_ids)) {
+        currentConvObj.member_ids
           .filter((id) => id && id !== currentUserId)
           .slice(0, 15)
           .forEach((id) => peerIds.push(id));
@@ -880,8 +957,8 @@ export function useMessages(
   }, [
     conversationId,
     currentUserId,
-    conversationObj?.other_member?.id,
-    conversationObj?.member_ids,
+    otherMemberId,
+    memberIdsKey,
     getCandidateConvIds,
     scrollToBottom,
     updateMessagesState,
@@ -946,7 +1023,10 @@ export function useMessages(
         }
       }
 
-      const nowIso = new Date().toISOString();
+      const tailMsg = messagesRef.current[messagesRef.current.length - 1];
+      const tailMs = tailMsg ? new Date(tailMsg.created_at || 0).getTime() : 0;
+      const safeNowMs = Math.max(Date.now(), Number.isFinite(tailMs) ? tailMs + 1 : 0);
+      const nowIso = new Date(safeNowMs).toISOString();
       const tempId = generateUUID();
 
       const optimisticMessage: ClientMessage = {
@@ -1009,6 +1089,8 @@ export function useMessages(
               m.id === tempId || m.client_id === tempId
                 ? {
                     ...savedMsg,
+                    created_at: m.created_at || savedMsg.created_at,
+                    updated_at: m.updated_at || savedMsg.updated_at,
                     client_id: m.client_id || tempId,
                     is_pending: false,
                     should_animate: m.should_animate,
