@@ -542,9 +542,10 @@ interface MessageBubbleProps {
   onPinMessage?: (message: Message) => void;
   isPinned?: boolean;
   onOpenProfileView?: (profile: Profile) => void;
+  shouldAnimate?: boolean;
 }
 
-export const MessageBubble: React.FC<MessageBubbleProps> = ({
+const MessageBubbleComponent: React.FC<MessageBubbleProps> = ({
   message,
   isMine,
   showAvatar = true,
@@ -559,7 +560,11 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
   onPinMessage,
   isPinned = false,
   onOpenProfileView,
+  shouldAnimate,
 }) => {
+  const [shouldAnimateOnMount] = useState(
+    () => Boolean(shouldAnimate ?? (message as Message & { should_animate?: boolean }).should_animate)
+  );
   const [showConfirm, setShowConfirm] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -698,7 +703,8 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
     return (
       <div
         className={cn(
-          'flex items-end gap-1.5 my-1.5 animate-in fade-in duration-150 group relative',
+          'flex items-end gap-1.5 my-1.5 group relative',
+          shouldAnimateOnMount && 'animate-in fade-in duration-150',
           isMine ? 'justify-end' : 'justify-start'
         )}
       >
@@ -975,7 +981,8 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
       onTouchCancel={handleTouchEnd}
       onContextMenu={handleContextMenu}
       className={cn(
-        'flex items-end gap-1.5 my-1.5 animate-in fade-in duration-150 group relative transition-all rounded-2xl p-0.5',
+        'flex items-end gap-1.5 my-1.5 group relative transition-all rounded-2xl p-0.5',
+        shouldAnimateOnMount && 'animate-in fade-in duration-150',
         isMine ? 'justify-end' : 'justify-start'
       )}
     >
@@ -1453,4 +1460,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
     </div>
   );
 };
+
+export const MessageBubble = React.memo(MessageBubbleComponent);
+MessageBubble.displayName = 'MessageBubble';
 

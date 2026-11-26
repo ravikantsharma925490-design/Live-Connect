@@ -1,34 +1,26 @@
-import React, { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react';
 import {
   Phone,
   Video,
-  Send,
   ArrowLeft,
-  Smile,
   MoreVertical,
   AlertCircle,
-  Sparkles,
   Trash2,
   Eraser,
-  UserPlus,
   UserCheck,
   ShieldAlert,
-  ShieldCheck,
-  UserMinus,
-  Heart,
-  CheckCircle2,
-  RefreshCw,
   Users,
   Pin,
   X,
 } from 'lucide-react';
 import { Conversation, Profile, CallType, UserRelationStatus, Message } from '@/src/types';
 import { MessageBubble } from './MessageBubble';
+import { TypingBubble } from './TypingBubble';
 import { ChatInput } from './ChatInput';
 import { ImageViewerModal } from './ImageViewerModal';
 import { ChatSkeleton } from '../ui/LoadingSkeleton';
 import { EmptyState } from '../ui/EmptyState';
-import { cn, formatLastSeen, getAvatarColor, getInitials, formatChatDateHeader, isDifferentDay } from '@/src/lib/utils';
+import { cn, formatLastSeen, formatChatDateHeader, isDifferentDay } from '@/src/lib/utils';
 import { UserAvatar } from '../ui/UserAvatar';
 import { useMessages } from '@/src/hooks/useMessages';
 import { isFirebaseSessionActive } from '@/src/lib/firebase/client';
@@ -74,13 +66,14 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   const [replyingToMessage, setReplyingToMessage] = useState<Message | null>(null);
   const chatContainerRef = useRef<HTMLDivElement | null>(null);
   const isNearBottomRef = useRef(true);
+  const justSentRef = useRef(false);
+  const prevLastMessageKeyRef = useRef<string | null>(null);
 
   const isChatVisible = Boolean(conversation?.id) && (typeof document === 'undefined' || !document.hidden);
 
   const {
     messages,
     loading,
-    sending,
     error,
     messagesEndRef,
     sendMessage,
@@ -92,10 +85,43 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     sendTypingSignal,
   } = useMessages(conversation?.id || null, currentUser?.id, isChatVisible, conversation);
 
+  const otherUser = conversation?.other_member;
+  const isSelf = Boolean(currentUser && otherUser && otherUser.id === currentUser.id);
+  const rawDisplayName = otherUser?.display_name || otherUser?.username || 'Chat';
+  const displayName = isSelf ? `${rawDisplayName} (You)` : rawDisplayName;
+  const username = otherUser?.username || '';
+  const avatarUrl = otherUser?.avatar_url;
+
+  const isBlocked = Boolean(liveRelation ? liveRelation.isBlocked : relationStatus?.isBlocked);
+  const isFollowingUser = Boolean(
+    localFollowed ||
+    (liveRelation !== null ? liveRelation.isFollowing : relationStatus?.isFollowing)
+  );
+  const isFollowedByUser = Boolean(
+    liveRelation !== null ? liveRelation.isFollowedBy : relationStatus?.isFollowedBy
+  );
+  const isMutual =
+    isSelf ||
+    Boolean(
+      (liveRelation && (liveRelation.isMutual || (liveRelation.isFollowing && liveRelation.isFollowedBy))) ||
+      (relationStatus && (relationStatus.isMutual || (relationStatus.isFollowing && relationStatus.isFollowedBy))) ||
+      (isFollowingUser && isFollowedByUser)
+    );
+
+  const canChat = !isBlocked && (isSelf || isMutual);
+  const canCall = !isBlocked && (isSelf || isMutual);
+  const showTypingBubble = Boolean(typingUserId && !isSelf && !isBlocked && otherUser);
+
+  const lastMessage = messages[messages.length - 1];
+  const lastMessageKey = lastMessage ? (lastMessage.client_id || lastMessage.id) : null;
+
   // Sync pinnedMessage on conversation change
   useEffect(() => {
     setPinnedMessage(conversation?.pinned_message || null);
     setReplyingToMessage(null);
+    isNearBottomRef.current = true;
+    justSentRef.current = false;
+    prevLastMessageKeyRef.current = null;
   }, [conversation?.id]);
 
   // Sync pinnedMessage when messages arrive if pinned_message_id is present
@@ -128,32 +154,55 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
   // Synchronous instant snap on mount & conversation change BEFORE browser paints
   useLayoutEffect(() => {
+    isNearBottomRef.current = true;
     snapToBottom();
   }, [conversation?.id, snapToBottom]);
 
-  // Keep pinned to bottom when messages load or change (if user was already at bottom)
+  // Auto-scroll when I send a message (always) or when a new message arrives while already near bottom
   useLayoutEffect(() => {
-    if (isNearBottomRef.current && messages.length > 0) {
+    if (!lastMessageKey) {
+      prevLastMessageKeyRef.current = null;
+      return;
+    }
+
+    const isNewTailMessage = prevLastMessageKeyRef.current !== lastMessageKey;
+    prevLastMessageKeyRef.current = lastMessageKey;
+
+    if (justSentRef.current) {
+      justSentRef.current = false;
+      isNearBottomRef.current = true;
+      snapToBottom();
+      return;
+    }
+
+    if (isNewTailMessage && isNearBottomRef.current) {
       snapToBottom();
     }
-  }, [messages.length, snapToBottom]);
+  }, [lastMessageKey, messages.length, snapToBottom]);
 
-  // Prevent jumping when images load or content expands
+  // Keep pinned smoothly at the bottom when typing bubble appears or disappears if user is near bottom
+  useLayoutEffect(() => {
+    if (isNearBottomRef.current) {
+      snapToBottom();
+    }
+  }, [showTypingBubble, snapToBottom]);
+
+  // Watch both scroll container and inner container so footer/content height changes never cause jumps
   useLayoutEffect(() => {
     const el = chatContainerRef.current;
     if (!el) return;
 
     const innerContainer = el.firstElementChild;
-    if (!innerContainer) return;
-
     const resizeObserver = new ResizeObserver(() => {
       if (isNearBottomRef.current) {
-        // If we were at the bottom before the resize, stay at the bottom
         snapToBottom();
       }
     });
 
-    resizeObserver.observe(innerContainer);
+    resizeObserver.observe(el);
+    if (innerContainer) {
+      resizeObserver.observe(innerContainer);
+    }
 
     const handleWindowResize = () => {
       if (isNearBottomRef.current) {
@@ -166,7 +215,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
       resizeObserver.disconnect();
       window.removeEventListener('resize', handleWindowResize);
     };
-  }, [snapToBottom]);
+  }, [conversation?.id, snapToBottom]);
 
   // Ensure unread messages are marked as read when ChatWindow is actively visible
   useEffect(() => {
@@ -179,22 +228,32 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     }
   }, [conversation?.id, currentUser?.id, messages.length, markMessagesAsRead]);
 
-  const otherUser = conversation?.other_member;
-  const isSelf = Boolean(currentUser && otherUser && otherUser.id === currentUser.id);
-  const rawDisplayName = otherUser?.display_name || otherUser?.username || 'Chat';
-  const displayName = isSelf ? `${rawDisplayName} (You)` : rawDisplayName;
-  const username = otherUser?.username || '';
-  const avatarUrl = otherUser?.avatar_url;
-
   const currentConvIdRef = useRef<string | null>(null);
 
-  // Direct Live Relation Check from backend (only for direct 1-on-1 chats)
+  // Direct Live Relation Check from backend (only updates state when relation flags change)
+  const updateLiveRelationIfChanged = useCallback((data: UserRelationStatus) => {
+    setLiveRelation((prev) => {
+      if (
+        prev &&
+        Boolean(prev.isBlocked) === Boolean(data.isBlocked) &&
+        Boolean(prev.isBlockedByMe) === Boolean(data.isBlockedByMe) &&
+        Boolean(prev.isBlockedByThem) === Boolean(data.isBlockedByThem) &&
+        Boolean(prev.isFollowing) === Boolean(data.isFollowing) &&
+        Boolean(prev.isFollowedBy) === Boolean(data.isFollowedBy) &&
+        Boolean(prev.isMutual) === Boolean(data.isMutual)
+      ) {
+        return prev;
+      }
+      return data;
+    });
+  }, []);
+
   const checkLiveRelation = useCallback(async () => {
     if (!currentUser?.id || !otherUser?.id || isSelf) return;
     try {
       if (isFirebaseSessionActive(currentUser.id)) {
         const data = await fetchRelationStatusFs(currentUser.id, otherUser.id);
-        setLiveRelation(data);
+        updateLiveRelationIfChanged(data);
       } else {
         const res = await fetch('/api/relations/status', {
           method: 'POST',
@@ -208,13 +267,13 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
         });
         if (res.ok) {
           const data = await res.json();
-          setLiveRelation(data);
+          updateLiveRelationIfChanged(data);
         }
       }
-    } catch (e) {
+    } catch {
       // ignore
     }
-  }, [currentUser?.id, currentUser?.username, otherUser?.id, otherUser?.username, isSelf]);
+  }, [currentUser?.id, currentUser?.username, otherUser?.id, otherUser?.username, isSelf, updateLiveRelationIfChanged]);
 
   useEffect(() => {
     const convId = conversation?.id || null;
@@ -237,6 +296,19 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     return () => clearInterval(interval);
   }, [otherUser?.id, isSelf, checkLiveRelation]);
 
+  // Stable callbacks passed to memoized MessageBubble
+  const handleViewImage = useCallback((url: string, caption?: string) => {
+    setViewingImage({ url, caption });
+  }, []);
+
+  const handleReplyMessage = useCallback((msgToReply: Message) => {
+    setReplyingToMessage(msgToReply);
+  }, []);
+
+  const handlePinMessage = useCallback((msgToPin: Message) => {
+    setPinnedMessage((prev) => (prev?.id === msgToPin.id ? null : msgToPin));
+  }, []);
+
   if (!conversation) {
     return (
       <div className="flex-1 flex flex-col h-full bg-white dark:bg-neutral-900 items-center justify-center">
@@ -245,30 +317,12 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     );
   }
 
-  const isBlocked = Boolean(liveRelation ? liveRelation.isBlocked : relationStatus?.isBlocked);
-  const isFollowingUser = Boolean(
-    localFollowed ||
-    (liveRelation !== null ? liveRelation.isFollowing : relationStatus?.isFollowing)
-  );
-  const isFollowedByUser = Boolean(
-    liveRelation !== null ? liveRelation.isFollowedBy : relationStatus?.isFollowedBy
-  );
-  const isMutual =
-    isSelf ||
-    Boolean(
-      (liveRelation && (liveRelation.isMutual || (liveRelation.isFollowing && liveRelation.isFollowedBy))) ||
-      (relationStatus && (relationStatus.isMutual || (relationStatus.isFollowing && relationStatus.isFollowedBy))) ||
-      (isFollowingUser && isFollowedByUser)
-    );
-
-  const canChat = !isBlocked && (isSelf || isMutual);
-  const canCall = !isBlocked && (isSelf || isMutual);
-
   const handleSendMessage = async (content: string) => {
     if (!content.trim()) return;
     if (isBlocked || !canChat) return;
 
     isNearBottomRef.current = true;
+    justSentRef.current = true;
     sendMessage(
       content,
       currentUser || undefined,
@@ -310,7 +364,13 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
           liveRelation?.isFollowedBy
         );
         setLiveRelation((prev) => ({
-          ...(prev || {}),
+          ...(prev || {
+            isBlockedByMe: false,
+            isBlockedByThem: false,
+            isBlocked: false,
+            followersCount: 0,
+            followingCount: 0,
+          }),
           isFollowing: true,
           isFollowedBy: wasFollowed,
           isMutual: Boolean(followData.isMutual || wasFollowed),
@@ -335,7 +395,13 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
               liveRelation?.isFollowedBy
             );
             setLiveRelation((prev) => ({
-              ...(prev || {}),
+              ...(prev || {
+                isBlockedByMe: false,
+                isBlockedByThem: false,
+                isBlocked: false,
+                followersCount: 0,
+                followingCount: 0,
+              }),
               isFollowing: true,
               isFollowedBy: wasFollowed,
               isMutual: Boolean(followData.isMutual || wasFollowed),
@@ -627,7 +693,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                 const showAvatar = !isMine && (!prevMsg || prevMsg.sender_id !== msg.sender_id || showDateHeader);
 
                 return (
-                  <React.Fragment key={msg.id}>
+                  <React.Fragment key={msg.client_id || msg.id}>
                     {showDateHeader && (
                       <div className="flex items-center justify-center my-3 select-none">
                         <div className="px-3 py-1 rounded-full bg-neutral-200/90 dark:bg-neutral-800/90 text-[11px] font-semibold text-neutral-600 dark:text-neutral-300 shadow-2xs border border-neutral-300/40 dark:border-neutral-700/60 backdrop-blur-xs">
@@ -641,15 +707,14 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                       showAvatar={showAvatar}
                       onDeleteMessage={deleteMessage}
                       onStartCall={onStartCall}
-                      onViewImage={(url, caption) => setViewingImage({ url, caption })}
+                      onViewImage={handleViewImage}
                       otherUser={otherUser}
                       conversation={conversation}
-                      onReplyMessage={(msgToReply) => setReplyingToMessage(msgToReply)}
-                      onPinMessage={(msgToPin) =>
-                        setPinnedMessage((prev) => (prev?.id === msgToPin.id ? null : msgToPin))
-                      }
+                      onReplyMessage={handleReplyMessage}
+                      onPinMessage={handlePinMessage}
                       isPinned={pinnedMessage?.id === msg.id}
                       onOpenProfileView={onOpenProfileView}
+                      shouldAnimate={msg.should_animate}
                     />
                   </React.Fragment>
                 );
@@ -675,6 +740,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
               <EmptyState type="no-messages" />
             </div>
           )}
+
+          {showTypingBubble && <TypingBubble user={otherUser} />}
           <div ref={messagesEndRef} className="h-0" />
         </div>
       </div>
@@ -759,12 +826,6 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
               </div>
             )}
 
-            {typingUserId && (
-              <div className="px-4 pb-1 text-xs text-neutral-500 dark:text-neutral-400 italic animate-pulse">
-                {otherUser?.display_name || otherUser?.username || 'Someone'} is typing...
-              </div>
-            )}
-
             <ChatInput
               onSendMessage={handleSendMessage}
               displayName={displayName}
@@ -788,4 +849,3 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     </div>
   );
 };
-

@@ -30,6 +30,12 @@ import {
 } from '@/src/lib/firebase/services';
 import { getAuthHeaders } from '@/src/lib/authHeader';
 
+export type ClientMessage = Message & {
+  client_id?: string;
+  is_pending?: boolean;
+  should_animate?: boolean;
+};
+
 function getLocalMsgCacheKey(convId: string) {
   return `liveconnect_msgs_${convId}`;
 }
@@ -74,11 +80,19 @@ function recordMultipleDeletedMsgIds(convId: string | null, msgIds: string[]) {
   }
 }
 
-function cleanAndDeduplicateMessages(msgs: Message[], convId: string | null): Message[] {
+function isMessagePending(msg: ClientMessage): boolean {
+  return Boolean(
+    msg.is_pending ||
+      msg.id.startsWith('temp_') ||
+      msg.id.startsWith('local_')
+  );
+}
+
+function cleanAndDeduplicateMessages(msgs: ClientMessage[], convId: string | null): ClientMessage[] {
   if (!Array.isArray(msgs) || msgs.length === 0) return [];
   const deleted = loadDeletedMsgIds(convId);
   const seenIds = new Set<string>();
-  const deduplicated: Message[] = [];
+  const deduplicated: ClientMessage[] = [];
 
   const sorted = [...msgs].sort(
     (a, b) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime()
@@ -88,6 +102,10 @@ function cleanAndDeduplicateMessages(msgs: Message[], convId: string | null): Me
     if (!m || !m.id || deleted.has(m.id)) continue;
 
     let existingIdx = deduplicated.findIndex((prev) => prev.id === m.id);
+
+    if (existingIdx === -1 && m.client_id) {
+      existingIdx = deduplicated.findIndex((prev) => prev.client_id === m.client_id);
+    }
 
     if (existingIdx === -1 && m.content?.startsWith('[CALL_LOG:')) {
       existingIdx = deduplicated.findIndex((prev) => {
@@ -100,14 +118,11 @@ function cleanAndDeduplicateMessages(msgs: Message[], convId: string | null): Me
     }
 
     if (existingIdx === -1 && m.sender_id && m.content) {
+      const mPending = isMessagePending(m);
       existingIdx = deduplicated.findIndex((prev) => {
         if (prev.sender_id !== m.sender_id || prev.content !== m.content) return false;
-        const isOneTemp =
-          prev.id.startsWith('temp_') ||
-          prev.id.startsWith('local_') ||
-          m.id.startsWith('temp_') ||
-          m.id.startsWith('local_');
-        if (!isOneTemp) return false;
+        const prevPending = isMessagePending(prev);
+        if (prevPending === mPending) return false;
         const timeDiff = Math.abs(
           new Date(prev.created_at || 0).getTime() - new Date(m.created_at || 0).getTime()
         );
@@ -119,12 +134,18 @@ function cleanAndDeduplicateMessages(msgs: Message[], convId: string | null): Me
       const prev = deduplicated[existingIdx];
       const isNewAnswered = m.content?.includes(':answered:') && !prev.content?.includes(':answered:');
       const isNewEnded = m.content?.includes(':ended:') && !prev.content?.includes(':ended:');
-      const resolvedId = prev.id && !prev.id.startsWith('temp_') ? prev.id : m.id;
+      const prevPending = isMessagePending(prev);
+      const mPending = isMessagePending(m);
+      const resolvedId = !prevPending ? prev.id : !mPending ? m.id : m.id;
+      const resolvedClientId = prev.client_id || m.client_id || prev.id || m.id;
 
       deduplicated[existingIdx] = {
         ...prev,
         ...m,
         id: isNewAnswered || isNewEnded ? m.id : resolvedId,
+        client_id: resolvedClientId,
+        is_pending: prevPending && mPending,
+        should_animate: Boolean(prev.should_animate || m.should_animate),
         content: isNewAnswered || isNewEnded ? m.content : m.content || prev.content,
         sender: m.sender || prev.sender,
         reactions: m.reactions !== undefined ? m.reactions : prev.reactions,
@@ -135,21 +156,33 @@ function cleanAndDeduplicateMessages(msgs: Message[], convId: string | null): Me
 
     if (seenIds.has(m.id)) continue;
     seenIds.add(m.id);
-    deduplicated.push(m);
+    deduplicated.push({
+      ...m,
+      client_id: m.client_id || m.id,
+    });
   }
 
   return deduplicated;
 }
 
-function loadCombinedLocalMessages(candidateIds: string[]): Message[] {
+function loadCombinedLocalMessages(candidateIds: string[]): ClientMessage[] {
   if (typeof window === 'undefined' || !candidateIds || candidateIds.length === 0) return [];
-  const all: Message[] = [];
+  const all: ClientMessage[] = [];
   candidateIds.forEach((id) => {
     try {
       const raw = localStorage.getItem(getLocalMsgCacheKey(id));
       if (raw) {
-        const msgs = JSON.parse(raw) as Message[];
-        if (Array.isArray(msgs)) all.push(...msgs);
+        const msgs = JSON.parse(raw) as ClientMessage[];
+        if (Array.isArray(msgs)) {
+          msgs.forEach((msg) => {
+            all.push({
+              ...msg,
+              client_id: msg.client_id || msg.id,
+              is_pending: false,
+              should_animate: false,
+            });
+          });
+        }
       }
     } catch {
       // ignore
@@ -158,10 +191,12 @@ function loadCombinedLocalMessages(candidateIds: string[]): Message[] {
   return cleanAndDeduplicateMessages(all, candidateIds[0] || null);
 }
 
-function saveLocalMessages(convId: string | null, msgs: Message[]) {
+function saveLocalMessages(convId: string | null, msgs: ClientMessage[]) {
   if (typeof window === 'undefined' || !convId) return;
   try {
-    const clean = cleanAndDeduplicateMessages(msgs, convId);
+    const clean = cleanAndDeduplicateMessages(msgs, convId).map(
+      ({ should_animate: _sa, is_pending: _ip, ...rest }) => rest
+    );
     localStorage.setItem(getLocalMsgCacheKey(convId), JSON.stringify(clean));
   } catch {
     // ignore
@@ -191,7 +226,7 @@ export function useMessages(
     return Array.from(ids).filter(Boolean);
   }, [conversationId, conversationObj, currentUserId]);
 
-  const [messages, setMessages] = useState<Message[]>(() => {
+  const [messages, setMessages] = useState<ClientMessage[]>(() => {
     const candidateIds = conversationId
       ? Array.from(
           new Set(
@@ -224,57 +259,80 @@ export function useMessages(
     return cached.length === 0 && Boolean(conversationId);
   });
 
-  const [sending, setSending] = useState<boolean>(false);
+  const [sending] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const msgBusRef = useRef<BroadcastChannel | null>(null);
   const [typingUserId, setTypingUserId] = useState<string | null>(null);
-  const typingTimeoutRef = useRef<any>(null);
+  const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isViewingChatRef = useRef<boolean>(isViewingChat);
   isViewingChatRef.current = isViewingChat;
   const lastSentContentRef = useRef<{ content: string; time: number } | null>(null);
   const lastTypingEmitRef = useRef<number>(0);
+  const messagesRef = useRef<ClientMessage[]>(messages);
+  messagesRef.current = messages;
+  const knownMsgIdsRef = useRef<Set<string>>(new Set(messages.map((m) => m.id)));
+  const hasLoadedInitialRef = useRef<boolean>(false);
+
+  const clearTyping = useCallback(() => {
+    if (typingTimeoutRef.current) {
+      clearTimeout(typingTimeoutRef.current);
+      typingTimeoutRef.current = null;
+    }
+    setTypingUserId((prev) => (prev !== null ? null : prev));
+  }, []);
 
   useEffect(() => {
+    hasLoadedInitialRef.current = false;
+    if (typingTimeoutRef.current) {
+      clearTimeout(typingTimeoutRef.current);
+      typingTimeoutRef.current = null;
+    }
+    setTypingUserId(null);
+
     if (conversationId) {
       const candidateIds = getCandidateConvIds();
       const cached = loadCombinedLocalMessages(candidateIds);
+      knownMsgIdsRef.current = new Set(cached.map((m) => m.id));
       setMessages(cached);
-      setTypingUserId(null);
       if (cached.length > 0) {
         setLoading(false);
       } else {
         setLoading(true);
       }
     } else {
+      knownMsgIdsRef.current = new Set();
       setMessages([]);
-      setTypingUserId(null);
       setLoading(false);
     }
   }, [conversationId, getCandidateConvIds]);
 
   const updateMessagesState = useCallback(
-    (updater: Message[] | ((prev: Message[]) => Message[])) => {
+    (updater: ClientMessage[] | ((prev: ClientMessage[]) => ClientMessage[])) => {
       setMessages((prev) => {
         const next = typeof updater === 'function' ? updater(prev) : updater;
+        if (next === prev) {
+          return prev;
+        }
+
         const cleanNext = cleanAndDeduplicateMessages(next, conversationId);
-        const candidateIds = getCandidateConvIds();
 
         if (prev.length === cleanNext.length) {
           const isIdentical = cleanNext.every(
             (m, i) =>
               prev[i].id === m.id &&
+              (prev[i].client_id || prev[i].id) === (m.client_id || m.id) &&
               prev[i].content === m.content &&
               Boolean(prev[i].is_read) === Boolean(m.is_read) &&
               prev[i].sender?.id === m.sender?.id &&
               JSON.stringify(prev[i].reactions || null) === JSON.stringify(m.reactions || null)
           );
           if (isIdentical) {
-            candidateIds.forEach((cId) => saveLocalMessages(cId, prev));
             return prev;
           }
         }
 
+        const candidateIds = getCandidateConvIds();
         candidateIds.forEach((cId) => {
           saveLocalMessages(cId, cleanNext);
         });
@@ -294,10 +352,11 @@ export function useMessages(
       if (Array.isArray(typingIds) && typingIds.length > 0) {
         const otherTyping = typingIds.find((id) => id && id !== currentUserId);
         if (otherTyping) {
-          setTypingUserId(otherTyping);
+          setTypingUserId((prev) => (prev === otherTyping ? prev : otherTyping));
           if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
           typingTimeoutRef.current = setTimeout(() => {
             setTypingUserId(null);
+            typingTimeoutRef.current = null;
           }, 3000);
           return;
         }
@@ -320,7 +379,7 @@ export function useMessages(
     const candidateIds = getCandidateConvIds();
     const cached = loadCombinedLocalMessages(candidateIds);
     if (cached.length > 0) {
-      setMessages(cached);
+      updateMessagesState((prev) => (prev.length === 0 ? cached : prev));
     } else {
       setLoading(true);
     }
@@ -348,23 +407,36 @@ export function useMessages(
       const isActivelyLooking =
         isViewingChatRef.current && (typeof document === 'undefined' || !document.hidden);
 
-      const formattedRemoteMessages: Message[] = rawMessages.map((m: any) => ({
+      const formattedRemoteMessages: ClientMessage[] = rawMessages.map((m: any) => ({
         ...m,
+        client_id: m.client_id || m.id,
+        is_pending: false,
+        should_animate: false,
         is_read:
           m.sender_id === currentUserId
             ? Boolean(m.is_read)
             : Boolean(m.is_read) || isActivelyLooking,
       }));
 
+      formattedRemoteMessages.forEach((m) => knownMsgIdsRef.current.add(m.id));
+      hasLoadedInitialRef.current = true;
+
       updateMessagesState((prev) => {
         const currentDeleted = loadDeletedMsgIds(conversationId);
-        const remoteIdMap = new Map(
-          formattedRemoteMessages
-            .filter((m) => !currentDeleted.has(m.id))
-            .map((m) => [m.id, m])
-        );
-        const merged = Array.from(remoteIdMap.values());
+        const prevById = new Map<string, ClientMessage>(prev.map((m) => [m.id, m]));
+        const remoteIdMap = new Map<string, ClientMessage>();
 
+        formattedRemoteMessages.forEach((m) => {
+          if (currentDeleted.has(m.id)) return;
+          const existing = prevById.get(m.id);
+          remoteIdMap.set(m.id, {
+            ...m,
+            client_id: existing?.client_id || m.id,
+            should_animate: existing?.should_animate ?? false,
+          });
+        });
+
+        const merged = Array.from(remoteIdMap.values());
         const now = Date.now();
         prev.forEach((localMsg) => {
           if (!remoteIdMap.has(localMsg.id) && !currentDeleted.has(localMsg.id)) {
@@ -405,9 +477,10 @@ export function useMessages(
 
   // Mark unread messages from other user as read
   const markMessagesAsRead = useCallback(async () => {
-    if (!conversationId || !currentUserId || messages.length === 0) return;
+    const currentMsgs = messagesRef.current;
+    if (!conversationId || !currentUserId || currentMsgs.length === 0) return;
 
-    const unreadMessages = messages.filter(
+    const unreadMessages = currentMsgs.filter(
       (m) => m.sender_id !== currentUserId && !m.is_read
     );
 
@@ -418,7 +491,7 @@ export function useMessages(
 
       updateMessagesState((prev) =>
         prev.map((msg) =>
-          msg.sender_id !== currentUserId ? { ...msg, is_read: true } : msg
+          msg.sender_id !== currentUserId && !msg.is_read ? { ...msg, is_read: true } : msg
         )
       );
 
@@ -450,7 +523,7 @@ export function useMessages(
     } catch (err) {
       console.warn('Silent notice on markMessagesAsRead:', err);
     }
-  }, [conversationId, currentUserId, messages, updateMessagesState]);
+  }, [conversationId, currentUserId, updateMessagesState]);
 
   const sendTypingSignal = useCallback(() => {
     if (!conversationId || !currentUserId) return;
@@ -526,18 +599,38 @@ export function useMessages(
           const isActivelyLooking =
             isViewingChatRef.current && (typeof document === 'undefined' || !document.hidden);
 
-          const remoteList: Message[] = [];
+          const prevById = new Map<string, ClientMessage>(messagesRef.current.map((m) => [m.id, m]));
+          const wasInitialized = hasLoadedInitialRef.current;
+          let receivedNewPeerMessage = false;
+
+          const remoteList: ClientMessage[] = [];
           snap.forEach((docSnap) => {
             if (deletedSet.has(docSnap.id)) return;
             const mapped = inboxMessageDocToMessage(docSnap.data());
+            const existing = prevById.get(mapped.id);
+            const isBrandNew = wasInitialized && !knownMsgIdsRef.current.has(mapped.id);
+            knownMsgIdsRef.current.add(mapped.id);
+
+            if (isBrandNew && mapped.sender_id !== currentUserId) {
+              receivedNewPeerMessage = true;
+            }
+
             remoteList.push({
               ...mapped,
+              client_id: existing?.client_id || mapped.id,
+              is_pending: false,
+              should_animate: existing ? existing.should_animate : isBrandNew,
               is_read:
                 mapped.sender_id === currentUserId
                   ? Boolean(mapped.is_read)
                   : Boolean(mapped.is_read) || isActivelyLooking,
             });
           });
+
+          hasLoadedInitialRef.current = true;
+          if (receivedNewPeerMessage) {
+            clearTyping();
+          }
 
           updateMessagesState(remoteList);
           setLoading(false);
@@ -580,7 +673,10 @@ export function useMessages(
       return () => {
         unsubMsgs();
         typingUnsubs.forEach((u) => u());
-        if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+        if (typingTimeoutRef.current) {
+          clearTimeout(typingTimeoutRef.current);
+          typingTimeoutRef.current = null;
+        }
       };
     }
 
@@ -596,18 +692,30 @@ export function useMessages(
         if (targetConvId && !candidateSet.has(targetConvId)) return;
 
         if (data.type === 'typing' && data.userId && data.userId !== currentUserId) {
-          setTypingUserId(data.userId);
+          setTypingUserId((prev) => (prev === data.userId ? prev : data.userId));
           if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
           typingTimeoutRef.current = setTimeout(() => {
             setTypingUserId(null);
+            typingTimeoutRef.current = null;
           }, 3000);
         } else if (data.type === 'messages_read' && data.readerId !== currentUserId) {
-          updateMessagesState((prev) =>
-            prev.map((msg) => (msg.sender_id === currentUserId ? { ...msg, is_read: true } : msg))
-          );
+          updateMessagesState((prev) => {
+            let changed = false;
+            const next = prev.map((msg) => {
+              if (msg.sender_id === currentUserId && !msg.is_read) {
+                changed = true;
+                return { ...msg, is_read: true };
+              }
+              return msg;
+            });
+            return changed ? next : prev;
+          });
         } else if (data.type === 'message_deleted' && data.messageId) {
           recordDeletedMsgId(conversationId, data.messageId);
-          updateMessagesState((prev) => prev.filter((m) => m.id !== data.messageId));
+          updateMessagesState((prev) => {
+            const next = prev.filter((m) => m.id !== data.messageId);
+            return next.length === prev.length ? prev : next;
+          });
         } else if (data.type === 'messages_cleared') {
           updateMessagesState([]);
           if (typeof window !== 'undefined') {
@@ -621,16 +729,23 @@ export function useMessages(
           const isActivelyViewing =
             isViewingChatRef.current && (typeof document === 'undefined' || !document.hidden);
 
-          if (currentUserId && newMsg.sender_id !== currentUserId && isActivelyViewing) {
-            markMessagesAsRead();
+          if (currentUserId && newMsg.sender_id !== currentUserId) {
+            clearTyping();
+            if (isActivelyViewing) {
+              markMessagesAsRead();
+            }
           }
 
+          knownMsgIdsRef.current.add(newMsg.id);
           updateMessagesState((prev) => {
             if (prev.some((m) => m.id === newMsg.id)) return prev;
             return [
               ...prev,
               {
                 ...newMsg,
+                client_id: (newMsg as ClientMessage).client_id || newMsg.id,
+                is_pending: false,
+                should_animate: true,
                 is_read:
                   newMsg.sender_id === currentUserId
                     ? Boolean(newMsg.is_read)
@@ -659,10 +774,11 @@ export function useMessages(
             const deletedSet = loadDeletedMsgIds(conversationId);
             const activeServerMsgs: Message[] = json.messages.filter((m: Message) => !deletedSet.has(m.id));
             const serverIds = new Set(activeServerMsgs.map((m) => m.id));
+            let receivedNewPeerMessage = false;
 
             updateMessagesState((prev) => {
               const currentDeleted = loadDeletedMsgIds(conversationId);
-              const prevMap = new Map<string, Message>();
+              const prevMap = new Map<string, ClientMessage>();
               let hasChanged = false;
 
               prev.forEach((m) => {
@@ -690,15 +806,20 @@ export function useMessages(
                     prevMap.set(srvMsg.id, {
                       ...existing,
                       ...srvMsg,
+                      client_id: existing.client_id || existing.id,
+                      is_pending: false,
                       is_read: Boolean(existing.is_read || srvMsg.is_read),
                     });
                     hasChanged = true;
                   }
+                  knownMsgIdsRef.current.add(srvMsg.id);
                   return;
                 }
 
                 const matchingEntry = Array.from(prevMap.values()).find(
                   (m) =>
+                    !serverIds.has(m.id) &&
+                    isMessagePending(m) &&
                     m.sender_id === srvMsg.sender_id &&
                     m.content === srvMsg.content &&
                     Math.abs(new Date(m.created_at || 0).getTime() - new Date(srvMsg.created_at || 0).getTime()) < 45000
@@ -706,19 +827,40 @@ export function useMessages(
 
                 if (matchingEntry) {
                   prevMap.delete(matchingEntry.id);
-                  prevMap.set(srvMsg.id, { ...matchingEntry, ...srvMsg });
+                  prevMap.set(srvMsg.id, {
+                    ...matchingEntry,
+                    ...srvMsg,
+                    client_id: matchingEntry.client_id || matchingEntry.id,
+                    is_pending: false,
+                  });
+                  knownMsgIdsRef.current.add(srvMsg.id);
                   hasChanged = true;
                 } else {
-                  prevMap.set(srvMsg.id, srvMsg);
+                  const isBrandNew = hasLoadedInitialRef.current && !knownMsgIdsRef.current.has(srvMsg.id);
+                  knownMsgIdsRef.current.add(srvMsg.id);
+                  if (isBrandNew && srvMsg.sender_id !== currentUserId) {
+                    receivedNewPeerMessage = true;
+                  }
+                  prevMap.set(srvMsg.id, {
+                    ...srvMsg,
+                    client_id: srvMsg.id,
+                    is_pending: false,
+                    should_animate: isBrandNew,
+                  });
                   hasChanged = true;
                 }
               });
 
+              hasLoadedInitialRef.current = true;
               if (!hasChanged && prev.length === prevMap.size) return prev;
               return Array.from(prevMap.values()).sort(
                 (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
               );
             });
+
+            if (receivedNewPeerMessage) {
+              clearTyping();
+            }
           }
         })
         .catch(() => {});
@@ -726,7 +868,10 @@ export function useMessages(
 
     return () => {
       clearInterval(pollInterval);
-      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+      if (typingTimeoutRef.current) {
+        clearTimeout(typingTimeoutRef.current);
+        typingTimeoutRef.current = null;
+      }
       if (msgBusRef.current) {
         msgBusRef.current.close();
         msgBusRef.current = null;
@@ -742,179 +887,92 @@ export function useMessages(
     updateMessagesState,
     markMessagesAsRead,
     applyServerTyping,
+    clearTyping,
   ]);
 
-  const sendMessage = async (
-    content: string,
-    senderProfile?: Profile,
-    receiverId?: string,
-    receiverProfile?: Profile
-  ): Promise<boolean> => {
-    const trimmed = content.trim();
-    if (!trimmed || !conversationId || !currentUserId) return false;
+  const sendMessage = useCallback(
+    async (
+      content: string,
+      senderProfile?: Profile,
+      receiverId?: string,
+      receiverProfile?: Profile
+    ): Promise<boolean> => {
+      const trimmed = content.trim();
+      if (!trimmed || !conversationId || !currentUserId) return false;
 
-    if (
-      lastSentContentRef.current &&
-      lastSentContentRef.current.content === trimmed &&
-      Date.now() - lastSentContentRef.current.time < 150
-    ) {
-      return false;
-    }
-    lastSentContentRef.current = { content: trimmed, time: Date.now() };
+      if (
+        lastSentContentRef.current &&
+        lastSentContentRef.current.content === trimmed &&
+        Date.now() - lastSentContentRef.current.time < 150
+      ) {
+        return false;
+      }
+      lastSentContentRef.current = { content: trimmed, time: Date.now() };
 
-    setError(null);
+      setError(null);
 
-    let processedContent = trimmed;
+      let processedContent = trimmed;
 
-    if (processedContent.includes('data:image') || processedContent.includes('data:audio')) {
-      try {
-        if (processedContent.startsWith('[IMAGE:data:image')) {
-          const inside = processedContent.slice(7, -1);
-          const base64Idx = inside.indexOf(';base64,');
-          if (base64Idx !== -1) {
-            const nextColon = inside.indexOf(':', base64Idx);
-            const dataUrl = nextColon !== -1 ? inside.slice(0, nextColon) : inside;
-            const caption = nextColon !== -1 ? inside.slice(nextColon + 1) : '';
-            const uploadedUrl = await uploadMediaToServer(dataUrl, { mediaType: 'image' });
-            if (uploadedUrl) {
-              processedContent = caption ? `[IMAGE:${uploadedUrl}:${caption}]` : `[IMAGE:${uploadedUrl}]`;
-            }
-          }
-        } else if (processedContent.startsWith('[VOICE:')) {
-          const tokens = processedContent.slice(7, -1);
-          const firstColon = tokens.indexOf(':');
-          if (firstColon !== -1) {
-            const dur = tokens.slice(0, firstColon);
-            const audioData = tokens.slice(firstColon + 1);
-            if (audioData.startsWith('data:audio')) {
-              const uploadedUrl = await uploadMediaToServer(audioData, { mediaType: 'audio' });
+      if (processedContent.includes('data:image') || processedContent.includes('data:audio')) {
+        try {
+          if (processedContent.startsWith('[IMAGE:data:image')) {
+            const inside = processedContent.slice(7, -1);
+            const base64Idx = inside.indexOf(';base64,');
+            if (base64Idx !== -1) {
+              const nextColon = inside.indexOf(':', base64Idx);
+              const dataUrl = nextColon !== -1 ? inside.slice(0, nextColon) : inside;
+              const caption = nextColon !== -1 ? inside.slice(nextColon + 1) : '';
+              const uploadedUrl = await uploadMediaToServer(dataUrl, { mediaType: 'image' });
               if (uploadedUrl) {
-                processedContent = `[VOICE:${dur}:${uploadedUrl}]`;
+                processedContent = caption ? `[IMAGE:${uploadedUrl}:${caption}]` : `[IMAGE:${uploadedUrl}]`;
+              }
+            }
+          } else if (processedContent.startsWith('[VOICE:')) {
+            const tokens = processedContent.slice(7, -1);
+            const firstColon = tokens.indexOf(':');
+            if (firstColon !== -1) {
+              const dur = tokens.slice(0, firstColon);
+              const audioData = tokens.slice(firstColon + 1);
+              if (audioData.startsWith('data:audio')) {
+                const uploadedUrl = await uploadMediaToServer(audioData, { mediaType: 'audio' });
+                if (uploadedUrl) {
+                  processedContent = `[VOICE:${dur}:${uploadedUrl}]`;
+                }
               }
             }
           }
+        } catch (err) {
+          console.warn('Fallback processing media payload:', err);
         }
-      } catch (err) {
-        console.warn('Fallback processing media payload:', err);
-      }
-    }
-
-    const nowIso = new Date().toISOString();
-    const tempId = generateUUID();
-
-    const optimisticMessage: Message = {
-      id: tempId,
-      conversation_id: conversationId,
-      sender_id: currentUserId,
-      content: processedContent,
-      created_at: nowIso,
-      updated_at: nowIso,
-      sender: senderProfile,
-      is_read: false,
-    };
-
-    // Render message & update conversation preview immediately with zero loading lock
-    updateMessagesState((prev) => [...prev, optimisticMessage]);
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(
-        new CustomEvent('liveconnect_conversation_message', {
-          detail: {
-            conversationId,
-            message: optimisticMessage,
-            receiverId,
-            receiverProfile,
-          },
-        })
-      );
-    }
-
-    if (isFirebaseSessionActive(currentUserId)) {
-      try {
-        const senderProf: Profile = senderProfile || {
-          id: currentUserId,
-          username: 'user',
-          display_name: 'User',
-          avatar_url: null,
-          bio: null,
-          is_online: true,
-          last_seen: nowIso,
-          created_at: nowIso,
-          updated_at: nowIso,
-        };
-
-        const savedMsg = await sendMessageToFirestoreFs({
-          messageId: tempId,
-          conversationId,
-          content: processedContent,
-          senderProfile: senderProf,
-          receiverId,
-          receiverProfile,
-        });
-
-        updateMessagesState((prev) =>
-          prev.map((m) => (m.id === tempId ? savedMsg : m))
-        );
-
-        return true;
-      } catch (err: any) {
-        updateMessagesState((prev) => prev.filter((m) => m.id !== tempId));
-        setError(err?.message || 'Failed to send message.');
-        return false;
-      }
-    }
-
-    try {
-      const authHeaders = await getAuthHeaders();
-      const relayRes = await fetch('/api/messages/send', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...authHeaders },
-        body: JSON.stringify({
-          message: optimisticMessage,
-          conversationId,
-          receiverId,
-          recipientId: receiverId,
-          senderProfile,
-          receiverProfile,
-        }),
-      });
-
-      if (relayRes.status === 403) {
-        const errorData = await relayRes.json().catch(() => ({}));
-        updateMessagesState((prev) => prev.filter((m) => m.id !== tempId));
-        setError(errorData.error || 'Follow each other to start messaging.');
-        return false;
       }
 
-      if (!relayRes.ok) {
-        const errorData = await relayRes.json().catch(() => ({}));
-        updateMessagesState((prev) => prev.filter((m) => m.id !== tempId));
-        setError(errorData.error || 'Failed to send message.');
-        return false;
-      }
+      const nowIso = new Date().toISOString();
+      const tempId = generateUUID();
 
-      const data = await relayRes.json().catch(() => null);
-      const savedMsg: Message = data?.message
-        ? { ...optimisticMessage, ...data.message, sender: data.message.sender || senderProfile }
-        : optimisticMessage;
+      const optimisticMessage: ClientMessage = {
+        id: tempId,
+        client_id: tempId,
+        is_pending: true,
+        should_animate: true,
+        conversation_id: conversationId,
+        sender_id: currentUserId,
+        content: processedContent,
+        created_at: nowIso,
+        updated_at: nowIso,
+        sender: senderProfile,
+        is_read: false,
+      };
 
-      updateMessagesState((prev) =>
-        prev.map((m) => (m.id === tempId ? savedMsg : m))
-      );
+      knownMsgIdsRef.current.add(tempId);
 
-      msgBusRef.current?.postMessage({
-        type: 'new_message',
-        conversationId,
-        message: savedMsg,
-        conversation: data?.conversation,
-      });
-
-      if (data?.conversation && typeof window !== 'undefined') {
+      // Render message & update conversation preview immediately with zero loading lock
+      updateMessagesState((prev) => [...prev, optimisticMessage]);
+      if (typeof window !== 'undefined') {
         window.dispatchEvent(
           new CustomEvent('liveconnect_conversation_message', {
             detail: {
               conversationId,
-              message: savedMsg,
-              conversation: data.conversation,
+              message: optimisticMessage,
               receiverId,
               receiverProfile,
             },
@@ -922,96 +980,222 @@ export function useMessages(
         );
       }
 
-      return true;
-    } catch (err: any) {
-      updateMessagesState((prev) => prev.filter((m) => m.id !== tempId));
-      setError(err?.message || 'Failed to send message.');
-      return false;
-    }
-  };
+      if (isFirebaseSessionActive(currentUserId)) {
+        try {
+          const senderProf: Profile = senderProfile || {
+            id: currentUserId,
+            username: 'user',
+            display_name: 'User',
+            avatar_url: null,
+            bio: null,
+            is_online: true,
+            last_seen: nowIso,
+            created_at: nowIso,
+            updated_at: nowIso,
+          };
+
+          const savedMsg = await sendMessageToFirestoreFs({
+            messageId: tempId,
+            conversationId,
+            content: processedContent,
+            senderProfile: senderProf,
+            receiverId,
+            receiverProfile,
+          });
+
+          knownMsgIdsRef.current.add(savedMsg.id);
+          updateMessagesState((prev) =>
+            prev.map((m) =>
+              m.id === tempId || m.client_id === tempId
+                ? {
+                    ...savedMsg,
+                    client_id: m.client_id || tempId,
+                    is_pending: false,
+                    should_animate: m.should_animate,
+                  }
+                : m
+            )
+          );
+
+          return true;
+        } catch (err: any) {
+          updateMessagesState((prev) => prev.filter((m) => m.id !== tempId && m.client_id !== tempId));
+          setError(err?.message || 'Failed to send message.');
+          return false;
+        }
+      }
+
+      try {
+        const authHeaders = await getAuthHeaders();
+        const relayRes = await fetch('/api/messages/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders },
+          body: JSON.stringify({
+            message: optimisticMessage,
+            conversationId,
+            receiverId,
+            recipientId: receiverId,
+            senderProfile,
+            receiverProfile,
+          }),
+        });
+
+        if (relayRes.status === 403) {
+          const errorData = await relayRes.json().catch(() => ({}));
+          updateMessagesState((prev) => prev.filter((m) => m.id !== tempId && m.client_id !== tempId));
+          setError(errorData.error || 'Follow each other to start messaging.');
+          return false;
+        }
+
+        if (!relayRes.ok) {
+          const errorData = await relayRes.json().catch(() => ({}));
+          updateMessagesState((prev) => prev.filter((m) => m.id !== tempId && m.client_id !== tempId));
+          setError(errorData.error || 'Failed to send message.');
+          return false;
+        }
+
+        const data = await relayRes.json().catch(() => null);
+        const savedMsg: ClientMessage = data?.message
+          ? {
+              ...optimisticMessage,
+              ...data.message,
+              client_id: tempId,
+              is_pending: false,
+              should_animate: optimisticMessage.should_animate,
+              sender: data.message.sender || senderProfile,
+            }
+          : { ...optimisticMessage, is_pending: false };
+
+        knownMsgIdsRef.current.add(savedMsg.id);
+        updateMessagesState((prev) =>
+          prev.map((m) =>
+            m.id === tempId || m.client_id === tempId
+              ? {
+                  ...savedMsg,
+                  client_id: m.client_id || tempId,
+                  is_pending: false,
+                  should_animate: m.should_animate,
+                }
+              : m
+          )
+        );
+
+        msgBusRef.current?.postMessage({
+          type: 'new_message',
+          conversationId,
+          message: savedMsg,
+          conversation: data?.conversation,
+        });
+
+        if (data?.conversation && typeof window !== 'undefined') {
+          window.dispatchEvent(
+            new CustomEvent('liveconnect_conversation_message', {
+              detail: {
+                conversationId,
+                message: savedMsg,
+                conversation: data.conversation,
+                receiverId,
+                receiverProfile,
+              },
+            })
+          );
+        }
+
+        return true;
+      } catch (err: any) {
+        updateMessagesState((prev) => prev.filter((m) => m.id !== tempId && m.client_id !== tempId));
+        setError(err?.message || 'Failed to send message.');
+        return false;
+      }
+    },
+    [conversationId, currentUserId, updateMessagesState]
+  );
 
   // Delete a single message for EVERYONE
-  const deleteMessage = async (messageId: string): Promise<boolean> => {
-    if (!messageId) return false;
+  const deleteMessage = useCallback(
+    async (messageId: string): Promise<boolean> => {
+      if (!messageId) return false;
 
-    try {
-      const targetMsg = messages.find((m) => m.id === messageId);
-      if (targetMsg) {
-        let cPublicId = (targetMsg as any).cloudinary_public_id || null;
-        const resType =
-          (targetMsg as any).media_type === 'video'
-            ? 'video'
-            : (targetMsg as any).media_type === 'voice'
-            ? 'raw'
-            : 'image';
+      try {
+        const targetMsg = messagesRef.current.find((m) => m.id === messageId);
+        if (targetMsg) {
+          let cPublicId = (targetMsg as any).cloudinary_public_id || null;
+          const resType =
+            (targetMsg as any).media_type === 'video'
+              ? 'video'
+              : (targetMsg as any).media_type === 'voice'
+              ? 'raw'
+              : 'image';
 
-        if (!cPublicId) {
-          const rawUrl = (targetMsg as any).media_url || targetMsg.content || '';
-          if (rawUrl.includes('cloudinary.com') || rawUrl.includes('/res.cloudinary.com/')) {
-            const parts = rawUrl.split('/upload/');
-            if (parts[1]) {
-              const fileWithExt = parts[1].replace(/^v\d+\//, '').split('?')[0];
-              cPublicId = fileWithExt.substring(0, fileWithExt.lastIndexOf('.')) || fileWithExt;
+          if (!cPublicId) {
+            const rawUrl = (targetMsg as any).media_url || targetMsg.content || '';
+            if (rawUrl.includes('cloudinary.com') || rawUrl.includes('/res.cloudinary.com/')) {
+              const parts = rawUrl.split('/upload/');
+              if (parts[1]) {
+                const fileWithExt = parts[1].replace(/^v\d+\//, '').split('?')[0];
+                cPublicId = fileWithExt.substring(0, fileWithExt.lastIndexOf('.')) || fileWithExt;
+              }
             }
+          }
+
+          if (cPublicId) {
+            deleteCloudinaryAsset(cPublicId, resType).catch((cErr) => {
+              console.warn('Notice deleting Cloudinary asset for message:', cErr);
+            });
+          }
+
+          let b2Key = (targetMsg as any).b2_file_id || null;
+          if (!b2Key) {
+            const rawUrl = (targetMsg as any).media_url || targetMsg.content || '';
+            if (rawUrl.includes('/api/b2/file/')) {
+              const encoded = rawUrl.split('/api/b2/file/')[1]?.split(']')[0]?.split('?')[0];
+              if (encoded) {
+                b2Key = decodeURIComponent(encoded);
+              }
+            }
+          }
+          if (b2Key) {
+            deleteB2Object(b2Key).catch((delErr) => {
+              console.warn('Notice deleting B2 cloud object for message:', delErr);
+            });
           }
         }
 
-        if (cPublicId) {
-          deleteCloudinaryAsset(cPublicId, resType).catch((cErr) => {
-            console.warn('Notice deleting Cloudinary asset for message:', cErr);
-          });
+        recordDeletedMsgId(conversationId, messageId);
+        updateMessagesState((prev) => prev.filter((m) => m.id !== messageId));
+
+        if (isFirebaseSessionActive(currentUserId) && conversationId) {
+          await deleteMessageForAllFs(conversationId, messageId).catch(() => {});
+          return true;
         }
 
-        let b2Key = (targetMsg as any).b2_file_id || null;
-        if (!b2Key) {
-          const rawUrl = (targetMsg as any).media_url || targetMsg.content || '';
-          if (rawUrl.includes('/api/b2/file/')) {
-            const encoded = rawUrl.split('/api/b2/file/')[1]?.split(']')[0]?.split('?')[0];
-            if (encoded) {
-              b2Key = decodeURIComponent(encoded);
-            }
-          }
-        }
-        if (b2Key) {
-          deleteB2Object(b2Key).catch((delErr) => {
-            console.warn('Notice deleting B2 cloud object for message:', delErr);
-          });
-        }
-      }
+        msgBusRef.current?.postMessage({
+          type: 'message_deleted',
+          conversationId,
+          messageId,
+        });
 
-      recordDeletedMsgId(conversationId, messageId);
-      updateMessagesState((prev) => prev.filter((m) => m.id !== messageId));
+        await fetch('/api/messages/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ conversationId, messageId }),
+        }).catch(() => {});
 
-      if (isFirebaseSessionActive(currentUserId) && conversationId) {
-        await deleteMessageForAllFs(conversationId, messageId).catch(() => {});
         return true;
+      } catch (err: any) {
+        console.error('Error in deleteMessage:', err.message);
+        return false;
       }
-
-      msgBusRef.current?.postMessage({
-        type: 'message_deleted',
-        conversationId,
-        messageId,
-      });
-
-      await fetch('/api/messages/delete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ conversationId, messageId }),
-      }).catch(() => {});
-
-      return true;
-    } catch (err: any) {
-      console.error('Error in deleteMessage:', err.message);
-      return false;
-    }
-  };
+    },
+    [conversationId, currentUserId, updateMessagesState]
+  );
 
   // Clear all messages in the active conversation
-  const clearAllMessages = async (): Promise<boolean> => {
+  const clearAllMessages = useCallback(async (): Promise<boolean> => {
     if (!conversationId) return false;
 
     try {
-      const currentIds = messages.map((m) => m.id);
+      const currentIds = messagesRef.current.map((m) => m.id);
       recordMultipleDeletedMsgIds(conversationId, currentIds);
 
       updateMessagesState([]);
@@ -1040,7 +1224,7 @@ export function useMessages(
       console.error('Error in clearAllMessages:', err.message);
       return false;
     }
-  };
+  }, [conversationId, currentUserId, updateMessagesState]);
 
   return {
     messages,
