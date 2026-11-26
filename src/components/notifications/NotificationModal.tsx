@@ -23,7 +23,7 @@ interface NotificationModalProps {
   onMarkAllAsRead: () => void;
   onDeleteNotification: (id: string) => void;
   onSelectUser?: (user: Profile) => void;
-  onOpenChat?: (userId: string) => void;
+  onOpenChat?: (userId: string, profile?: Profile) => void;
 }
 
 export const NotificationModal: React.FC<NotificationModalProps> = ({
@@ -203,7 +203,7 @@ export const NotificationModal: React.FC<NotificationModalProps> = ({
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
-                            onOpenChat(actor.id);
+                            onOpenChat(actor.id, actor);
                             onMarkAsRead(notif.id);
                             onClose();
                           }}

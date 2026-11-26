@@ -265,7 +265,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   const canCall = !isBlocked && (isSelf || isMutual);
 
   const handleSendMessage = async (content: string) => {
-    if (!content.trim() || sending) return;
+    if (!content.trim()) return;
     if (isBlocked || !canChat) return;
 
     isNearBottomRef.current = true;
@@ -303,7 +303,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
       if (isFirebaseSessionActive(currentUser.id)) {
         const followData = onFollow
           ? await fetchRelationStatusFs(currentUser.id, otherUser.id)
-          : await followUserFs(currentUser.id, otherUser.id, currentUser);
+          : await followUserFs(currentUser.id, otherUser.id, currentUser, otherUser);
         const wasFollowed = Boolean(
           followData.isFollowedBy ||
           relationStatus?.isFollowedBy ||
@@ -340,6 +340,18 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
               isFollowedBy: wasFollowed,
               isMutual: Boolean(followData.isMutual || wasFollowed),
             }));
+            if (followData.isMutual && typeof window !== 'undefined') {
+              window.dispatchEvent(
+                new CustomEvent('liveconnect_conversation_created', {
+                  detail: {
+                    conversationId: followData.conversationId,
+                    conversation: followData.conversation,
+                    targetUserId: otherUser.id,
+                    targetProfile: otherUser,
+                  },
+                })
+              );
+            }
           }
         }
       }
@@ -669,6 +681,12 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
       {/* Footer Area */}
       <footer className="p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] bg-white dark:bg-neutral-900 border-t border-neutral-200 dark:border-neutral-800 space-y-2">
+        {error && messages.length > 0 && (
+          <div className="px-3 py-2 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/50 flex items-center gap-2 text-xs text-rose-700 dark:text-rose-300">
+            <AlertCircle className="w-4 h-4 shrink-0 text-rose-500" />
+            <span className="flex-1">{error}</span>
+          </div>
+        )}
         {isBlocked ? (
           <div className="p-3.5 rounded-2xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/50 flex items-center justify-between gap-3 text-xs text-rose-700 dark:text-rose-300">
             <div className="flex items-center gap-2">
@@ -751,7 +769,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
               onSendMessage={handleSendMessage}
               displayName={displayName}
               disabled={!canChat || isBlocked}
-              sending={sending}
+              sending={false}
               onTyping={sendTypingSignal}
               conversation={conversation}
               replyingToMessage={replyingToMessage}

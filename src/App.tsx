@@ -121,7 +121,7 @@ export default function App() {
     startConversation,
     deleteConversation,
     markConversationAsRead,
-  } = useConversations(readyUserId, activeTab);
+  } = useConversations(readyUserId, activeTab, readyProfile);
 
   const {
     incomingCall,
@@ -590,10 +590,10 @@ export default function App() {
           setViewingProfile(u);
           setIsProfileOpen(true);
         }}
-        onOpenChat={async (userId) => {
+        onOpenChat={async (userId, actorProfile) => {
           setIsNotificationOpen(false);
           setActiveTab('messages');
-          const convId = await safeStartConversation(userId);
+          const convId = await safeStartConversation(userId, actorProfile);
           if (convId) {
             setActiveConversationId(convId);
           }
@@ -603,10 +603,10 @@ export default function App() {
       <UserSearchModal
         isOpen={isSearchOpen}
         onClose={() => setIsSearchOpen(false)}
-        onSelectUser={async (targetUser) => {
+        onSelectUser={async (targetUserId, targetUserProfile) => {
           setIsSearchOpen(false);
           setActiveTab('messages');
-          const convId = await safeStartConversation(targetUser.id, targetUser);
+          const convId = await safeStartConversation(targetUserId, targetUserProfile);
           if (convId) {
             setActiveConversationId(convId);
           }
@@ -634,11 +634,11 @@ export default function App() {
           }
           return success;
         }}
-        onStartChat={async (targetId) => {
+        onStartChat={async (targetId, targetProfile) => {
           setIsProfileOpen(false);
           setViewingProfile(null);
           setActiveTab('messages');
-          const convId = await safeStartConversation(targetId);
+          const convId = await safeStartConversation(targetId, targetProfile);
           if (convId) {
             setActiveConversationId(convId);
           }

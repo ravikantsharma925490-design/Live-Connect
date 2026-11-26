@@ -538,22 +538,36 @@ export function useSocialRelations(currentProfile?: Profile | null) {
       });
 
       try {
+        const targetMeta = typeof targetUser === 'object' && targetUser !== null ? targetUser : undefined;
+
         if (isFirebaseSessionActive(currentUserId)) {
-          const data = await followUserFs(currentUserId, targetId, currentProfile);
+          const data = await followUserFs(currentUserId, targetId, currentProfile, targetMeta);
           if (data?.isFollowedBy || data?.isMutual) {
             setFollowerSet((prev) => {
               const next = new Set<string>(prev);
               next.add(targetId);
               return next;
             });
+            if (typeof window !== 'undefined') {
+              window.dispatchEvent(
+                new CustomEvent('liveconnect_conversation_created', {
+                  detail: {
+                    conversationId: data.conversationId,
+                    conversation: data.conversation,
+                    targetUserId: targetId,
+                    targetProfile: targetMeta,
+                  },
+                })
+              );
+            }
           }
           return true;
         }
 
-        const targetMeta = typeof targetUser === 'object' ? targetUser : undefined;
+        const authHeaders = await getAuthHeaders();
         const res = await fetch('/api/relations/follow', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...authHeaders },
           body: JSON.stringify({
             userId: currentUserId,
             targetUserId: targetId,
@@ -574,6 +588,18 @@ export function useSocialRelations(currentProfile?: Profile | null) {
               });
               return next;
             });
+            if (typeof window !== 'undefined') {
+              window.dispatchEvent(
+                new CustomEvent('liveconnect_conversation_created', {
+                  detail: {
+                    conversationId: data.conversationId,
+                    conversation: data.conversation,
+                    targetUserId: targetId,
+                    targetProfile: targetMeta,
+                  },
+                })
+              );
+            }
           }
         }
 

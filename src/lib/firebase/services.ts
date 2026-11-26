@@ -39,7 +39,7 @@ import {
   Message,
   UserRelationStatus,
 } from '@/src/types';
-import { generateUUID } from '@/src/lib/utils';
+import { generateUUID, getDeterministicDirectConvId } from '@/src/lib/utils';
 
 // ============================================================================
 // MAPPERS
@@ -680,17 +680,17 @@ export async function fetchRelationStatusFs(userId: string, targetUserId: string
 
   try {
     const [f1, f2, b1, b2] = await Promise.all([
-      getDoc(doc(db, 'follows', `${userId}_${targetUserId}`)).catch(() => null),
-      getDoc(doc(db, 'follows', `${targetUserId}_${userId}`)).catch(() => null),
-      getDoc(doc(db, 'blocks', `${userId}_${targetUserId}`)).catch(() => null),
-      getDoc(doc(db, 'blocks', `${targetUserId}_${userId}`)).catch(() => null),
+      getDocDataWithRestFallback(`follows/${userId}_${targetUserId}`, 'follows', `${userId}_${targetUserId}`).catch(() => ({ exists: false })),
+      getDocDataWithRestFallback(`follows/${targetUserId}_${userId}`, 'follows', `${targetUserId}_${userId}`).catch(() => ({ exists: false })),
+      getDocDataWithRestFallback(`blocks/${userId}_${targetUserId}`, 'blocks', `${userId}_${targetUserId}`).catch(() => ({ exists: false })),
+      getDocDataWithRestFallback(`blocks/${targetUserId}_${userId}`, 'blocks', `${targetUserId}_${userId}`).catch(() => ({ exists: false })),
     ]);
 
-    const isBlockedByMe = Boolean(b1?.exists());
-    const isBlockedByThem = Boolean(b2?.exists());
+    const isBlockedByMe = Boolean(b1?.exists);
+    const isBlockedByThem = Boolean(b2?.exists);
     const isBlocked = isBlockedByMe || isBlockedByThem;
-    const isFollowing = !isBlocked && Boolean(f1?.exists());
-    const isFollowedBy = !isBlocked && Boolean(f2?.exists());
+    const isFollowing = !isBlocked && Boolean(f1?.exists);
+    const isFollowedBy = !isBlocked && Boolean(f2?.exists);
 
     return {
       isFollowing,
@@ -710,8 +710,14 @@ export async function fetchRelationStatusFs(userId: string, targetUserId: string
 export async function followUserFs(
   userId: string,
   targetUserId: string,
-  userMeta?: Profile | null
-): Promise<{ isFollowedBy: boolean; isMutual: boolean }> {
+  userMeta?: Profile | null,
+  targetMeta?: Profile | null
+): Promise<{
+  isFollowedBy: boolean;
+  isMutual: boolean;
+  conversationId?: string | null;
+  conversation?: Conversation | null;
+}> {
   if (!userId || !targetUserId || userId === targetUserId) {
     throw new Error('You cannot follow yourself.');
   }
@@ -724,15 +730,41 @@ export async function followUserFs(
   const path = `follows/${followId}`;
 
   try {
-    await setDoc(doc(db, 'follows', followId), {
+    const followData = {
       id: followId,
       followerId: userId,
       followingId: targetUserId,
-      createdAt: serverTimestamp(),
-    });
+    };
+    try {
+      await setDoc(doc(db, 'follows', followId), {
+        ...followData,
+        createdAt: serverTimestamp(),
+      });
+    } catch (writeErr) {
+      if (isOfflineOrUnavailableError(writeErr)) {
+        await restCommitWrites([
+          {
+            type: 'set',
+            path,
+            data: followData,
+            serverTimestampFields: ['createdAt'],
+          },
+        ]);
+      } else {
+        throw writeErr;
+      }
+    }
 
+    let isFollowedBy = false;
     const reverseSnap = await getDoc(doc(db, 'follows', `${targetUserId}_${userId}`)).catch(() => null);
-    const isFollowedBy = Boolean(reverseSnap?.exists());
+    if (reverseSnap && reverseSnap.exists()) {
+      isFollowedBy = true;
+    } else {
+      const restReverse = await restGetDocument(`follows/${targetUserId}_${userId}`).catch(() => ({
+        exists: false,
+      }));
+      isFollowedBy = Boolean(restReverse.exists);
+    }
 
     // Create follow/follow_back notification
     const notifId = `nf_${generateUUID().replace(/-/g, '').slice(0, 20)}`;
@@ -755,7 +787,46 @@ export async function followUserFs(
       createdAt: serverTimestamp(),
     }).catch(() => {});
 
-    return { isFollowedBy, isMutual: isFollowedBy };
+    let autoConv: Conversation | null = null;
+    let convId: string | null = null;
+    if (isFollowedBy) {
+      convId = getDeterministicDirectConvId(userId, targetUserId);
+      const nowIso = new Date().toISOString();
+      const myProf: Profile =
+        userMeta ||
+        (await fetchPublicProfileFs(userId).catch(() => null)) || {
+          id: userId,
+          username: 'user',
+          display_name: 'User',
+          avatar_url: null,
+          bio: null,
+          is_online: true,
+          last_seen: nowIso,
+          created_at: nowIso,
+          updated_at: nowIso,
+        };
+      const peerProf: Profile =
+        targetMeta ||
+        (await fetchPublicProfileFs(targetUserId, userId).catch(() => null)) || {
+          id: targetUserId,
+          username: 'user',
+          display_name: 'User',
+          avatar_url: null,
+          bio: null,
+          is_online: false,
+          last_seen: nowIso,
+          created_at: nowIso,
+          updated_at: nowIso,
+        };
+      autoConv = await createOrGetDirectConversationFs(convId, myProf, peerProf).catch(() => null);
+    }
+
+    return {
+      isFollowedBy,
+      isMutual: isFollowedBy,
+      conversationId: autoConv?.id || convId,
+      conversation: autoConv,
+    };
   } catch (err) {
     handleFirestoreError(err, OperationType.CREATE, path);
   }
@@ -828,11 +899,35 @@ async function upsertPeerInboxOnMessage(
     otherAvatarUrl?: string | null;
   }
 ) {
+  const inboxPath = `users/${peerId}/inbox/${convId}`;
   const inboxRef = doc(db, 'users', peerId, 'inbox', convId);
+  const preview = sanitizeStr(lastMessageContent, FIREBASE_CONSTRAINTS.MAX_LAST_MESSAGE_PREVIEW);
+
+  const createPayload = {
+    id: convId,
+    ownerId: peerId,
+    type: 'direct',
+    ...(inboxCreateExtras.otherMemberId ? { otherMemberId: inboxCreateExtras.otherMemberId } : {}),
+    ...(inboxCreateExtras.otherDisplayName !== undefined
+      ? { otherDisplayName: sanitizeOptionalStr(inboxCreateExtras.otherDisplayName, 80) }
+      : {}),
+    ...(inboxCreateExtras.otherUsername !== undefined
+      ? { otherUsername: sanitizeOptionalStr(inboxCreateExtras.otherUsername, 32) }
+      : {}),
+    ...(inboxCreateExtras.otherAvatarUrl !== undefined
+      ? { otherAvatarUrl: sanitizeOptionalStr(inboxCreateExtras.otherAvatarUrl, 1024) }
+      : {}),
+    lastMessageId,
+    lastMessageContent: preview,
+    lastMessageSenderId: senderId,
+    unreadCount: peerId === senderId ? 0 : 1,
+    isRemoved: false,
+  };
+
   try {
     await updateDoc(inboxRef, {
       lastMessageId,
-      lastMessageContent: sanitizeStr(lastMessageContent, FIREBASE_CONSTRAINTS.MAX_LAST_MESSAGE_PREVIEW),
+      lastMessageContent: preview,
       lastMessageSenderId: senderId,
       lastMessageAt: serverTimestamp(),
       unreadCount: peerId === senderId ? 0 : increment(1),
@@ -842,29 +937,62 @@ async function upsertPeerInboxOnMessage(
     const code = err?.code || '';
     const msg = String(err?.message || '');
     if (code === 'not-found' || msg.includes('No document to update')) {
-      await setDoc(inboxRef, {
-        id: convId,
-        ownerId: peerId,
-        type: 'direct',
-        ...(inboxCreateExtras.otherMemberId ? { otherMemberId: inboxCreateExtras.otherMemberId } : {}),
-        ...(inboxCreateExtras.otherDisplayName !== undefined
-          ? { otherDisplayName: sanitizeOptionalStr(inboxCreateExtras.otherDisplayName, 80) }
-          : {}),
-        ...(inboxCreateExtras.otherUsername !== undefined
-          ? { otherUsername: sanitizeOptionalStr(inboxCreateExtras.otherUsername, 32) }
-          : {}),
-        ...(inboxCreateExtras.otherAvatarUrl !== undefined
-          ? { otherAvatarUrl: sanitizeOptionalStr(inboxCreateExtras.otherAvatarUrl, 1024) }
-          : {}),
-        lastMessageId,
-        lastMessageContent: sanitizeStr(lastMessageContent, FIREBASE_CONSTRAINTS.MAX_LAST_MESSAGE_PREVIEW),
-        lastMessageSenderId: senderId,
-        lastMessageAt: serverTimestamp(),
-        unreadCount: peerId === senderId ? 0 : 1,
-        isRemoved: false,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
+      try {
+        await setDoc(inboxRef, {
+          ...createPayload,
+          lastMessageAt: serverTimestamp(),
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      } catch (setErr) {
+        if (isOfflineOrUnavailableError(setErr)) {
+          await restCommitWrites([
+            {
+              type: 'set',
+              path: inboxPath,
+              data: createPayload,
+              serverTimestampFields: ['lastMessageAt', 'createdAt', 'updatedAt'],
+            },
+          ]);
+        } else {
+          throw setErr;
+        }
+      }
+    } else if (isOfflineOrUnavailableError(err)) {
+      const existingRest = await restGetDocument(inboxPath).catch(() => ({ exists: false, data: undefined }));
+      if (existingRest.exists) {
+        const nextUnread = peerId === senderId ? 0 : Number(existingRest.data?.unreadCount || 0) + 1;
+        await restCommitWrites([
+          {
+            type: 'update',
+            path: inboxPath,
+            data: {
+              lastMessageId,
+              lastMessageContent: preview,
+              lastMessageSenderId: senderId,
+              unreadCount: nextUnread,
+            },
+            updateMaskFields: [
+              'lastMessageId',
+              'lastMessageContent',
+              'lastMessageSenderId',
+              'lastMessageAt',
+              'unreadCount',
+              'updatedAt',
+            ],
+            serverTimestampFields: ['lastMessageAt', 'updatedAt'],
+          },
+        ]);
+      } else {
+        await restCommitWrites([
+          {
+            type: 'set',
+            path: inboxPath,
+            data: createPayload,
+            serverTimestampFields: ['lastMessageAt', 'createdAt', 'updatedAt'],
+          },
+        ]);
+      }
     } else {
       throw err;
     }
@@ -874,13 +1002,14 @@ async function upsertPeerInboxOnMessage(
 export async function createOrGetDirectConversationFs(
   convId: string,
   currentUserProfile: Profile,
-  targetProfile: Profile
+  targetProfile: Profile,
+  options?: { skipRelationCheck?: boolean }
 ): Promise<Conversation> {
   const userId = currentUserProfile.id;
   const targetUserId = targetProfile.id;
   const isSelf = userId === targetUserId;
 
-  if (!isSelf) {
+  if (!isSelf && !options?.skipRelationCheck) {
     const rel = await fetchRelationStatusFs(userId, targetUserId);
     if (rel.isBlocked) {
       throw new Error('Cannot start conversation with a blocked user.');
@@ -888,47 +1017,39 @@ export async function createOrGetDirectConversationFs(
   }
 
   const convRef = doc(db, 'conversations', convId);
-  const existingConv = await getDoc(convRef).catch(() => null);
+  const existingConv = await getDocDataWithRestFallback(`conversations/${convId}`, 'conversations', convId).catch(
+    () => ({ exists: false })
+  );
+  const convExists = Boolean(existingConv.exists);
 
-  if (!existingConv || !existingConv.exists()) {
+  if (!convExists) {
     const memberRoles: Record<string, 'admin' | 'member'> = isSelf
       ? { [userId]: 'admin' }
       : { [userId]: 'admin', [targetUserId]: 'member' };
 
-    const batch = writeBatch(db);
-    batch.set(convRef, {
+    const convData = {
       id: convId,
       type: 'direct',
       ownerId: userId,
       memberRoles,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
-
-    batch.set(doc(db, 'conversations', convId, 'members', userId), {
+    };
+    const myMemberData = {
       userId,
       conversationId: convId,
       role: 'admin',
       displayName: sanitizeOptionalStr(currentUserProfile.display_name, 80),
       username: sanitizeOptionalStr(currentUserProfile.username, 32),
       avatarUrl: sanitizeOptionalStr(currentUserProfile.avatar_url, 1024),
-      joinedAt: serverTimestamp(),
-    });
-
-    if (!isSelf) {
-      batch.set(doc(db, 'conversations', convId, 'members', targetUserId), {
-        userId: targetUserId,
-        conversationId: convId,
-        role: 'member',
-        displayName: sanitizeOptionalStr(targetProfile.display_name, 80),
-        username: sanitizeOptionalStr(targetProfile.username, 32),
-        avatarUrl: sanitizeOptionalStr(targetProfile.avatar_url, 1024),
-        joinedAt: serverTimestamp(),
-      });
-    }
-
-    // Create inbox items for both participants
-    batch.set(doc(db, 'users', userId, 'inbox', convId), {
+    };
+    const targetMemberData = {
+      userId: targetUserId,
+      conversationId: convId,
+      role: 'member',
+      displayName: sanitizeOptionalStr(targetProfile.display_name, 80),
+      username: sanitizeOptionalStr(targetProfile.username, 32),
+      avatarUrl: sanitizeOptionalStr(targetProfile.avatar_url, 1024),
+    };
+    const myInboxData = {
       id: convId,
       ownerId: userId,
       type: 'direct',
@@ -938,49 +1059,146 @@ export async function createOrGetDirectConversationFs(
       otherAvatarUrl: sanitizeOptionalStr(targetProfile.avatar_url, 1024),
       unreadCount: 0,
       isRemoved: false,
+    };
+    const targetInboxData = {
+      id: convId,
+      ownerId: targetUserId,
+      type: 'direct',
+      otherMemberId: userId,
+      otherDisplayName: sanitizeOptionalStr(currentUserProfile.display_name, 80),
+      otherUsername: sanitizeOptionalStr(currentUserProfile.username, 32),
+      otherAvatarUrl: sanitizeOptionalStr(currentUserProfile.avatar_url, 1024),
+      unreadCount: 0,
+      isRemoved: false,
+    };
+
+    const batch = writeBatch(db);
+    const restOps: RestWriteOperation[] = [];
+
+    batch.set(convRef, {
+      ...convData,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
+    });
+    restOps.push({
+      type: 'set',
+      path: `conversations/${convId}`,
+      data: convData,
+      serverTimestampFields: ['createdAt', 'updatedAt'],
+    });
+
+    batch.set(doc(db, 'conversations', convId, 'members', userId), {
+      ...myMemberData,
+      joinedAt: serverTimestamp(),
+    });
+    restOps.push({
+      type: 'set',
+      path: `conversations/${convId}/members/${userId}`,
+      data: myMemberData,
+      serverTimestampFields: ['joinedAt'],
+    });
+
+    if (!isSelf) {
+      batch.set(doc(db, 'conversations', convId, 'members', targetUserId), {
+        ...targetMemberData,
+        joinedAt: serverTimestamp(),
+      });
+      restOps.push({
+        type: 'set',
+        path: `conversations/${convId}/members/${targetUserId}`,
+        data: targetMemberData,
+        serverTimestampFields: ['joinedAt'],
+      });
+    }
+
+    batch.set(doc(db, 'users', userId, 'inbox', convId), {
+      ...myInboxData,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+    restOps.push({
+      type: 'set',
+      path: `users/${userId}/inbox/${convId}`,
+      data: myInboxData,
+      serverTimestampFields: ['createdAt', 'updatedAt'],
     });
 
     if (!isSelf) {
       batch.set(doc(db, 'users', targetUserId, 'inbox', convId), {
-        id: convId,
-        ownerId: targetUserId,
-        type: 'direct',
-        otherMemberId: userId,
-        otherDisplayName: sanitizeOptionalStr(currentUserProfile.display_name, 80),
-        otherUsername: sanitizeOptionalStr(currentUserProfile.username, 32),
-        otherAvatarUrl: sanitizeOptionalStr(currentUserProfile.avatar_url, 1024),
-        unreadCount: 0,
-        isRemoved: false,
+        ...targetInboxData,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
+      });
+      restOps.push({
+        type: 'set',
+        path: `users/${targetUserId}/inbox/${convId}`,
+        data: targetInboxData,
+        serverTimestampFields: ['createdAt', 'updatedAt'],
       });
     }
 
     try {
       await batch.commit();
     } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, `conversations/${convId}`);
+      if (isOfflineOrUnavailableError(err)) {
+        await restCommitWrites(restOps);
+      } else {
+        handleFirestoreError(err, OperationType.WRITE, `conversations/${convId}`);
+      }
     }
   } else {
-    // Ensure current user has their inbox entry restored if they had previously deleted the chat
-    const myInboxRef = doc(db, 'users', userId, 'inbox', convId);
-    const myInboxSnap = await getDoc(myInboxRef).catch(() => null);
-    if (!myInboxSnap || !myInboxSnap.exists()) {
-      await setDoc(myInboxRef, {
-        id: convId,
-        ownerId: userId,
-        type: 'direct',
-        otherMemberId: targetUserId,
-        otherDisplayName: sanitizeOptionalStr(targetProfile.display_name, 80),
-        otherUsername: sanitizeOptionalStr(targetProfile.username, 32),
-        otherAvatarUrl: sanitizeOptionalStr(targetProfile.avatar_url, 1024),
-        unreadCount: 0,
-        isRemoved: false,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
+    // Ensure both participants have their inbox entries restored if previously deleted or missing
+    const ensureInboxEntry = async (
+      inboxOwnerId: string,
+      peerProfile: Profile
+    ) => {
+      const inboxPath = `users/${inboxOwnerId}/inbox/${convId}`;
+      const inboxRef = doc(db, 'users', inboxOwnerId, 'inbox', convId);
+      const snap = await getDoc(inboxRef).catch(() => null);
+      let exists = Boolean(snap && snap.exists());
+      if (!exists) {
+        const restInbox = await restGetDocument(inboxPath).catch(() => ({ exists: false }));
+        exists = Boolean(restInbox.exists);
+      }
+
+      if (!exists) {
+        const restoreData = {
+          id: convId,
+          ownerId: inboxOwnerId,
+          type: 'direct',
+          otherMemberId: peerProfile.id,
+          otherDisplayName: sanitizeOptionalStr(peerProfile.display_name, 80),
+          otherUsername: sanitizeOptionalStr(peerProfile.username, 32),
+          otherAvatarUrl: sanitizeOptionalStr(peerProfile.avatar_url, 1024),
+          unreadCount: 0,
+          isRemoved: false,
+        };
+        try {
+          await setDoc(inboxRef, {
+            ...restoreData,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+        } catch (err) {
+          if (isOfflineOrUnavailableError(err)) {
+            await restCommitWrites([
+              {
+                type: 'set',
+                path: inboxPath,
+                data: restoreData,
+                serverTimestampFields: ['createdAt', 'updatedAt'],
+              },
+            ]);
+          } else {
+            throw err;
+          }
+        }
+      }
+    };
+
+    await ensureInboxEntry(userId, targetProfile);
+    if (!isSelf) {
+      await ensureInboxEntry(targetUserId, currentUserProfile).catch(() => {});
     }
   }
 
@@ -1033,30 +1251,60 @@ export async function sendMessageToFirestoreFs(params: {
   const cleanContent = sanitizeStr(content, FIREBASE_CONSTRAINTS.MAX_MESSAGE_CONTENT);
   if (!cleanContent) throw new Error('Message content cannot be empty.');
 
-  // For direct chats with another user, verify mutual follow & ensure conversation exists
-  if (receiverId && receiverId !== senderId) {
-    const rel = await fetchRelationStatusFs(senderId, receiverId);
+  const isPeerChat = Boolean(receiverId && receiverId !== senderId);
+
+  // Parallelize relation verification, conversation metadata lookup, and peer profile lookup
+  const [rel, convLookup, resolvedPeerProf] = await Promise.all([
+    isPeerChat && receiverId ? fetchRelationStatusFs(senderId, receiverId) : Promise.resolve(null),
+    getDocDataWithRestFallback(`conversations/${conversationId}`, 'conversations', conversationId).catch(() => ({
+      exists: false,
+      data: undefined,
+    })),
+    isPeerChat && receiverId
+      ? receiverProfile
+        ? Promise.resolve(receiverProfile)
+        : fetchPublicProfileFs(receiverId)
+      : Promise.resolve(senderProfile),
+  ]);
+
+  if (isPeerChat && rel) {
     if (rel.isBlocked) {
       throw new Error('Messaging is unavailable because one of you has blocked the other.');
     }
     if (!rel.isMutual) {
       throw new Error('Follow each other to start messaging.');
     }
-
-    const peerProf = receiverProfile || (await fetchPublicProfileFs(receiverId));
-    if (!peerProf) throw new Error('Recipient profile not found.');
-    await createOrGetDirectConversationFs(conversationId, senderProfile, peerProf);
-  } else {
-    await createOrGetDirectConversationFs(conversationId, senderProfile, senderProfile);
   }
 
-  // Read authoritative member list from conversation metadata
-  const convSnap = await getDoc(doc(db, 'conversations', conversationId));
-  if (!convSnap.exists()) {
-    throw new Error('Conversation not found.');
+  if (isPeerChat && !resolvedPeerProf) {
+    throw new Error('Recipient profile not found.');
   }
-  const convData = convSnap.data();
-  const memberRoles: Record<string, 'admin' | 'member'> = convData.memberRoles || { [senderId]: 'admin' };
+
+  let convData: Record<string, any> | undefined = convLookup.exists ? convLookup.data : undefined;
+
+  if (!convLookup.exists) {
+    await createOrGetDirectConversationFs(
+      conversationId,
+      senderProfile,
+      resolvedPeerProf || senderProfile,
+      { skipRelationCheck: true }
+    );
+    convData = {
+      id: conversationId,
+      type: 'direct',
+      ownerId: senderId,
+      memberRoles:
+        isPeerChat && receiverId
+          ? { [senderId]: 'admin', [receiverId]: 'member' }
+          : { [senderId]: 'admin' },
+    };
+  }
+
+  const defaultRoles: Record<string, 'admin' | 'member'> =
+    receiverId && receiverId !== senderId
+      ? { [senderId]: 'admin', [receiverId]: 'member' }
+      : { [senderId]: 'admin' };
+  const memberRoles: Record<string, 'admin' | 'member'> = convData?.memberRoles || defaultRoles;
   const memberIds = Object.keys(memberRoles);
   if (!memberIds.includes(senderId)) {
     throw new Error('You are no longer a member of this conversation.');
@@ -1064,8 +1312,13 @@ export async function sendMessageToFirestoreFs(params: {
 
   // 1. Write message to each participant's inbox subcollection in one atomic batch
   const msgBatch = writeBatch(db);
+  const msgRestOps: RestWriteOperation[] = [];
+  const cleanMentions = Array.isArray(mentions)
+    ? mentions.filter((m): m is string => typeof m === 'string').slice(0, 20)
+    : [];
+
   memberIds.forEach((mUid) => {
-    msgBatch.set(doc(db, 'users', mUid, 'inbox', conversationId, 'messages', messageId), {
+    const msgData = {
       id: messageId,
       conversationId,
       senderId,
@@ -1075,50 +1328,66 @@ export async function sendMessageToFirestoreFs(params: {
       content: cleanContent,
       replyToMessageId: sanitizeOptionalStr(replyToMessageId, 128),
       reactions: {},
-      mentions: Array.isArray(mentions)
-        ? mentions.filter((m): m is string => typeof m === 'string').slice(0, 20)
-        : [],
+      mentions: cleanMentions,
       mediaType: sanitizeOptionalStr(mediaType, 32),
       cloudinaryPublicId: sanitizeOptionalStr(cloudinaryPublicId, 256),
       b2FileId: sanitizeOptionalStr(b2FileId, 256),
       b2FileName: sanitizeOptionalStr(b2FileName, 256),
       isRead: mUid === senderId,
+    };
+
+    msgBatch.set(doc(db, 'users', mUid, 'inbox', conversationId, 'messages', messageId), {
+      ...msgData,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
+    });
+    msgRestOps.push({
+      type: 'set',
+      path: `users/${mUid}/inbox/${conversationId}/messages/${messageId}`,
+      data: msgData,
+      serverTimestampFields: ['createdAt', 'updatedAt'],
     });
   });
 
   msgBatch.update(doc(db, 'conversations', conversationId), {
     updatedAt: serverTimestamp(),
   });
+  msgRestOps.push({
+    type: 'update',
+    path: `conversations/${conversationId}`,
+    data: {},
+    updateMaskFields: ['updatedAt'],
+    serverTimestampFields: ['updatedAt'],
+  });
 
   try {
     await msgBatch.commit();
   } catch (err) {
-    handleFirestoreError(err, OperationType.WRITE, `users/${senderId}/inbox/${conversationId}/messages/${messageId}`);
+    if (isOfflineOrUnavailableError(err)) {
+      await restCommitWrites(msgRestOps);
+    } else {
+      handleFirestoreError(err, OperationType.WRITE, `users/${senderId}/inbox/${conversationId}/messages/${messageId}`);
+    }
   }
 
-  // 2. Update each participant's inbox preview & unread counter
-  await Promise.all(
-    memberIds.map((mUid) =>
-      upsertPeerInboxOnMessage(mUid, conversationId, senderId, messageId, cleanContent, {
-        otherMemberId: mUid === senderId ? receiverId || senderId : senderId,
-        otherDisplayName: mUid !== senderId ? senderProfile.display_name : receiverProfile?.display_name,
-        otherUsername: mUid !== senderId ? senderProfile.username : receiverProfile?.username,
-        otherAvatarUrl: mUid !== senderId ? senderProfile.avatar_url : receiverProfile?.avatar_url,
-      }).catch(() => {})
-    )
+  // 2 & 3. Update inbox previews & dispatch recipient notifications in parallel without delaying send return
+  const postSendTasks: Promise<unknown>[] = memberIds.map((mUid) =>
+    upsertPeerInboxOnMessage(mUid, conversationId, senderId, messageId, cleanContent, {
+      otherMemberId: mUid === senderId ? receiverId || senderId : senderId,
+      otherDisplayName: mUid !== senderId ? senderProfile.display_name : resolvedPeerProf?.display_name,
+      otherUsername: mUid !== senderId ? senderProfile.username : resolvedPeerProf?.username,
+      otherAvatarUrl: mUid !== senderId ? senderProfile.avatar_url : resolvedPeerProf?.avatar_url,
+    }).catch(() => {})
   );
 
-  // 3. Dispatch notification to recipients (for non-call-log messages)
   if (!cleanContent.startsWith('[CALL_LOG:')) {
     const senderName = senderProfile.display_name || senderProfile.username || 'Someone';
-    await Promise.all(
-      memberIds
-        .filter((mUid) => mUid !== senderId)
-        .map((mUid) => {
-          const notifId = `nm_${generateUUID().replace(/-/g, '').slice(0, 20)}`;
-          return setDoc(doc(db, 'users', mUid, 'notifications', notifId), {
+    memberIds
+      .filter((mUid) => mUid !== senderId)
+      .forEach((mUid) => {
+        const notifId = `nm_${generateUUID().replace(/-/g, '').slice(0, 20)}`;
+        postSendTasks.push(
+          setDoc(doc(db, 'users', mUid, 'notifications', notifId), {
             id: notifId,
             userId: mUid,
             actorId: senderId,
@@ -1131,10 +1400,12 @@ export async function sendMessageToFirestoreFs(params: {
             referenceId: conversationId,
             isRead: false,
             createdAt: serverTimestamp(),
-          }).catch(() => {});
-        })
-    );
+          }).catch(() => {})
+        );
+      });
   }
+
+  void Promise.all(postSendTasks);
 
   const nowIso = new Date().toISOString();
   return {

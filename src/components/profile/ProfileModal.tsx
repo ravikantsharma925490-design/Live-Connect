@@ -50,7 +50,7 @@ interface ProfileModalProps {
   onSelectUser?: (user: Profile) => void;
   onBlock?: (user: Profile) => Promise<boolean>;
   onUnblock?: (userId: string) => Promise<boolean>;
-  onStartChat?: (userId: string) => void;
+  onStartChat?: (userId: string, profile?: Profile) => void;
   onStartAudioCall?: (user: Profile) => void;
   onStartVideoCall?: (user: Profile) => void;
   isUserOnline?: (profile?: Profile | null) => boolean;
@@ -784,7 +784,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                       <button
                         onClick={() => {
                           if (onStartChat && targetUser && canCommunicate) {
-                            onStartChat(targetUser.id);
+                            onStartChat(targetUser.id, targetUser);
                             onClose();
                           }
                         }}

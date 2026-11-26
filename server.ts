@@ -3102,14 +3102,46 @@ app.post('/api/relations/sync', (req, res) => {
     const stmt = db.prepare(
       'INSERT OR IGNORE INTO follows (follower_id, following_id, created_at) VALUES (?, ?, ?)'
     );
+    const peerIds = new Set<string>();
     if (userId && Array.isArray(following)) {
       for (const id of following) {
-        if (id && id !== userId && !isBlocked(userId, id)) stmt.run(userId, id, nowIso);
+        if (id && id !== userId && !isBlocked(userId, id)) {
+          stmt.run(userId, id, nowIso);
+          peerIds.add(id);
+        }
       }
     }
     if (userId && Array.isArray(followers)) {
       for (const id of followers) {
-        if (id && id !== userId && !isBlocked(userId, id)) stmt.run(id, userId, nowIso);
+        if (id && id !== userId && !isBlocked(userId, id)) {
+          stmt.run(id, userId, nowIso);
+          peerIds.add(id);
+        }
+      }
+    }
+    if (userId) {
+      for (const peerId of peerIds) {
+        if (isMutualFollow(userId, peerId)) {
+          const convId = getDeterministicDirectConvId(userId, peerId);
+          db.prepare('INSERT OR IGNORE INTO conversations (id, type, created_at, updated_at) VALUES (?, ?, ?, ?)').run(
+            convId,
+            'direct',
+            nowIso,
+            nowIso
+          );
+          db.prepare('INSERT OR IGNORE INTO conversation_members (conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)').run(
+            convId,
+            userId,
+            'member',
+            nowIso
+          );
+          db.prepare('INSERT OR IGNORE INTO conversation_members (conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)').run(
+            convId,
+            peerId,
+            'member',
+            nowIso
+          );
+        }
       }
     }
     return res.json({ success: true });
@@ -3137,12 +3169,32 @@ app.post('/api/relations/follow', requireNotBlocked((req) => req.body?.targetUse
     if (userMeta) ensureProfileRecord(userId, userMeta);
     if (targetMeta) ensureProfileRecord(targetUserId, targetMeta);
 
+    const nowIso = new Date().toISOString();
     db.prepare(
       'INSERT OR IGNORE INTO follows (follower_id, following_id, created_at) VALUES (?, ?, ?)'
-    ).run(userId, targetUserId, new Date().toISOString());
+    ).run(userId, targetUserId, nowIso);
 
     const wasFollowedByTarget = isFollowing(targetUserId, userId);
     const isMutualNow = wasFollowedByTarget;
+
+    let autoConvId: string | null = null;
+    let autoConv: any = null;
+
+    if (isMutualNow) {
+      autoConvId = getDeterministicDirectConvId(userId, targetUserId);
+      db.prepare('DELETE FROM deleted_conversations WHERE conversation_id = ?').run(autoConvId);
+      db.prepare(
+        'INSERT OR IGNORE INTO conversations (id, type, created_at, updated_at) VALUES (?, ?, ?, ?)'
+      ).run(autoConvId, 'direct', nowIso, nowIso);
+      db.prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').run(nowIso, autoConvId);
+      db.prepare(
+        'INSERT OR IGNORE INTO conversation_members (conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)'
+      ).run(autoConvId, userId, 'member', nowIso);
+      db.prepare(
+        'INSERT OR IGNORE INTO conversation_members (conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)'
+      ).run(autoConvId, targetUserId, 'member', nowIso);
+      autoConv = buildConversationObject(autoConvId, userId);
+    }
 
     const actorDisplayName = userMeta?.display_name || userMeta?.username || 'Someone';
     if (isMutualNow) {
@@ -3175,6 +3227,8 @@ app.post('/api/relations/follow', requireNotBlocked((req) => req.body?.targetUse
       isFollowing: true,
       isFollowedBy: wasFollowedByTarget,
       isMutual: isMutualNow,
+      conversationId: autoConvId,
+      conversation: autoConv,
       followersCount: targetCounts.followersCount,
       followingCount: targetCounts.followingCount,
       targetUserId,
@@ -3859,21 +3913,18 @@ app.post('/api/conversations/create-or-get', (req, res) => {
     if (userProfile?.id) ensureProfileRecord(userProfile.id, userProfile);
     if (targetProfile?.id) ensureProfileRecord(targetProfile.id, targetProfile);
 
-    const existing = db.prepare('SELECT * FROM conversations WHERE id = ?').get(convId);
-    if (!existing) {
-      db.prepare(
-        'INSERT INTO conversations (id, type, created_at, updated_at) VALUES (?, ?, ?, ?)'
-      ).run(convId, 'direct', nowIso, nowIso);
+    db.prepare(
+      'INSERT OR IGNORE INTO conversations (id, type, created_at, updated_at) VALUES (?, ?, ?, ?)'
+    ).run(convId, 'direct', nowIso, nowIso);
 
+    db.prepare(
+      'INSERT OR IGNORE INTO conversation_members (conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)'
+    ).run(convId, userId, 'member', nowIso);
+
+    if (userId !== targetUserId) {
       db.prepare(
         'INSERT OR IGNORE INTO conversation_members (conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)'
-      ).run(convId, userId, 'member', nowIso);
-
-      if (userId !== targetUserId) {
-        db.prepare(
-          'INSERT OR IGNORE INTO conversation_members (conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)'
-        ).run(convId, targetUserId, 'member', nowIso);
-      }
+      ).run(convId, targetUserId, 'member', nowIso);
     }
 
     const convObj = buildConversationObject(convId, userId);
@@ -4112,19 +4163,18 @@ app.post('/api/messages/send', (req, res) => {
     if (senderProfile?.id) ensureProfileRecord(senderProfile.id, senderProfile);
     if (recProfile?.id) ensureProfileRecord(recProfile.id, recProfile);
 
-    if (!existingConv) {
-      db.prepare(
-        'INSERT OR IGNORE INTO conversations (id, type, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)'
-      ).run(convId, 'direct', null, nowIso, nowIso);
+    db.prepare(
+      'INSERT OR IGNORE INTO conversations (id, type, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)'
+    ).run(convId, 'direct', null, nowIso, nowIso);
+    db.prepare(
+      'INSERT OR IGNORE INTO conversation_members (conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)'
+    ).run(convId, senderId, 'member', nowIso);
+    if (targetRecipient && targetRecipient !== senderId) {
       db.prepare(
         'INSERT OR IGNORE INTO conversation_members (conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)'
-      ).run(convId, senderId, 'member', nowIso);
-      if (targetRecipient && targetRecipient !== senderId) {
-        db.prepare(
-          'INSERT OR IGNORE INTO conversation_members (conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)'
-        ).run(convId, targetRecipient, 'member', nowIso);
-      }
-    } else {
+      ).run(convId, targetRecipient, 'member', nowIso);
+    }
+    if (existingConv) {
       db.prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').run(nowIso, convId);
     }
 
@@ -4185,7 +4235,8 @@ app.post('/api/messages/send', (req, res) => {
     }
 
     const savedMsg = formatMessageRow(db.prepare('SELECT * FROM messages WHERE id = ?').get(message.id));
-    return res.json({ success: true, message: savedMsg || message });
+    const updatedConv = buildConversationObject(convId, senderId);
+    return res.json({ success: true, message: savedMsg || message, conversation: updatedConv });
   } catch (error) {
     console.error('[Send Message Error]:', error);
     return res.status(500).json({ error: 'Failed to send message' });

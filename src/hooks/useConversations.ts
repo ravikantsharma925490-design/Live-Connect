@@ -27,6 +27,9 @@ import {
   markMessagesAsReadFs,
 } from '@/src/lib/firebase/services';
 import { getAuthHeaders } from '@/src/lib/authHeader';
+import { getDeterministicDirectConvId } from '@/src/lib/utils';
+
+export { getDeterministicDirectConvId };
 
 function getLocalConvCacheKey(userId?: string) {
   return `liveconnect_convs_${userId || 'anon'}`;
@@ -36,26 +39,51 @@ function getDeletedConvsKey(userId?: string) {
   return `liveconnect_deleted_convs_${userId || 'anon'}`;
 }
 
-function loadDeletedConvIds(userId?: string): Set<string> {
-  if (typeof window === 'undefined' || !userId) return new Set();
+function loadDeletedConvMap(userId?: string): Record<string, number> {
+  if (typeof window === 'undefined' || !userId) return {};
   try {
     const raw = localStorage.getItem(getDeletedConvsKey(userId));
     if (raw) {
-      const arr = JSON.parse(raw);
-      if (Array.isArray(arr)) return new Set(arr);
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        const map: Record<string, number> = {};
+        parsed.forEach((id) => {
+          if (typeof id === 'string') map[id] = 0;
+        });
+        return map;
+      }
+      if (parsed && typeof parsed === 'object') {
+        return parsed as Record<string, number>;
+      }
     }
   } catch {
     // ignore
   }
-  return new Set();
+  return {};
+}
+
+function loadDeletedConvIds(userId?: string): Set<string> {
+  return new Set(Object.keys(loadDeletedConvMap(userId)));
+}
+
+function isConvDeletedForUser(conv: Conversation, deletedMap: Record<string, number>): boolean {
+  if (!conv?.id || !(conv.id in deletedMap)) return false;
+  const deletedAt = deletedMap[conv.id] || 0;
+  if (!deletedAt) return true;
+  const lastMsgAt = conv.last_message?.created_at ? new Date(conv.last_message.created_at).getTime() : 0;
+  const convUpdatedAt = conv.updated_at ? new Date(conv.updated_at).getTime() : 0;
+  if (lastMsgAt > deletedAt || convUpdatedAt > deletedAt + 500) {
+    return false;
+  }
+  return true;
 }
 
 export function recordDeletedConvId(userId: string | undefined, convId: string) {
   if (typeof window === 'undefined' || !userId || !convId) return;
   try {
-    const existing = loadDeletedConvIds(userId);
-    existing.add(convId);
-    localStorage.setItem(getDeletedConvsKey(userId), JSON.stringify(Array.from(existing)));
+    const existing = loadDeletedConvMap(userId);
+    existing[convId] = Date.now();
+    localStorage.setItem(getDeletedConvsKey(userId), JSON.stringify(existing));
   } catch {
     // ignore
   }
@@ -64,9 +92,11 @@ export function recordDeletedConvId(userId: string | undefined, convId: string) 
 function unrecordDeletedConvId(userId: string | undefined, convId: string) {
   if (typeof window === 'undefined' || !userId || !convId) return;
   try {
-    const existing = loadDeletedConvIds(userId);
-    existing.delete(convId);
-    localStorage.setItem(getDeletedConvsKey(userId), JSON.stringify(Array.from(existing)));
+    const existing = loadDeletedConvMap(userId);
+    if (convId in existing) {
+      delete existing[convId];
+      localStorage.setItem(getDeletedConvsKey(userId), JSON.stringify(existing));
+    }
   } catch {
     // ignore
   }
@@ -102,7 +132,7 @@ export function isLegacyGroupConversation(c: any): boolean {
 
 export function cleanAndDeduplicateConversations(convs: Conversation[], userId?: string): Conversation[] {
   if (!Array.isArray(convs) || convs.length === 0) return [];
-  const deleted = loadDeletedConvIds(userId);
+  const deletedMap = loadDeletedConvMap(userId);
 
   const isDbUuid = (id: string | undefined): boolean => {
     return Boolean(
@@ -115,7 +145,11 @@ export function cleanAndDeduplicateConversations(convs: Conversation[], userId?:
   const directByOtherId = new Map<string, Conversation>();
 
   for (const c of convs) {
-    if (!c || !c.id || deleted.has(c.id) || isLegacyGroupConversation(c)) continue;
+    if (!c || !c.id || isLegacyGroupConversation(c)) continue;
+    if (c.id in deletedMap) {
+      if (isConvDeletedForUser(c, deletedMap)) continue;
+      unrecordDeletedConvId(userId, c.id);
+    }
 
     let otherMemberId = c.other_member?.id;
     const rawMembers = (c as any).members;
@@ -226,34 +260,11 @@ function saveLocalConversations(userId: string | undefined, convs: Conversation[
   }
 }
 
-export function getDeterministicDirectConvId(userA: string, userB: string): string {
-  const sorted = [userA || '', userB || ''].sort().join(':');
-  let h1 = 0x811c9dc5,
-    h2 = 0x811c9dc5,
-    h3 = 0x811c9dc5,
-    h4 = 0x811c9dc5;
-  for (let i = 0; i < sorted.length; i++) {
-    const code = sorted.charCodeAt(i);
-    h1 = Math.imul(h1 ^ code, 16777619) >>> 0;
-    h2 = Math.imul(h2 ^ (code + i), 2246822507) >>> 0;
-    h3 = Math.imul(h3 ^ ((code << 3) + i), 3266489909) >>> 0;
-    h4 = Math.imul(h4 ^ ((code << 5) + i), 1597334677) >>> 0;
-  }
-  h1 = (Math.imul(h1 ^ (h3 >>> 15), 2246822507) ^ h4) >>> 0;
-  h2 = (Math.imul(h2 ^ (h4 >>> 13), 3266489909) ^ h1) >>> 0;
-  h3 = (Math.imul(h3 ^ (h1 >>> 16), 1597334677) ^ h2) >>> 0;
-  h4 = (Math.imul(h4 ^ (h2 >>> 11), 2654435761) ^ h3) >>> 0;
-
-  const hex1 = h1.toString(16).padStart(8, '0');
-  const hex2 = (h2 & 0xffff).toString(16).padStart(4, '0');
-  const hex3 = '4' + ((h2 >>> 16) & 0x0fff).toString(16).padStart(3, '0');
-  const hex4 = (0x8 | ((h3 >>> 28) & 0x3)).toString(16) + (h3 & 0x0fff).toString(16).padStart(3, '0');
-  const hex5 = h4.toString(16).padStart(8, '0') + ((h3 >>> 12) & 0xffff).toString(16).padStart(4, '0');
-
-  return `${hex1}-${hex2}-${hex3}-${hex4}-${hex5}`.toLowerCase();
-}
-
-export function useConversations(currentUserId?: string, activeTab: string = 'messages') {
+export function useConversations(
+  currentUserId?: string,
+  activeTab: string = 'messages',
+  currentUserProfile?: Profile | null
+) {
   const [conversations, setConversations] = useState<Conversation[]>(() =>
     loadLocalConversations(currentUserId)
   );
@@ -332,9 +343,10 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
       }
 
       try {
+        const authHeaders = await getAuthHeaders();
         await fetch('/api/messages/mark-read', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...authHeaders },
           body: JSON.stringify({ conversationId, userId: currentUserId }),
         });
 
@@ -352,7 +364,7 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
 
   const hydrateAndApplyConversations = useCallback(
     (rawConvs: Conversation[]) => {
-      const deletedIds = loadDeletedConvIds(currentUserId);
+      const deletedMap = loadDeletedConvMap(currentUserId);
       const isActivelyViewing = (convId: string) => {
         return (
           typeof document !== 'undefined' &&
@@ -364,7 +376,12 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
 
       const combinedMap = new Map<string, Conversation>();
       rawConvs
-        .filter((c) => !deletedIds.has(c.id) && !isLegacyGroupConversation(c))
+        .filter((c) => {
+          if (isLegacyGroupConversation(c)) return false;
+          if (isConvDeletedForUser(c, deletedMap)) return false;
+          if (c.id in deletedMap) unrecordDeletedConvId(currentUserId, c.id);
+          return true;
+        })
         .forEach((c) => {
           const isViewing = isActivelyViewing(c.id);
           const uCount = isViewing ? 0 : c.unread_count || 0;
@@ -398,9 +415,10 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
 
       updateConversationsState((prev) => {
         prev.forEach((localConv) => {
-          if (!deletedIds.has(localConv.id) && !combinedMap.has(localConv.id)) {
+          if (!isConvDeletedForUser(localConv, deletedMap) && !combinedMap.has(localConv.id)) {
             const ageMs = Date.now() - new Date(localConv.updated_at || localConv.created_at || 0).getTime();
-            if (ageMs < 30000 && !localConv.last_message) {
+            const isCurrentlyActive = localConv.id === activeConvIdRef.current;
+            if (isCurrentlyActive || (ageMs < 300000 && !localConv.last_message)) {
               const uCount = isActivelyViewing(localConv.id) ? 0 : localConv.unread_count || 0;
               combinedMap.set(localConv.id, { ...localConv, unread_count: uCount });
             }
@@ -435,20 +453,25 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
       return;
     }
 
-    const deletedIds = loadDeletedConvIds(currentUserId);
+    const deletedMap = loadDeletedConvMap(currentUserId);
 
     try {
       let serverConvs: Conversation[] = [];
       try {
+        const authHeaders = await getAuthHeaders();
         const srvRes = await fetch('/api/conversations/list', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...authHeaders },
           body: JSON.stringify({ userId: currentUserId }),
         });
         if (srvRes.ok) {
           const srvData = await srvRes.json();
           if (Array.isArray(srvData.conversations)) {
-            serverConvs = srvData.conversations.filter((c: Conversation) => !deletedIds.has(c.id));
+            serverConvs = srvData.conversations.filter((c: Conversation) => {
+              if (isConvDeletedForUser(c, deletedMap)) return false;
+              if (c.id in deletedMap) unrecordDeletedConvId(currentUserId, c.id);
+              return true;
+            });
           }
         }
       } catch {
@@ -561,24 +584,96 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
         }
       );
 
-      // Listen for local optimistic events (like call logs inserted while chat open)
+      // Listen for local optimistic events (like sent messages or call logs inserted while chat open)
       const handleLocalConvMessage = (e: any) => {
         const detail = e.detail;
         if (!detail?.conversationId || !detail?.message) return;
         const newMsg = detail.message as Message;
-        updateConversationsState((prev) =>
-          prev.map((c) =>
-            c.id === newMsg.conversation_id
-              ? { ...c, updated_at: newMsg.created_at, last_message: newMsg }
-              : c
-          )
-        );
+        const convId = detail.conversationId || newMsg.conversation_id;
+        unrecordDeletedConvId(currentUserId, convId);
+        updateConversationsState((prev) => {
+          const exists = prev.some((c) => c.id === convId);
+          if (exists) {
+            return prev.map((c) =>
+              c.id === convId
+                ? {
+                    ...c,
+                    updated_at: newMsg.created_at,
+                    last_message: newMsg,
+                  }
+                : c
+            );
+          }
+          if (detail.conversation) {
+            return cleanAndDeduplicateConversations(
+              [{ ...detail.conversation, last_message: newMsg, updated_at: newMsg.created_at }, ...prev],
+              currentUserId
+            );
+          }
+          if (detail.receiverProfile || detail.receiverId) {
+            const synthesized: Conversation = {
+              id: convId,
+              type: 'direct',
+              created_at: newMsg.created_at,
+              updated_at: newMsg.created_at,
+              other_member: detail.receiverProfile || {
+                id: detail.receiverId,
+                username: 'user',
+                display_name: 'User',
+                avatar_url: null,
+                bio: null,
+                is_online: false,
+                last_seen: newMsg.created_at,
+                created_at: newMsg.created_at,
+                updated_at: newMsg.created_at,
+              },
+              last_message: newMsg,
+              unread_count: 0,
+            };
+            return cleanAndDeduplicateConversations([synthesized, ...prev], currentUserId);
+          }
+          return prev;
+        });
       };
       window.addEventListener('liveconnect_conversation_message', handleLocalConvMessage);
+
+      const handleLocalConvCreated = (e: any) => {
+        const detail = e.detail;
+        const conv = detail?.conversation as Conversation | undefined;
+        const convId = detail?.conversationId || conv?.id;
+        if (!convId && !detail?.targetUserId) return;
+        const resolvedId = convId || getDeterministicDirectConvId(currentUserId, detail.targetUserId);
+        unrecordDeletedConvId(currentUserId, resolvedId);
+        const nowIso = new Date().toISOString();
+        const convToAdd: Conversation = conv || {
+          id: resolvedId,
+          type: 'direct',
+          created_at: nowIso,
+          updated_at: nowIso,
+          other_member: detail.targetProfile || {
+            id: detail.targetUserId,
+            username: 'user',
+            display_name: 'User',
+            avatar_url: null,
+            bio: null,
+            is_online: false,
+            last_seen: nowIso,
+            created_at: nowIso,
+            updated_at: nowIso,
+          },
+          unread_count: 0,
+          member_ids: [currentUserId, detail.targetUserId].filter(Boolean),
+        };
+        updateConversationsState((prev) =>
+          cleanAndDeduplicateConversations([convToAdd, ...prev], currentUserId)
+        );
+      };
+      window.addEventListener('liveconnect_conversation_created', handleLocalConvCreated);
 
       return () => {
         unsub();
         window.removeEventListener('liveconnect_conversation_message', handleLocalConvMessage);
+        window.removeEventListener('liveconnect_conversation_created', handleLocalConvCreated);
       };
     }
 
@@ -607,6 +702,12 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
             const exists = prev.some((c) => c.id === newMsg.conversation_id);
             if (!exists) {
               fetchConversations();
+              if (data.conversation) {
+                return cleanAndDeduplicateConversations(
+                  [{ ...data.conversation, last_message: newMsg, updated_at: newMsg.created_at }, ...prev],
+                  currentUserId
+                );
+              }
               return prev;
             }
             return prev
@@ -644,22 +745,52 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
       const detail = e.detail;
       if (!detail?.conversationId || !detail?.message) return;
       const newMsg = detail.message as Message;
+      const convId = detail.conversationId || newMsg.conversation_id;
+      unrecordDeletedConvId(currentUserId, convId);
       const isFromOther = newMsg.sender_id !== currentUserId;
       const isViewing =
         typeof document !== 'undefined' &&
         !document.hidden &&
         activeTabRef.current === 'messages' &&
-        activeConvIdRef.current === newMsg.conversation_id;
+        activeConvIdRef.current === convId;
 
       updateConversationsState((prev) => {
-        const exists = prev.some((c) => c.id === newMsg.conversation_id);
+        const exists = prev.some((c) => c.id === convId);
         if (!exists) {
           fetchConversations();
+          if (detail.conversation) {
+            return cleanAndDeduplicateConversations(
+              [{ ...detail.conversation, last_message: newMsg, updated_at: newMsg.created_at }, ...prev],
+              currentUserId
+            );
+          }
+          if (detail.receiverProfile || detail.receiverId) {
+            const synthesized: Conversation = {
+              id: convId,
+              type: 'direct',
+              created_at: newMsg.created_at,
+              updated_at: newMsg.created_at,
+              other_member: detail.receiverProfile || {
+                id: detail.receiverId,
+                username: 'user',
+                display_name: 'User',
+                avatar_url: null,
+                bio: null,
+                is_online: false,
+                last_seen: newMsg.created_at,
+                created_at: newMsg.created_at,
+                updated_at: newMsg.created_at,
+              },
+              last_message: newMsg,
+              unread_count: isViewing ? 0 : isFromOther ? 1 : 0,
+            };
+            return cleanAndDeduplicateConversations([synthesized, ...prev], currentUserId);
+          }
           return prev;
         }
         return prev
           .map((c) => {
-            if (c.id === newMsg.conversation_id) {
+            if (c.id === convId) {
               return {
                 ...c,
                 updated_at: newMsg.created_at,
@@ -687,10 +818,45 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
       });
     };
 
+    const handleLocalConvCreated = (e: any) => {
+      const detail = e.detail;
+      const conv = detail?.conversation as Conversation | undefined;
+      const convId = detail?.conversationId || conv?.id;
+      if (!convId && !detail?.targetUserId) return;
+      const resolvedId = convId || getDeterministicDirectConvId(currentUserId, detail.targetUserId);
+      unrecordDeletedConvId(currentUserId, resolvedId);
+      const nowIso = new Date().toISOString();
+      const convToAdd: Conversation = conv || {
+        id: resolvedId,
+        type: 'direct',
+        created_at: nowIso,
+        updated_at: nowIso,
+        other_member: detail.targetProfile || {
+          id: detail.targetUserId,
+          username: 'user',
+          display_name: 'User',
+          avatar_url: null,
+          bio: null,
+          is_online: false,
+          last_seen: nowIso,
+          created_at: nowIso,
+          updated_at: nowIso,
+        },
+        unread_count: 0,
+        member_ids: [currentUserId, detail.targetUserId].filter(Boolean),
+      };
+      updateConversationsState((prev) =>
+        cleanAndDeduplicateConversations([convToAdd, ...prev], currentUserId)
+      );
+      fetchConversations();
+    };
+
     window.addEventListener('liveconnect_conversation_message', handleLocalConvMessage);
+    window.addEventListener('liveconnect_conversation_created', handleLocalConvCreated);
 
     return () => {
       window.removeEventListener('liveconnect_conversation_message', handleLocalConvMessage);
+      window.removeEventListener('liveconnect_conversation_created', handleLocalConvCreated);
       clearInterval(pollInterval);
       if (msgBusRef.current) {
         msgBusRef.current.close();
@@ -734,7 +900,7 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
 
   // Start or open a direct conversation with target user
   const startConversation = async (targetUserId: string, targetProfileData?: Profile): Promise<string | null> => {
-    if (!currentUserId) return null;
+    if (!currentUserId || !targetUserId) return null;
     const isSelfChat = targetUserId === currentUserId;
 
     try {
@@ -746,13 +912,14 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
 
       if (isFirebaseSessionActive(currentUserId)) {
         const resolvedTargetProf = isSelfChat
-          ? await fetchPublicProfileFs(currentUserId)
+          ? currentUserProfile || (await fetchPublicProfileFs(currentUserId))
           : targetProfileData || (await fetchPublicProfileFs(targetUserId, currentUserId));
 
         if (!isSelfChat && !resolvedTargetProf) {
           return null;
         }
 
+        const nowIso = new Date().toISOString();
         const targetProf = resolvedTargetProf || {
           id: targetUserId,
           username: isSelfChat ? 'self' : 'user',
@@ -760,22 +927,39 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
           avatar_url: null,
           bio: null,
           is_online: true,
-          last_seen: new Date().toISOString(),
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
+          last_seen: nowIso,
+          created_at: nowIso,
+          updated_at: nowIso,
         };
 
-        const myProf = (await fetchPublicProfileFs(currentUserId)) || {
-          id: currentUserId,
-          username: 'user',
-          display_name: 'User',
-          avatar_url: null,
-          bio: null,
-          is_online: true,
-          last_seen: new Date().toISOString(),
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
+        const myProf =
+          currentUserProfile ||
+          (await fetchPublicProfileFs(currentUserId)) || {
+            id: currentUserId,
+            username: 'user',
+            display_name: 'User',
+            avatar_url: null,
+            bio: null,
+            is_online: true,
+            last_seen: nowIso,
+            created_at: nowIso,
+            updated_at: nowIso,
+          };
+
+        const optimisticConv: Conversation = {
+          id: newConvId,
+          type: 'direct',
+          created_at: nowIso,
+          updated_at: nowIso,
+          other_member: targetProf,
+          unread_count: 0,
+          member_ids: isSelfChat ? [currentUserId] : [currentUserId, targetUserId],
         };
+
+        updateConversationsState((prev) =>
+          cleanAndDeduplicateConversations([optimisticConv, ...prev], currentUserId)
+        );
+        setActiveConversationId(newConvId);
 
         const conv = await createOrGetDirectConversationFs(newConvId, myProf, targetProf);
         updateConversationsState((prev) =>
@@ -786,14 +970,15 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
       }
 
       let targetProfile = targetProfileData;
-      if (!targetProfile) {
+      const authHeaders = await getAuthHeaders();
+
+      if (!targetProfile && !isSelfChat) {
         try {
-          const authHeaders = await getAuthHeaders();
           const profRes = await fetch(
             `/api/users/profile/${encodeURIComponent(targetUserId)}?viewerId=${encodeURIComponent(currentUserId)}`,
             { headers: authHeaders }
           );
-          if (profRes.status === 404 || profRes.status === 403) {
+          if (profRes.status === 403) {
             return null;
           }
           if (profRes.ok) {
@@ -803,26 +988,29 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
             }
           }
         } catch {
-          // ignore
+          // ignore and let create-or-get resolve
         }
       }
 
+      const nowIso = new Date().toISOString();
       const optimisticConv: Conversation = {
         id: newConvId,
         type: 'direct',
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-        other_member: targetProfile || {
-          id: targetUserId,
-          username: isSelfChat ? 'self' : 'user',
-          display_name: isSelfChat ? 'Note to Self (You)' : 'User',
-          avatar_url: null,
-          bio: null,
-          is_online: true,
-          last_seen: new Date().toISOString(),
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        },
+        created_at: nowIso,
+        updated_at: nowIso,
+        other_member:
+          targetProfile ||
+          (isSelfChat && currentUserProfile ? currentUserProfile : undefined) || {
+            id: targetUserId,
+            username: isSelfChat ? 'self' : 'user',
+            display_name: isSelfChat ? 'Note to Self (You)' : 'User',
+            avatar_url: null,
+            bio: null,
+            is_online: true,
+            last_seen: nowIso,
+            created_at: nowIso,
+            updated_at: nowIso,
+          },
         last_message: undefined,
         unread_count: 0,
       };
@@ -835,20 +1023,33 @@ export function useConversations(currentUserId?: string, activeTab: string = 'me
 
       const res = await fetch('/api/conversations/create-or-get', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeaders },
         body: JSON.stringify({
           userId: currentUserId,
           targetUserId,
+          userProfile: currentUserProfile || undefined,
           targetProfile,
         }),
       }).catch(() => null);
 
+      if (res && (res.status === 403 || res.status === 404)) {
+        updateConversationsState((prev) => prev.filter((c) => c.id !== newConvId));
+        if (activeConvIdRef.current === newConvId) {
+          setActiveConversationId(null);
+        }
+        return null;
+      }
+
       if (res && res.ok) {
-        const data = await res.json();
+        const data = await res.json().catch(() => null);
         if (data?.conversation) {
+          const resolvedId = data.conversation.id || newConvId;
+          unrecordDeletedConvId(currentUserId, resolvedId);
           updateConversationsState((prev) =>
             cleanAndDeduplicateConversations([data.conversation, ...prev], currentUserId)
           );
+          setActiveConversationId(resolvedId);
+          return resolvedId;
         }
       }
 

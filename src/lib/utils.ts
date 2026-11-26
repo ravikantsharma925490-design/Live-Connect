@@ -18,6 +18,33 @@ export function generateUUID(): string {
   });
 }
 
+export function getDeterministicDirectConvId(userA: string, userB: string): string {
+  const sorted = [userA || '', userB || ''].sort().join(':');
+  let h1 = 0x811c9dc5;
+  let h2 = 0x811c9dc5;
+  let h3 = 0x811c9dc5;
+  let h4 = 0x811c9dc5;
+  for (let i = 0; i < sorted.length; i++) {
+    const code = sorted.charCodeAt(i);
+    h1 = Math.imul(h1 ^ code, 16777619) >>> 0;
+    h2 = Math.imul(h2 ^ (code + i), 2246822507) >>> 0;
+    h3 = Math.imul(h3 ^ ((code << 3) + i), 3266489909) >>> 0;
+    h4 = Math.imul(h4 ^ ((code << 5) + i), 1597334677) >>> 0;
+  }
+  h1 = (Math.imul(h1 ^ (h3 >>> 15), 2246822507) ^ h4) >>> 0;
+  h2 = (Math.imul(h2 ^ (h4 >>> 13), 3266489909) ^ h1) >>> 0;
+  h3 = (Math.imul(h3 ^ (h1 >>> 16), 1597334677) ^ h2) >>> 0;
+  h4 = (Math.imul(h4 ^ (h2 >>> 11), 2654435761) ^ h3) >>> 0;
+
+  const hex1 = h1.toString(16).padStart(8, '0');
+  const hex2 = (h2 & 0xffff).toString(16).padStart(4, '0');
+  const hex3 = '4' + ((h2 >>> 16) & 0x0fff).toString(16).padStart(3, '0');
+  const hex4 = (0x8 | ((h3 >>> 28) & 0x3)).toString(16) + (h3 & 0x0fff).toString(16).padStart(3, '0');
+  const hex5 = h4.toString(16).padStart(8, '0') + ((h3 >>> 12) & 0xffff).toString(16).padStart(4, '0');
+
+  return `${hex1}-${hex2}-${hex3}-${hex4}-${hex5}`.toLowerCase();
+}
+
 export function parseDate(dateInput: string | Date | number | null | undefined): Date | null {
   if (!dateInput) return null;
   if (dateInput instanceof Date) return isNaN(dateInput.getTime()) ? null : dateInput;

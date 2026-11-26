@@ -328,62 +328,62 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   // Submit / Send Handler
   const handleSend = async (e?: React.FormEvent) => {
     e?.preventDefault();
-    if (isSubmittingRef.current || disabled || sending || isUploadingMedia) return;
-    isSubmittingRef.current = true;
+    if (isSubmittingRef.current || disabled) return;
 
-    try {
-      // Case 1: Staged Photo Attachment
-      if (stagedImage) {
-        const caption = inputText.trim();
-        const currentStaged = stagedImage;
-        const currentFileName = imageFileName;
-        
-        setStagedImage(null);
-        setImageFileName('');
-        setInputText('');
-        setIsUploadingMedia(true);
+    // Case 1: Staged Photo Attachment
+    if (stagedImage) {
+      if (isUploadingMedia) return;
+      isSubmittingRef.current = true;
+      const caption = inputText.trim();
+      const currentStaged = stagedImage;
+      const currentFileName = imageFileName;
 
-        try {
-          const uploadedUrl = await uploadMediaToServer(currentStaged, {
-            mimeType: 'image/jpeg',
-            fileName: currentFileName || 'photo.jpg',
-            mediaType: 'image',
-            category: 'chat-photo',
-          });
-
-          const finalSrc = uploadedUrl || currentStaged;
-          const imagePayload = caption
-            ? `[IMAGE:${finalSrc}:${caption}]`
-            : `[IMAGE:${finalSrc}]`;
-
-          await onSendMessage(imagePayload);
-        } catch (err: any) {
-          console.error('Failed to send image attachment:', err);
-          alert(err.message || 'Failed to upload photo.');
-        } finally {
-          setIsUploadingMedia(false);
-          inputRef.current?.focus();
-        }
-        return;
-      }
-
-      // Case 3: Standard Text Message
-      let text = inputText.trim();
-      if (!text) return;
-
-      if (replyingToMessage) {
-        text = `[REPLY:${replyingToMessage.id}] ${text}`;
-        onCancelReply?.();
-      }
-
+      setStagedImage(null);
+      setImageFileName('');
       setInputText('');
-      await onSendMessage(text);
-      inputRef.current?.focus();
-    } finally {
-      setTimeout(() => {
+      setIsUploadingMedia(true);
+
+      try {
+        const uploadedUrl = await uploadMediaToServer(currentStaged, {
+          mimeType: 'image/jpeg',
+          fileName: currentFileName || 'photo.jpg',
+          mediaType: 'image',
+          category: 'chat-photo',
+        });
+
+        const finalSrc = uploadedUrl || currentStaged;
+        const imagePayload = caption
+          ? `[IMAGE:${finalSrc}:${caption}]`
+          : `[IMAGE:${finalSrc}]`;
+
+        void onSendMessage(imagePayload);
+      } catch (err: any) {
+        console.error('Failed to send image attachment:', err);
+        alert(err.message || 'Failed to upload photo.');
+      } finally {
+        setIsUploadingMedia(false);
         isSubmittingRef.current = false;
-      }, 300);
+        inputRef.current?.focus();
+      }
+      return;
     }
+
+    // Case 3: Standard Text Message (direct non-blocking send)
+    let text = inputText.trim();
+    if (!text) return;
+
+    isSubmittingRef.current = true;
+    if (replyingToMessage) {
+      text = `[REPLY:${replyingToMessage.id}] ${text}`;
+      onCancelReply?.();
+    }
+
+    setInputText('');
+    void onSendMessage(text);
+    inputRef.current?.focus();
+    setTimeout(() => {
+      isSubmittingRef.current = false;
+    }, 20);
   };
 
 
@@ -907,15 +907,11 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                   animate={{ opacity: 1, scale: 1 }}
                   exit={{ opacity: 0, scale: 0.7 }}
                   type="submit"
-                  disabled={disabled || sending || isUploadingMedia}
+                  disabled={disabled}
                   className="ml-1 p-2 rounded-full bg-blue-600 hover:bg-blue-700 active:scale-95 text-white shadow-md shadow-blue-500/25 transition-all cursor-pointer flex items-center justify-center shrink-0 disabled:opacity-50"
                   title="Send Message"
                 >
-                  {sending || isUploadingMedia ? (
-                    <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  ) : (
-                    <Send className="w-4 h-4" />
-                  )}
+                  <Send className="w-4 h-4" />
                 </motion.button>
               )}
             </AnimatePresence>

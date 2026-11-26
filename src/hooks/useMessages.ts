@@ -28,6 +28,7 @@ import {
   clearUserInboxMessagesFs,
   markMessagesAsReadFs,
 } from '@/src/lib/firebase/services';
+import { getAuthHeaders } from '@/src/lib/authHeader';
 
 function getLocalMsgCacheKey(convId: string) {
   return `liveconnect_msgs_${convId}`;
@@ -328,9 +329,10 @@ export function useMessages(
 
     try {
       const deletedSet = loadDeletedMsgIds(conversationId);
+      const authHeaders = await getAuthHeaders();
       const res = await fetch('/api/messages/list', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeaders },
         body: JSON.stringify({ conversationId, candidateIds, userId: currentUserId }),
       });
 
@@ -433,9 +435,10 @@ export function useMessages(
         return;
       }
 
+      const authHeaders = await getAuthHeaders();
       await fetch('/api/messages/mark-read', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeaders },
         body: JSON.stringify({ conversationId, userId: currentUserId }),
       });
 
@@ -753,13 +756,12 @@ export function useMessages(
     if (
       lastSentContentRef.current &&
       lastSentContentRef.current.content === trimmed &&
-      Date.now() - lastSentContentRef.current.time < 1000
+      Date.now() - lastSentContentRef.current.time < 150
     ) {
       return false;
     }
     lastSentContentRef.current = { content: trimmed, time: Date.now() };
 
-    setSending(true);
     setError(null);
 
     let processedContent = trimmed;
@@ -811,7 +813,20 @@ export function useMessages(
       is_read: false,
     };
 
+    // Render message & update conversation preview immediately with zero loading lock
     updateMessagesState((prev) => [...prev, optimisticMessage]);
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('liveconnect_conversation_message', {
+          detail: {
+            conversationId,
+            message: optimisticMessage,
+            receiverId,
+            receiverProfile,
+          },
+        })
+      );
+    }
 
     if (isFirebaseSessionActive(currentUserId)) {
       try {
@@ -840,27 +855,19 @@ export function useMessages(
           prev.map((m) => (m.id === tempId ? savedMsg : m))
         );
 
-        if (typeof window !== 'undefined') {
-          window.dispatchEvent(
-            new CustomEvent('liveconnect_conversation_message', {
-              detail: { conversationId, message: savedMsg },
-            })
-          );
-        }
         return true;
       } catch (err: any) {
         updateMessagesState((prev) => prev.filter((m) => m.id !== tempId));
         setError(err?.message || 'Failed to send message.');
         return false;
-      } finally {
-        setSending(false);
       }
     }
 
     try {
+      const authHeaders = await getAuthHeaders();
       const relayRes = await fetch('/api/messages/send', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeaders },
         body: JSON.stringify({
           message: optimisticMessage,
           conversationId,
@@ -880,6 +887,7 @@ export function useMessages(
 
       if (!relayRes.ok) {
         const errorData = await relayRes.json().catch(() => ({}));
+        updateMessagesState((prev) => prev.filter((m) => m.id !== tempId));
         setError(errorData.error || 'Failed to send message.');
         return false;
       }
@@ -897,22 +905,28 @@ export function useMessages(
         type: 'new_message',
         conversationId,
         message: savedMsg,
+        conversation: data?.conversation,
       });
 
-      if (typeof window !== 'undefined') {
+      if (data?.conversation && typeof window !== 'undefined') {
         window.dispatchEvent(
           new CustomEvent('liveconnect_conversation_message', {
-            detail: { conversationId, message: savedMsg },
+            detail: {
+              conversationId,
+              message: savedMsg,
+              conversation: data.conversation,
+              receiverId,
+              receiverProfile,
+            },
           })
         );
       }
 
       return true;
     } catch (err: any) {
-      console.warn('Failed to commit message:', err.message);
-      return true;
-    } finally {
-      setSending(false);
+      updateMessagesState((prev) => prev.filter((m) => m.id !== tempId));
+      setError(err?.message || 'Failed to send message.');
+      return false;
     }
   };
 
