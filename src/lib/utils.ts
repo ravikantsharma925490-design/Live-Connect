@@ -229,3 +229,39 @@ export function getClientDeviceId(): string {
     return 'dev_fallback_' + Math.random().toString(36).substring(2, 8);
   }
 }
+
+export function formatMessagePreview(content?: string | null): string {
+  if (!content) return '';
+  let text = content.trim();
+
+  if (text.startsWith('[REPLY:')) {
+    const closing = text.indexOf(']');
+    if (closing !== -1) {
+      text = text.slice(closing + 1).trim();
+    }
+  }
+
+  if (text.startsWith('[VOICE:')) return '🎙️ Voice Note';
+  if (text.startsWith('[IMAGE:')) {
+    const inside = text.slice(7, text.endsWith(']') ? -1 : undefined);
+    const parts = inside.split(':');
+    const caption = parts.length > 2 ? parts.slice(2).join(':').trim() : '';
+    return caption ? `📷 ${caption}` : '📷 Photo';
+  }
+  if (text.startsWith('[VIDEO:')) {
+    const inside = text.slice(7, text.endsWith(']') ? -1 : undefined);
+    const parts = inside.split(':');
+    const caption = parts.length > 2 ? parts.slice(2).join(':').trim() : '';
+    return caption ? `🎬 ${caption}` : '🎬 Video';
+  }
+  if (text.startsWith('[STICKER:')) {
+    const parts = text.slice(9, text.endsWith(']') ? -1 : undefined).split(':');
+    const icon = parts[0] || '🎨';
+    const label = parts.slice(1).join(':').trim();
+    return label ? `${icon} ${label}` : `${icon} Sticker`;
+  }
+  if (text.startsWith('[CALL_LOG:')) {
+    return '📞 Call';
+  }
+  return text;
+}

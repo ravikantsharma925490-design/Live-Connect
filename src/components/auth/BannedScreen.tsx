@@ -15,6 +15,7 @@ import {
 import { AppealRecord } from '@/src/types';
 import { AppealFlowModal } from '@/src/components/moderation/AppealFlowModal';
 import { cn } from '@/src/lib/utils';
+import { useLanguage } from '@/src/lib/LanguageContext';
 
 export interface BannedScreenProps {
   bannedUntil?: string | null;
@@ -51,6 +52,7 @@ export function BannedScreen({
   appealToken = null,
   onSignOut,
 }: BannedScreenProps) {
+  const { t } = useLanguage();
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [isAppealOpen, setIsAppealOpen] = useState(false);
   const [latestAppeal, setLatestAppeal] = useState<AppealRecord | null>(null);
@@ -169,7 +171,7 @@ export function BannedScreen({
   return (
     <div className="min-h-screen-safe w-full flex flex-col items-center justify-center p-4 bg-neutral-50 dark:bg-neutral-950 text-neutral-900 dark:text-neutral-100 font-sans relative">
       {/* Top Right Theme Switcher */}
-      <div className="absolute top-4 right-4">
+      <div className="absolute top-4 end-4">
         <button
           type="button"
           onClick={toggleTheme}
@@ -324,7 +326,7 @@ export function BannedScreen({
               className="min-h-[44px] py-2.5 px-3.5 rounded-xl border border-neutral-200 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-700 dark:text-neutral-300 font-semibold text-xs transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
             >
               <LogOut className="w-4 h-4" />
-              <span>Log out</span>
+              <span>{t('action.logOut')}</span>
             </button>
           </div>
         </div>

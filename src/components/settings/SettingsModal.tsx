@@ -20,6 +20,7 @@ import { cn } from '@/src/lib/utils';
 import { Profile } from '@/src/types';
 import { isFirebaseSessionActive } from '@/src/lib/firebase/client';
 import { deleteFirebaseAccountDataFs } from '@/src/lib/firebase/services';
+import { useLanguage } from '@/src/lib/LanguageContext';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -42,6 +43,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onOpenAccountStatus,
   onOpenAdminPanel,
 }) => {
+  const { t } = useLanguage();
   // User-controlled explicit toggle states (default OFF until user turns them ON)
   const [micEnabled, setMicEnabled] = useState<boolean>(() => {
     if (typeof window !== 'undefined') {
@@ -144,7 +146,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
 
     if (!camEnabled && !micEnabled) {
-      setErrorMessage('Pehle Camera ya Microphone switch ON karein test karne ke liye.');
+      setErrorMessage('Please turn ON the Camera or Microphone switch first to run a test.');
       return;
     }
 
@@ -162,7 +164,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         }
       }, 50);
     } catch (err) {
-      setErrorMessage('Device test start nahi ho paya. Hardware connections check karein.');
+      setErrorMessage('Could not start device test. Please check your hardware connections.');
       setIsTestingMedia(false);
     }
   };
@@ -225,10 +227,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
             <div>
               <h3 className="font-extrabold text-base text-neutral-900 dark:text-neutral-100">
-                Hardware & Account Settings
+                {t('title.hardwareSettings')}
               </h3>
               <p className="text-xs text-neutral-500">
-                Manage hardware permissions and account security
+                {t('desc.permissionsSub')}
               </p>
             </div>
           </div>
@@ -272,7 +274,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <div className="min-w-0">
                 <div className="flex items-center gap-2 flex-wrap">
                   <h4 className="text-sm font-bold text-neutral-900 dark:text-neutral-100">
-                    Microphone Access
+                    {t('label.microphoneAccess')}
                   </h4>
                   <span
                     className={cn(
@@ -304,7 +306,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <span
                 className={cn(
                   'pointer-events-none inline-block h-6 w-6 transform rounded-full bg-white shadow-md transition duration-200 ease-in-out',
-                  micEnabled ? 'translate-x-5' : 'translate-x-0'
+                  micEnabled ? 'ltr:translate-x-5 rtl:-translate-x-5' : 'translate-x-0'
                 )}
               />
             </button>
@@ -326,7 +328,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <div className="min-w-0">
                 <div className="flex items-center gap-2 flex-wrap">
                   <h4 className="text-sm font-bold text-neutral-900 dark:text-neutral-100">
-                    Camera Access
+                    {t('label.cameraAccess')}
                   </h4>
                   <span
                     className={cn(
@@ -358,7 +360,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <span
                 className={cn(
                   'pointer-events-none inline-block h-6 w-6 transform rounded-full bg-white shadow-md transition duration-200 ease-in-out',
-                  camEnabled ? 'translate-x-5' : 'translate-x-0'
+                  camEnabled ? 'ltr:translate-x-5 rtl:-translate-x-5' : 'translate-x-0'
                 )}
               />
             </button>
@@ -368,7 +370,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <div className="p-3 rounded-2xl bg-emerald-500/5 border border-emerald-500/20 flex items-start gap-2 text-xs text-neutral-600 dark:text-neutral-400">
             <Info className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
             <p>
-              Jab tak switch <strong>ON</strong> nahi hoga, tab tak browser hardware access nahi karega.
+              The browser will not access your hardware until the switch is turned <strong>ON</strong>.
             </p>
           </div>
 
@@ -399,7 +401,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   muted
                   className="w-full h-full object-cover scale-x-[-1]"
                 />
-                <div className="absolute top-2 left-2 px-2.5 py-1 rounded-lg bg-black/60 backdrop-blur-md text-white text-[10px] font-bold flex items-center gap-1.5">
+                <div className="absolute top-2 start-2 px-2.5 py-1 rounded-lg bg-black/60 backdrop-blur-md text-white text-[10px] font-bold flex items-center gap-1.5">
                   <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
                   Live Feed Active
                 </div>
@@ -419,20 +421,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   }}
                   className="w-full p-4 rounded-2xl bg-neutral-50 dark:bg-neutral-800/50 border border-neutral-200 dark:border-neutral-700/60 hover:bg-neutral-100 dark:hover:bg-neutral-800 flex items-center justify-between gap-3 transition-colors cursor-pointer"
                 >
-                  <div className="flex items-center gap-3.5 min-w-0 text-left">
+                  <div className="flex items-center gap-3.5 min-w-0 text-start">
                     <div className="p-2.5 rounded-2xl shrink-0 bg-[#0095F6]/10 text-[#0095F6]">
                       <ShieldCheck className="w-5 h-5" />
                     </div>
                     <div className="min-w-0">
                       <h4 className="text-sm font-bold text-neutral-900 dark:text-neutral-100">
-                        Account Status & Appeals
+                        {t('title.accountStatus')}
                       </h4>
                       <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-0.5 truncate">
                         Strikes, violations history, data export & review requests
                       </p>
                     </div>
                   </div>
-                  <ChevronRight className="w-4 h-4 text-neutral-400 shrink-0" />
+                  <ChevronRight className="w-4 h-4 text-neutral-400 shrink-0 rtl:rotate-180" />
                 </button>
               )}
 
@@ -445,20 +447,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   }}
                   className="w-full p-4 rounded-2xl bg-neutral-50 dark:bg-neutral-800/50 border border-neutral-200 dark:border-neutral-700/60 hover:bg-neutral-100 dark:hover:bg-neutral-800 flex items-center justify-between gap-3 transition-colors cursor-pointer"
                 >
-                  <div className="flex items-center gap-3.5 min-w-0 text-left">
+                  <div className="flex items-center gap-3.5 min-w-0 text-start">
                     <div className="p-2.5 rounded-2xl shrink-0 bg-indigo-500/10 text-indigo-600 dark:text-indigo-400">
                       <ShieldAlert className="w-5 h-5" />
                     </div>
                     <div className="min-w-0">
                       <h4 className="text-sm font-bold text-neutral-900 dark:text-neutral-100">
-                        Trust & Safety Admin Console
+                        {t('title.adminConsole')}
                       </h4>
                       <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-0.5 truncate">
                         Moderate users, manage appeals & review audit logs
                       </p>
                     </div>
                   </div>
-                  <ChevronRight className="w-4 h-4 text-neutral-400 shrink-0" />
+                  <ChevronRight className="w-4 h-4 text-neutral-400 shrink-0 rtl:rotate-180" />
                 </button>
               )}
             </div>
@@ -475,25 +477,25 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 }}
                 className="w-full p-4 rounded-2xl bg-neutral-50 dark:bg-neutral-800/50 border border-neutral-200 dark:border-neutral-700/60 hover:bg-neutral-100 dark:hover:bg-neutral-800 flex items-center justify-between gap-3 transition-colors cursor-pointer"
               >
-                <div className="flex items-center gap-3.5 min-w-0 text-left">
+                <div className="flex items-center gap-3.5 min-w-0 text-start">
                   <div className="p-2.5 rounded-2xl shrink-0 bg-red-500/10 text-red-600 dark:text-red-400">
                     <UserX className="w-5 h-5" />
                   </div>
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
                       <h4 className="text-sm font-bold text-neutral-900 dark:text-neutral-100">
-                        Blocked Users
+                        {t('title.blockedUsers')}
                       </h4>
                       <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-700 dark:bg-red-950/60 dark:text-red-300">
                         {blockedCount}
                       </span>
                     </div>
                     <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-0.5 truncate">
-                      View and unblock accounts you have blocked
+                      {t('desc.blockedUsersSub')}
                     </p>
                   </div>
                 </div>
-                <ChevronRight className="w-4 h-4 text-neutral-400 shrink-0" />
+                <ChevronRight className="w-4 h-4 text-neutral-400 shrink-0 rtl:rotate-180" />
               </button>
             </div>
           )}
@@ -501,13 +503,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           {/* Danger Zone / Account Management */}
           <div className="pt-4 border-t border-neutral-200 dark:border-neutral-800 space-y-3">
             <h4 className="text-xs font-extrabold uppercase tracking-wider text-red-500 dark:text-red-400">
-              Danger Zone
+              {t('title.dangerZone')}
             </h4>
 
             <div className="p-4 rounded-2xl bg-red-500/5 dark:bg-red-950/20 border border-red-500/20 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
               <div>
                 <h5 className="text-sm font-bold text-neutral-900 dark:text-neutral-100">
-                  Delete Account & Data
+                  {t('title.deleteAccount')}
                 </h5>
                 <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-0.5">
                   Permanently delete your profile, messages, calls, and authentication credentials.
@@ -520,7 +522,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 className="px-4 py-2 rounded-xl bg-red-600 text-white font-bold text-xs hover:bg-red-700 transition-colors flex items-center gap-1.5 shrink-0 cursor-pointer shadow-xs"
               >
                 <Trash2 className="w-4 h-4" />
-                <span>Delete Account</span>
+                <span>{t('title.deleteAccount')}</span>
               </button>
             </div>
           </div>
@@ -532,7 +534,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             onClick={onClose}
             className="px-5 py-2 rounded-xl bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 text-xs font-bold hover:opacity-90 transition-opacity cursor-pointer"
           >
-            Done
+            {t('action.done')}
           </button>
         </div>
       </div>
@@ -587,7 +589,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 disabled={isDeleting}
                 className="px-4 py-2 rounded-xl bg-neutral-200 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300 font-bold text-xs hover:bg-neutral-300 dark:hover:bg-neutral-700 transition-colors cursor-pointer"
               >
-                Cancel
+                {t('action.cancel')}
               </button>
 
               <button

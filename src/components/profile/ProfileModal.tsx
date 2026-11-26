@@ -37,6 +37,7 @@ import {
   compressProfileImageIfNeeded,
 } from '@/src/lib/cloudinaryClient';
 import { UserAvatar } from '@/src/components/ui/UserAvatar';
+import { useLanguage } from '@/src/lib/LanguageContext';
 
 interface ProfileModalProps {
   isOpen: boolean;
@@ -96,6 +97,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   onReportUser,
   isUserOnline,
 }) => {
+  const { t } = useLanguage();
   const targetUser = viewingProfile || currentUser;
   const isEditingSelf = Boolean(currentUser && (!viewingProfile || viewingProfile.id === currentUser.id));
   const isTargetOnline = isEditingSelf ? true : isUserOnline ? isUserOnline(targetUser) : Boolean(targetUser?.is_online);
@@ -407,10 +409,15 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
         <div className="flex items-center justify-between p-4 px-6 border-b border-neutral-200 dark:border-neutral-800 bg-neutral-50/70 dark:bg-neutral-800/40">
           <h3 className="font-bold text-base text-neutral-900 dark:text-neutral-100 flex items-center gap-2">
             <User className="w-5 h-5 text-blue-600 dark:text-blue-400" />
-            <span>{isEditingSelf ? 'Edit Your Profile' : 'User Profile'}</span>
+            <span>
+              {isEditingSelf
+                ? t('title.editProfile', 'Edit Your Profile')
+                : t('title.userProfile', 'User Profile')}
+            </span>
           </h3>
           <button
             onClick={onClose}
+            aria-label={t('action.close', 'Close')}
             className="p-1.5 rounded-xl hover:bg-neutral-200 dark:hover:bg-neutral-800 text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 transition-colors"
           >
             <X className="w-5 h-5" />
@@ -425,18 +432,15 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
             </div>
             <div className="space-y-1.5">
               <h4 className="text-lg font-extrabold text-neutral-900 dark:text-neutral-100">
-                User not found
+                {t('desc.noUsersFound', 'No user found')}
               </h4>
-              <p className="text-xs text-neutral-500 dark:text-neutral-400 max-w-xs mx-auto leading-relaxed">
-                This profile is not available.
-              </p>
             </div>
             <button
               type="button"
               onClick={onClose}
               className="px-6 py-2.5 text-xs font-semibold text-neutral-700 dark:text-neutral-200 bg-neutral-100 hover:bg-neutral-200 dark:bg-neutral-800 dark:hover:bg-neutral-700 rounded-2xl transition-colors cursor-pointer"
             >
-              Close
+              {t('action.close', 'Close')}
             </button>
           </div>
         ) : (
@@ -488,12 +492,12 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                   'absolute bottom-1 right-1 w-4 h-4 rounded-full border-2 border-white dark:border-neutral-900 z-30',
                   isTargetOnline ? 'bg-emerald-500 shadow-sm' : 'bg-neutral-400'
                 )}
-                title={isTargetOnline ? 'Online' : 'Offline'}
+                title={isTargetOnline ? t('status.online', 'Online') : t('status.offline', 'Offline')}
               />
             </div>
 
             <h4 className="font-bold text-lg text-neutral-900 dark:text-neutral-100 text-center flex items-center gap-2">
-              <span>{isEditingSelf ? (displayName || 'Your Name') : targetUser.display_name}</span>
+              <span>{isEditingSelf ? (displayName || t('auth.fullName', 'Display Name')) : targetUser.display_name}</span>
             </h4>
             <div className="flex items-center gap-2 justify-center">
               <p className="text-xs text-neutral-500 dark:text-neutral-400 font-mono">
@@ -509,7 +513,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                   )}
                 >
                   <span className={cn('w-1.5 h-1.5 rounded-full', isTargetOnline ? 'bg-emerald-500 animate-pulse' : 'bg-neutral-400')} />
-                  {isTargetOnline ? 'Online' : 'Offline'}
+                  {isTargetOnline ? t('status.online', 'Online') : t('status.offline', 'Offline')}
                 </span>
               )}
             </div>
@@ -529,7 +533,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                   {typeof followersCount === 'number' ? followersCount : (relationStatus?.followersCount ?? 0)}
                 </span>
                 <span className="text-[11px] text-neutral-500 group-hover:text-blue-600 dark:group-hover:text-blue-400">
-                  Followers
+                  {t('label.followers', 'Followers')}
                 </span>
               </button>
 
@@ -546,7 +550,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                   {typeof followingCount === 'number' ? followingCount : (relationStatus?.followingCount ?? 0)}
                 </span>
                 <span className="text-[11px] text-neutral-500 group-hover:text-blue-600 dark:group-hover:text-blue-400">
-                  Following
+                  {t('label.following', 'Following')}
                 </span>
               </button>
             </div>
@@ -571,7 +575,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
               <div className="mt-2 flex items-center gap-2">
                 <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-rose-500/10 text-rose-600 dark:text-rose-400 border border-rose-500/20">
                   <ShieldAlert className="w-3.5 h-3.5" />
-                  <span>{relationStatus.isBlockedByMe ? 'Blocked by you' : 'Communication Blocked'}</span>
+                  <span>{t('action.blocked', 'Blocked')}</span>
                 </span>
               </div>
             )}
@@ -590,7 +594,11 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                     <Upload className="w-3.5 h-3.5 shrink-0" />
                   )}
                   <span>
-                    {avatarUploading ? 'Uploading...' : avatarUrl ? 'Change' : 'Upload Photo'}
+                    {avatarUploading
+                      ? t('action.saving', 'Saving...')
+                      : avatarUrl
+                      ? t('action.changePhoto', 'Change')
+                      : t('action.uploadPhoto', 'Upload Photo')}
                   </span>
                 </button>
 
@@ -602,7 +610,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                     className="text-xs font-semibold text-rose-600 dark:text-rose-400 hover:bg-rose-100 dark:hover:bg-rose-900/40 flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200/60 dark:border-rose-900/40 cursor-pointer transition-colors whitespace-nowrap disabled:opacity-50"
                   >
                     <Trash2 className="w-3.5 h-3.5 shrink-0" />
-                    <span>Remove</span>
+                    <span>{t('action.remove', 'Remove')}</span>
                   </button>
                 )}
 
@@ -613,7 +621,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                   className="text-xs font-semibold text-neutral-600 dark:text-neutral-400 hover:bg-neutral-200 dark:hover:bg-neutral-800 flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-neutral-100 dark:bg-neutral-800/80 border border-neutral-200/60 dark:border-neutral-700/60 cursor-pointer transition-colors whitespace-nowrap disabled:opacity-50"
                 >
                   <Sparkles className="w-3.5 h-3.5 shrink-0" />
-                  <span>Random</span>
+                  <span>{t('action.random', 'Random')}</span>
                 </button>
               </div>
             )}
@@ -632,17 +640,17 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
               {/* Display Name */}
               <div>
                 <label className="block text-xs font-semibold text-neutral-700 dark:text-neutral-300 mb-1.5">
-                  Display Name
+                  {t('auth.fullName', 'Display Name')}
                 </label>
                 <div className="relative">
-                  <User className="w-4 h-4 text-neutral-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                  <User className="w-4 h-4 text-neutral-400 absolute start-3.5 top-1/2 -translate-y-1/2" />
                   <input
                     type="text"
                     required
                     value={displayName}
                     onChange={(e) => setDisplayName(e.target.value)}
-                    placeholder="Enter your full name or nickname"
-                    className="w-full pl-10 pr-3.5 py-2.5 text-base rounded-2xl border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    placeholder={t('auth.fullName', 'Display Name')}
+                    className="w-full ps-10 pe-3.5 py-2.5 text-base rounded-2xl border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                   />
                 </div>
               </div>
@@ -651,14 +659,14 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
               <div>
                 <div className="flex items-center justify-between mb-1.5">
                   <label className="block text-xs font-semibold text-neutral-700 dark:text-neutral-300">
-                    Username
+                    {t('auth.username', 'Unique Username')}
                   </label>
                   <span className="text-[10px] text-neutral-400 font-mono">
-                    letters, numbers, _
+                    a-z, 0-9, _
                   </span>
                 </div>
                 <div className="relative">
-                  <AtSign className="w-4 h-4 text-neutral-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                  <AtSign className="w-4 h-4 text-neutral-400 absolute start-3.5 top-1/2 -translate-y-1/2" />
                   <input
                     type="text"
                     required
@@ -668,9 +676,9 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                         e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, '')
                       )
                     }
-                    placeholder="username (min 3 chars)"
+                    placeholder={t('auth.username', 'Unique Username')}
                     className={cn(
-                      'w-full pl-10 pr-10 py-2.5 text-sm rounded-2xl border bg-white dark:bg-neutral-800 text-neutral-900 dark:text-white font-mono focus:outline-none focus:ring-2',
+                      'w-full ps-10 pe-10 py-2.5 text-sm rounded-2xl border bg-white dark:bg-neutral-800 text-neutral-900 dark:text-white font-mono focus:outline-none focus:ring-2',
                       usernameStatus === 'available'
                         ? 'border-emerald-500/60 focus:ring-emerald-500'
                         : usernameStatus === 'taken'
@@ -679,7 +687,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                     )}
                   />
                   {/* Status indicator icon */}
-                  <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">
+                  <div className="absolute end-3 top-1/2 -translate-y-1/2 pointer-events-none">
                     {usernameStatus === 'checking' && (
                       <Loader2 className="w-4 h-4 text-neutral-400 animate-spin" />
                     )}
@@ -694,7 +702,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                 {usernameFeedback && (
                   <p
                     className={cn(
-                      'text-[11px] mt-1 pl-1 font-medium transition-all',
+                      'text-[11px] mt-1 ps-1 font-medium transition-all',
                       usernameStatus === 'available'
                         ? 'text-emerald-600 dark:text-emerald-400'
                         : usernameStatus === 'taken'
@@ -712,39 +720,39 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                 {/* Gender */}
                 <div>
                   <label className="block text-xs font-semibold text-neutral-700 dark:text-neutral-300 mb-1.5">
-                    Gender
+                    {t('auth.selectGender', 'Select Gender')}
                   </label>
                   <div className="relative">
-                    <Users className="w-4 h-4 text-neutral-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    <Users className="w-4 h-4 text-neutral-400 absolute start-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
                     <select
                       value={gender}
                       onChange={(e) => setGender(e.target.value)}
-                      className="w-full pl-10 pr-8 py-2.5 text-sm rounded-2xl border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 appearance-none cursor-pointer"
+                      className="w-full ps-10 pe-8 py-2.5 text-sm rounded-2xl border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 appearance-none cursor-pointer"
                     >
-                      <option value="">Select Gender</option>
+                      <option value="">{t('auth.selectGender', 'Select Gender')}</option>
                       {GENDER_OPTIONS.map((g) => (
                         <option key={g.id} value={g.id}>
                           {g.emoji} {g.label}
                         </option>
                       ))}
                     </select>
-                    <ChevronDown className="w-4 h-4 text-neutral-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    <ChevronDown className="w-4 h-4 text-neutral-400 absolute end-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                   </div>
                 </div>
 
                 {/* Country */}
                 <div>
                   <label className="block text-xs font-semibold text-neutral-700 dark:text-neutral-300 mb-1.5">
-                    Country
+                    {t('auth.selectCountry', 'Select Country')}
                   </label>
                   <div className="relative">
-                    <Globe className="w-4 h-4 text-neutral-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    <Globe className="w-4 h-4 text-neutral-400 absolute start-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
                     <select
                       value={country}
                       onChange={(e) => setCountry(e.target.value)}
-                      className="w-full pl-10 pr-8 py-2.5 text-sm rounded-2xl border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 appearance-none cursor-pointer"
+                      className="w-full ps-10 pe-8 py-2.5 text-sm rounded-2xl border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 appearance-none cursor-pointer"
                     >
-                      <option value="">Select Country</option>
+                      <option value="">{t('auth.selectCountry', 'Select Country')}</option>
                       {COUNTRIES.map((c) => (
                         <option key={c.name} value={c.name}>
                           {c.flag} {c.name}
@@ -752,7 +760,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                       ))}
                       <option value="Other">🌍 Other</option>
                     </select>
-                    <ChevronDown className="w-4 h-4 text-neutral-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    <ChevronDown className="w-4 h-4 text-neutral-400 absolute end-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                   </div>
                 </div>
               </div>
@@ -760,16 +768,16 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
               {/* Bio / Status */}
               <div>
                 <label className="block text-xs font-semibold text-neutral-700 dark:text-neutral-300 mb-1.5">
-                  Bio / Status
+                  {t('auth.bio', 'Bio / Status')}
                 </label>
                 <div className="relative">
-                  <FileText className="w-4 h-4 text-neutral-400 absolute left-3.5 top-3.5" />
+                  <FileText className="w-4 h-4 text-neutral-400 absolute start-3.5 top-3.5" />
                   <textarea
                     rows={3}
                     value={bio}
                     onChange={(e) => setBio(e.target.value)}
-                    placeholder="Tell others about yourself..."
-                    className="w-full pl-10 pr-3.5 py-2.5 text-base rounded-2xl border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+                    placeholder={t('auth.bio', 'Bio / Status')}
+                    className="w-full ps-10 pe-3.5 py-2.5 text-base rounded-2xl border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
                   />
                 </div>
               </div>
@@ -781,7 +789,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                   onClick={onClose}
                   className="px-4 py-2.5 text-xs font-semibold text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-2xl transition-colors cursor-pointer"
                 >
-                  Cancel
+                  {t('action.cancel', 'Cancel')}
                 </button>
                 <button
                   type="submit"
@@ -790,12 +798,12 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                 >
                   {savedSuccess ? (
                     <>
-                      <Check className="w-4 h-4" /> Saved!
+                      <Check className="w-4 h-4" /> {t('action.saved', 'Saved!')}
                     </>
                   ) : saving ? (
-                    'Saving...'
+                    t('action.saving', 'Saving...')
                   ) : (
-                    'Save Changes'
+                    t('action.saveChanges', 'Save Changes')
                   )}
                 </button>
               </div>
@@ -814,10 +822,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                 <div className="p-3 rounded-2xl bg-amber-500/10 border border-amber-500/20 text-xs text-amber-700 dark:text-amber-300 text-center space-y-1">
                   <p className="font-bold flex items-center justify-center gap-1.5">
                     <Users className="w-3.5 h-3.5 text-amber-500" />
-                    <span>Mutual Follow Required</span>
-                  </p>
-                  <p className="text-[11px] text-amber-600 dark:text-amber-400">
-                    Both users must follow each other to exchange messages and make audio or video calls.
+                    <span>{t('desc.mutualFollowRequired', 'Mutual follow required to call & chat')}</span>
                   </p>
                 </div>
               )}
@@ -851,12 +856,12 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                         )}
                         title={
                           relationStatus?.isBlocked
-                            ? 'User is blocked'
-                            : 'Message user'
+                            ? t('action.blocked', 'Blocked')
+                            : t('label.chat', 'Chat')
                         }
                       >
                         <MessageSquare className="w-4 h-4" />
-                        <span>Message</span>
+                        <span>{t('label.chat', 'Chat')}</span>
                       </button>
 
                       {/* Direct Audio Call Button */}
@@ -876,12 +881,12 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                         )}
                         title={
                           relationStatus?.isBlocked
-                            ? 'User is blocked'
-                            : 'Start Audio Call'
+                            ? t('action.blocked', 'Blocked')
+                            : t('action.audioCall', 'Audio Call')
                         }
                       >
                         <Phone className="w-4 h-4" />
-                        <span>Audio Call</span>
+                        <span>{t('action.audioCall', 'Audio Call')}</span>
                       </button>
 
                       {/* Direct Video Call Button */}
@@ -901,12 +906,12 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                         )}
                         title={
                           relationStatus?.isBlocked
-                            ? 'User is blocked'
-                            : 'Start Video Call'
+                            ? t('action.blocked', 'Blocked')
+                            : t('action.videoCall', 'Video Call')
                         }
                       >
                         <Video className="w-4 h-4" />
-                        <span>Video Call</span>
+                        <span>{t('action.videoCall', 'Video Call')}</span>
                       </button>
                     </>
                   );
@@ -934,7 +939,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
               {/* Bio details */}
               <div className="p-4 rounded-2xl bg-neutral-100 dark:bg-neutral-800/60 text-sm">
                 <p className="text-[11px] text-neutral-500 dark:text-neutral-400 mb-1 font-bold uppercase tracking-wider">
-                  Bio / Status
+                  {t('auth.bio', 'Bio / Status')}
                 </p>
                 <p className="text-neutral-800 dark:text-neutral-200 leading-relaxed">
                   {targetUser.bio || 'Hey there! I am using LiveConnect.'}
@@ -943,7 +948,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
 
               <div className="p-3.5 rounded-2xl bg-neutral-100 dark:bg-neutral-800/60 text-xs text-neutral-500 dark:text-neutral-400 flex items-center gap-2">
                 <Calendar className="w-4 h-4 text-neutral-400" />
-                <span>Joined {formatJoinedYear(targetUser.created_at)}</span>
+                <span>{t('status.joined', 'Joined')} {formatJoinedYear(targetUser.created_at)}</span>
               </div>
 
               {/* Block / Unblock Management */}
@@ -952,10 +957,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                   <div className="w-full p-4 rounded-2xl bg-rose-500/10 border border-rose-500/30 space-y-3">
                     <div className="space-y-1">
                       <p className="text-xs font-bold text-rose-700 dark:text-rose-300">
-                        Block @{targetUser.username}?
-                      </p>
-                      <p className="text-xs text-rose-600/90 dark:text-rose-400 leading-relaxed">
-                        They will no longer be able to view your profile, find you in search, follow you, message you, or call you. Any existing follows between you will be removed, and they will not be notified. You can unblock them anytime in Settings.
+                        {t('action.block', 'Block')} @{targetUser.username}?
                       </p>
                     </div>
                     <div className="flex items-center justify-end gap-2 pt-1">
@@ -964,7 +966,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                         onClick={() => setShowBlockConfirm(false)}
                         className="px-3.5 py-1.5 text-xs rounded-xl bg-neutral-200 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300 font-medium cursor-pointer"
                       >
-                        Cancel
+                        {t('action.cancel', 'Cancel')}
                       </button>
                       <button
                         type="button"
@@ -973,7 +975,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                         className="px-4 py-1.5 text-xs rounded-xl bg-rose-600 text-white font-bold hover:bg-rose-700 shadow-sm flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
                       >
                         {actionLoading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                        <span>Block</span>
+                        <span>{t('action.block', 'Block')}</span>
                       </button>
                     </div>
                   </div>
@@ -994,12 +996,12 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                         {relationStatus?.isBlockedByMe ? (
                           <>
                             <ShieldCheck className="w-4 h-4" />
-                            <span>Unblock User</span>
+                            <span>{t('action.unblock', 'Unblock')}</span>
                           </>
                         ) : (
                           <>
                             <ShieldAlert className="w-4 h-4" />
-                            <span>Block User</span>
+                            <span>{t('action.block', 'Block')}</span>
                           </>
                         )}
                       </button>
@@ -1014,7 +1016,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                           className="text-xs font-semibold text-amber-600 dark:text-amber-400 hover:underline flex items-center gap-1.5 cursor-pointer"
                         >
                           <Flag className="w-3.5 h-3.5" />
-                          <span>Report User</span>
+                          <span>{t('action.reportUser', 'Report User')}</span>
                         </button>
                       )}
                     </div>
@@ -1024,7 +1026,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                       onClick={onClose}
                       className="px-5 py-2 text-xs font-semibold text-neutral-700 dark:text-neutral-300 bg-neutral-100 hover:bg-neutral-200 dark:bg-neutral-800 dark:hover:bg-neutral-700 rounded-2xl transition-colors cursor-pointer"
                     >
-                      Close
+                      {t('action.close', 'Close')}
                     </button>
                   </>
                 )}

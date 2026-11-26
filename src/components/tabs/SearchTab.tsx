@@ -14,6 +14,7 @@ import { Profile, CallType, UserRelationStatus } from '@/src/types';
 import { cn, getAvatarColor, getInitials } from '@/src/lib/utils';
 import { COUNTRIES, GENDER_OPTIONS } from '../profile/ProfileModal';
 import { FollowButton, FollowStatus } from '../profile/FollowButton';
+import { useLanguage } from '@/src/lib/LanguageContext';
 
 interface SearchTabProps {
   currentUser: Profile | null;
@@ -42,6 +43,7 @@ export const SearchTab: React.FC<SearchTabProps> = ({
   onUnfollow,
   onReportUser,
 }) => {
+  const { t } = useLanguage();
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<Profile[]>([]);
   const [loading, setLoading] = useState(false);
@@ -112,17 +114,17 @@ export const SearchTab: React.FC<SearchTabProps> = ({
               <Search className="w-5 h-5" />
             </div>
             <h2 className="text-xl md:text-2xl font-extrabold tracking-tight text-neutral-900 dark:text-neutral-100">
-              Search Users
+              {t('title.searchUser', 'Search Users')}
             </h2>
           </div>
           <p className="text-xs md:text-sm text-neutral-500 dark:text-neutral-400 mt-1">
-            Search real registered users by exact User ID, username, or display name.
+            {t('desc.searchPlaceholder', 'Type User ID or @username...')}
           </p>
         </div>
 
         {/* Search Input */}
         <div className="relative">
-          <Search className="w-5 h-5 text-neutral-400 absolute left-4 top-1/2 -translate-y-1/2 pointer-events-none" />
+          <Search className="w-5 h-5 text-neutral-400 absolute start-4 top-1/2 -translate-y-1/2 pointer-events-none" />
           <input
             type="text"
             value={query}
@@ -133,10 +135,10 @@ export const SearchTab: React.FC<SearchTabProps> = ({
                 executeSearch(query);
               }
             }}
-            placeholder="Type User ID or @username..."
-            className="w-full pl-12 pr-16 py-3.5 rounded-2xl border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900 text-neutral-900 dark:text-white placeholder-neutral-400 text-base md:text-base focus:outline-none focus:ring-2 focus:ring-blue-500 shadow-xs"
+            placeholder={t('desc.searchPlaceholder', 'Type User ID or @username...')}
+            className="w-full ps-12 pe-16 py-3.5 rounded-2xl border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900 text-neutral-900 dark:text-white placeholder-neutral-400 text-base md:text-base focus:outline-none focus:ring-2 focus:ring-blue-500 shadow-xs"
           />
-          <div className="absolute right-3.5 top-1/2 -translate-y-1/2 flex items-center gap-1.5">
+          <div className="absolute end-3.5 top-1/2 -translate-y-1/2 flex items-center gap-1.5">
             {loading && (
               <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
             )}
@@ -156,7 +158,7 @@ export const SearchTab: React.FC<SearchTabProps> = ({
           {loading && results.length === 0 ? (
             <div className="py-16 flex flex-col items-center justify-center text-neutral-400 gap-3">
               <div className="w-7 h-7 border-3 border-blue-500 border-t-transparent rounded-full animate-spin" />
-              <p className="text-xs font-semibold">Searching database...</p>
+              <p className="text-xs font-semibold">{t('action.search', 'Search')}...</p>
             </div>
           ) : !hasSearched ? (
             <div className="py-16 px-4 text-center rounded-3xl border border-dashed border-neutral-200 dark:border-neutral-800 max-w-md mx-auto">
@@ -164,19 +166,19 @@ export const SearchTab: React.FC<SearchTabProps> = ({
                 <Search className="w-6 h-6" />
               </div>
               <h3 className="text-sm font-bold text-neutral-700 dark:text-neutral-300">
-                Search Real Users
+                {t('title.searchUser', 'Search Users')}
               </h3>
               <p className="text-xs text-neutral-400 mt-1 max-w-xs mx-auto">
-                Enter a user's ID or username in the search box to find and connect with them.
+                {t('desc.searchPlaceholder', 'Type User ID or @username...')}
               </p>
             </div>
           ) : results.length === 0 ? (
             <div className="py-16 px-4 text-center rounded-3xl bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 max-w-md mx-auto">
               <h3 className="text-sm font-bold text-neutral-800 dark:text-neutral-200">
-                No user found
+                {t('desc.noUsersFound', 'No user found')}
               </h3>
               <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
-                No registered user matches "{query}". Please check the ID or username.
+                &quot;{query}&quot;
               </p>
             </div>
           ) : (
@@ -233,7 +235,7 @@ export const SearchTab: React.FC<SearchTabProps> = ({
                               {/* Blocked Badge */}
                               {!isSelf && rel?.isBlocked && (
                                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-500/10 text-rose-600 dark:text-rose-400 border border-rose-500/20">
-                                  <ShieldAlert className="w-3 h-3" /> Blocked
+                                  <ShieldAlert className="w-3 h-3" /> {t('action.blocked', 'Blocked')}
                                 </span>
                               )}
                             </div>
@@ -304,7 +306,7 @@ export const SearchTab: React.FC<SearchTabProps> = ({
                         {/* Notice if not mutual */}
                         {!isSelf && !rel?.isBlocked && !isMutual && (
                           <div className="px-2.5 py-1.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-[11px] text-amber-700 dark:text-amber-300 font-medium flex items-center justify-between">
-                            <span>Mutual follow required to call & chat</span>
+                            <span>{t('desc.mutualFollowRequired', 'Mutual follow required to call & chat')}</span>
                           </div>
                         )}
 
@@ -324,12 +326,12 @@ export const SearchTab: React.FC<SearchTabProps> = ({
                               )}
                               title={
                                 rel?.isBlocked
-                                  ? 'User is blocked'
-                                  : 'Chat'
+                                  ? t('action.blocked', 'Blocked')
+                                  : t('label.chat', 'Chat')
                               }
                             >
                               <MessageSquare className="w-3.5 h-3.5" />
-                              <span className="hidden sm:inline">Chat</span>
+                              <span className="hidden sm:inline">{t('label.chat', 'Chat')}</span>
                             </button>
 
                             <button
@@ -347,12 +349,12 @@ export const SearchTab: React.FC<SearchTabProps> = ({
                               )}
                               title={
                                 rel?.isBlocked
-                                  ? 'User is blocked'
-                                  : 'Voice Call'
+                                  ? t('action.blocked', 'Blocked')
+                                  : t('action.audioCall', 'Audio Call')
                               }
                             >
                               <Phone className="w-3.5 h-3.5" />
-                              <span className="hidden sm:inline">Call</span>
+                              <span className="hidden sm:inline">{t('label.call', 'Call')}</span>
                             </button>
 
                             <button
@@ -370,31 +372,31 @@ export const SearchTab: React.FC<SearchTabProps> = ({
                               )}
                               title={
                                 rel?.isBlocked
-                                  ? 'User is blocked'
-                                  : 'Video Call'
+                                  ? t('action.blocked', 'Blocked')
+                                  : t('action.videoCall', 'Video Call')
                               }
                             >
                               <Video className="w-3.5 h-3.5" />
-                              <span className="hidden sm:inline">Video</span>
+                              <span className="hidden sm:inline">{t('label.video', 'Video')}</span>
                             </button>
 
                             <button
                               onClick={() => onViewProfile(user)}
                               className="flex items-center justify-center gap-1 py-2 px-2 rounded-xl text-xs font-bold bg-neutral-100 hover:bg-neutral-200 dark:bg-neutral-800 dark:hover:bg-neutral-700 text-neutral-700 dark:text-neutral-300 transition-colors cursor-pointer"
-                              title="Profile"
+                              title={t('nav.profile', 'Profile')}
                             >
                               <User className="w-3.5 h-3.5" />
-                              <span className="hidden sm:inline">Info</span>
+                              <span className="hidden sm:inline">{t('label.info', 'Info')}</span>
                             </button>
 
                             {!isSelf && onReportUser && (
                               <button
                                 onClick={() => onReportUser(user)}
                                 className="flex items-center justify-center gap-1 py-2 px-2 rounded-xl text-xs font-bold bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/40 dark:hover:bg-amber-900/50 text-amber-600 dark:text-amber-400 transition-colors cursor-pointer"
-                                title={`Report @${user.username}`}
+                                title={`${t('action.report', 'Report')} @${user.username}`}
                               >
                                 <Flag className="w-3.5 h-3.5" />
-                                <span className="hidden sm:inline">Report</span>
+                                <span className="hidden sm:inline">{t('action.report', 'Report')}</span>
                               </button>
                             )}
                           </div>

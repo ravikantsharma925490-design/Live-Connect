@@ -313,6 +313,8 @@ export function useConversations(
               prev[i].unread_count === c.unread_count &&
               prev[i].last_message?.id === c.last_message?.id &&
               Boolean(prev[i].last_message?.is_read) === Boolean(c.last_message?.is_read) &&
+              prev[i].pinned_message_id === c.pinned_message_id &&
+              prev[i].pinned_message?.id === c.pinned_message?.id &&
               prev[i].updated_at === c.updated_at &&
               (prev[i].member_ids?.length || 0) === (c.member_ids?.length || 0)
           );
@@ -700,11 +702,31 @@ export function useConversations(
       };
       window.addEventListener('liveconnect_messages_read_sync', handleLocalReadSync);
 
+      const handleLocalConvPinned = (e: any) => {
+        const detail = e.detail;
+        if (!detail?.conversationId) return;
+        const nextPinnedId: string | null = detail.pinnedMessageId || null;
+        const nextPinnedMsg: Message | null = detail.pinnedMessage || null;
+        updateConversationsState((prev) =>
+          prev.map((c) =>
+            c.id === detail.conversationId
+              ? {
+                  ...c,
+                  pinned_message_id: nextPinnedId,
+                  pinned_message: nextPinnedMsg,
+                }
+              : c
+          )
+        );
+      };
+      window.addEventListener('liveconnect_conversation_pinned', handleLocalConvPinned);
+
       return () => {
         unsub();
         window.removeEventListener('liveconnect_conversation_message', handleLocalConvMessage);
         window.removeEventListener('liveconnect_conversation_created', handleLocalConvCreated);
         window.removeEventListener('liveconnect_messages_read_sync', handleLocalReadSync);
+        window.removeEventListener('liveconnect_conversation_pinned', handleLocalConvPinned);
       };
     }
 
@@ -762,6 +784,18 @@ export function useConversations(
                   Math.max(new Date(a.updated_at || 0).getTime(), new Date(a.last_message?.created_at || 0).getTime())
               );
           });
+        } else if (data.type === 'message_pinned' && data.conversationId) {
+          updateConversationsState((prev) =>
+            prev.map((c) =>
+              c.id === data.conversationId
+                ? {
+                    ...c,
+                    pinned_message_id: data.pinnedMessageId || null,
+                    pinned_message: data.pinnedMessage || null,
+                  }
+                : c
+            )
+          );
         } else {
           fetchConversations();
         }
@@ -882,12 +916,32 @@ export function useConversations(
       fetchConversations();
     };
 
+    const handleLocalConvPinned = (e: any) => {
+      const detail = e.detail;
+      if (!detail?.conversationId) return;
+      const nextPinnedId: string | null = detail.pinnedMessageId || null;
+      const nextPinnedMsg: Message | null = detail.pinnedMessage || null;
+      updateConversationsState((prev) =>
+        prev.map((c) =>
+          c.id === detail.conversationId
+            ? {
+                ...c,
+                pinned_message_id: nextPinnedId,
+                pinned_message: nextPinnedMsg,
+              }
+            : c
+        )
+      );
+    };
+
     window.addEventListener('liveconnect_conversation_message', handleLocalConvMessage);
     window.addEventListener('liveconnect_conversation_created', handleLocalConvCreated);
+    window.addEventListener('liveconnect_conversation_pinned', handleLocalConvPinned);
 
     return () => {
       window.removeEventListener('liveconnect_conversation_message', handleLocalConvMessage);
       window.removeEventListener('liveconnect_conversation_created', handleLocalConvCreated);
+      window.removeEventListener('liveconnect_conversation_pinned', handleLocalConvPinned);
       clearInterval(pollInterval);
       if (msgBusRef.current) {
         msgBusRef.current.close();

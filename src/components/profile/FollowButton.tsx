@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { UserPlus, UserCheck, Users, Loader2 } from 'lucide-react';
 import { Profile } from '@/src/types';
 import { cn } from '@/src/lib/utils';
+import { useLanguage } from '@/src/lib/LanguageContext';
 
 export type FollowStatus = 'not_following' | 'following' | 'followed_by' | 'mutual' | 'self';
 
@@ -24,6 +25,7 @@ export const FollowButton: React.FC<FollowButtonProps> = ({
   size = 'md',
   className,
 }) => {
+  const { t } = useLanguage();
   const [loading, setLoading] = useState(false);
   const [isHovered, setIsHovered] = useState(false);
 
@@ -68,14 +70,14 @@ export const FollowButton: React.FC<FollowButtonProps> = ({
   // not_following -> Follow
   // followed_by -> Follow Back
   // following / mutual -> Following (or Unfollow on hover)
-  let buttonLabel = 'Follow';
+  let buttonLabel = t('action.follow', 'Follow');
   let buttonIcon = <UserPlus className={size === 'sm' ? 'w-3.5 h-3.5' : 'w-4 h-4'} />;
 
   if (isFollowing) {
     if (isHovered) {
-      buttonLabel = 'Unfollow';
+      buttonLabel = t('action.unfollow', 'Unfollow');
     } else {
-      buttonLabel = 'Following';
+      buttonLabel = t('action.following', 'Following');
     }
     buttonIcon = followStatus === 'mutual' && !isHovered ? (
       <Users className={size === 'sm' ? 'w-3.5 h-3.5' : 'w-4 h-4'} />
@@ -83,7 +85,7 @@ export const FollowButton: React.FC<FollowButtonProps> = ({
       <UserCheck className={size === 'sm' ? 'w-3.5 h-3.5' : 'w-4 h-4'} />
     );
   } else if (isFollowBack) {
-    buttonLabel = 'Follow Back';
+    buttonLabel = t('action.followBack', 'Follow Back');
     buttonIcon = <UserPlus className={size === 'sm' ? 'w-3.5 h-3.5' : 'w-4 h-4'} />;
   }
 

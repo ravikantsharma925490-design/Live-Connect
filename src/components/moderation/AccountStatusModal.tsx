@@ -16,6 +16,7 @@ import { AccountModerationState, AppealRecord, BanHistoryRecord } from '@/src/ty
 import { cn } from '@/src/lib/utils';
 import { AppealFlowModal } from './AppealFlowModal';
 import { ModerationTemplatesModal } from './ModerationTemplatesModal';
+import { useLanguage } from '@/src/lib/LanguageContext';
 
 interface AccountStatusModalProps {
   isOpen: boolean;
@@ -52,6 +53,7 @@ export const AccountStatusModal: React.FC<AccountStatusModalProps> = ({
   onClose,
   onSignOut,
 }) => {
+  const { t } = useLanguage();
   const [data, setData] = useState<AccountStatusPayload | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -169,7 +171,7 @@ export const AccountStatusModal: React.FC<AccountStatusModalProps> = ({
               <ShieldCheck className="w-5 h-5" />
             </div>
             <div>
-              <h3 className="text-base font-bold">Account Status</h3>
+              <h3 className="text-base font-bold">{t('title.accountStatus')}</h3>
               <p className="text-xs text-neutral-500 dark:text-neutral-400">
                 Warnings, community strikes, and feature access overview
               </p>
@@ -178,7 +180,7 @@ export const AccountStatusModal: React.FC<AccountStatusModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            aria-label="Close Account Status"
+            aria-label={t('action.close')}
             className="min-w-[44px] min-h-[44px] flex items-center justify-center rounded-xl hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-500 cursor-pointer"
           >
             <X className="w-5 h-5" />
@@ -390,7 +392,7 @@ export const AccountStatusModal: React.FC<AccountStatusModalProps> = ({
                         onClick={() => setConfirmDeactivate(false)}
                         className="px-3.5 py-2 rounded-lg bg-neutral-200 dark:bg-neutral-800 font-semibold cursor-pointer"
                       >
-                        Cancel
+                        {t('action.cancel')}
                       </button>
                       <button
                         type="button"

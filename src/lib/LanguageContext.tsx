@@ -5,7 +5,11 @@ import { TRANSLATIONS, TranslationKeys } from './translations';
 interface LanguageContextType {
   currentLanguage: WorldLanguage;
   setLanguage: (langCode: string) => void;
-  t: (key: keyof TranslationKeys | string, fallback?: string) => string;
+  t: (
+    key: keyof TranslationKeys | string,
+    fallback?: string,
+    vars?: Record<string, string | number>
+  ) => string;
   isRTL: boolean;
   dir: 'ltr' | 'rtl';
   allLanguages: WorldLanguage[];
@@ -17,6 +21,27 @@ interface LanguageContextType {
 
 const LanguageContext = createContext<LanguageContextType | undefined>(undefined);
 
+const findTranslationDict = (langCode: string): TranslationKeys | undefined => {
+  if (TRANSLATIONS[langCode]) return TRANSLATIONS[langCode];
+  const lower = langCode.toLowerCase();
+  const exactInsensitiveKey = Object.keys(TRANSLATIONS).find((k) => k.toLowerCase() === lower);
+  if (exactInsensitiveKey) return TRANSLATIONS[exactInsensitiveKey];
+
+  const base = lower.split('-')[0];
+  if (TRANSLATIONS[base]) return TRANSLATIONS[base];
+  const baseInsensitiveKey = Object.keys(TRANSLATIONS).find((k) => k.toLowerCase() === base);
+  return baseInsensitiveKey ? TRANSLATIONS[baseInsensitiveKey] : undefined;
+};
+
+const interpolateVars = (text: string, vars?: Record<string, string | number>): string => {
+  if (!vars) return text;
+  let result = text;
+  for (const [varKey, varVal] of Object.entries(vars)) {
+    result = result.replace(new RegExp(`\\{${varKey}\\}`, 'g'), String(varVal));
+  }
+  return result;
+};
+
 export const LanguageProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [currentLanguage, setCurrentLanguage] = useState<WorldLanguage>(() => {
     if (typeof window !== 'undefined') {
@@ -25,7 +50,7 @@ export const LanguageProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         const found =
           WORLD_LANGUAGES.find((l) => l.code === saved) ||
           WORLD_LANGUAGES.find((l) => l.code.toLowerCase() === saved.toLowerCase()) ||
-          WORLD_LANGUAGES.find((l) => l.code.split('-')[0] === saved.split('-')[0]);
+          WORLD_LANGUAGES.find((l) => l.code.split('-')[0].toLowerCase() === saved.split('-')[0].toLowerCase());
         if (found) return found;
       }
       // Auto detect browser language if available
@@ -33,8 +58,8 @@ export const LanguageProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         const browserLang = navigator.language;
         if (browserLang) {
           const matched =
-            WORLD_LANGUAGES.find((l) => l.code === browserLang) ||
-            WORLD_LANGUAGES.find((l) => l.code === browserLang.split('-')[0]);
+            WORLD_LANGUAGES.find((l) => l.code.toLowerCase() === browserLang.toLowerCase()) ||
+            WORLD_LANGUAGES.find((l) => l.code.toLowerCase() === browserLang.split('-')[0].toLowerCase());
           if (matched) return matched;
         }
       } catch (e) {
@@ -79,21 +104,24 @@ export const LanguageProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   // Translate helper
   const t = useCallback(
-    (key: keyof TranslationKeys | string, fallback?: string): string => {
-      const code = currentLanguage.code.split('-')[0];
-      const langDict = TRANSLATIONS[currentLanguage.code] || TRANSLATIONS[code];
+    (
+      key: keyof TranslationKeys | string,
+      fallback?: string,
+      vars?: Record<string, string | number>
+    ): string => {
+      const langDict = findTranslationDict(currentLanguage.code);
 
-      if (langDict && (langDict as any)[key]) {
-        return (langDict as any)[key];
+      if (langDict && (langDict as Record<string, string>)[key]) {
+        return interpolateVars((langDict as Record<string, string>)[key], vars);
       }
 
       // English fallback
       const enDict = TRANSLATIONS['en'];
-      if (enDict && (enDict as any)[key]) {
-        return (enDict as any)[key];
+      if (enDict && (enDict as Record<string, string>)[key]) {
+        return interpolateVars((enDict as Record<string, string>)[key], vars);
       }
 
-      return fallback || key;
+      return interpolateVars(fallback || key, vars);
     },
     [currentLanguage]
   );

@@ -1518,6 +1518,40 @@ export async function clearUserInboxMessagesFs(conversationId: string, userId: s
   }
 }
 
+export async function pinConversationMessageFs(
+  conversationId: string,
+  messageId: string | null
+): Promise<void> {
+  if (!conversationId || !isValidFirestoreId(conversationId)) return;
+  const path = `conversations/${conversationId}`;
+  const cleanPinnedId = messageId ? sanitizeOptionalStr(messageId, 128) : null;
+
+  try {
+    await updateDoc(doc(db, 'conversations', conversationId), {
+      pinnedMessageId: cleanPinnedId,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (err) {
+    if (isOfflineOrUnavailableError(err)) {
+      try {
+        await restCommitWrites([
+          {
+            type: 'update',
+            path,
+            data: { pinnedMessageId: cleanPinnedId },
+            updateMaskFields: ['pinnedMessageId', 'updatedAt'],
+            serverTimestampFields: ['updatedAt'],
+          },
+        ]);
+      } catch (restErr) {
+        handleFirestoreError(restErr, OperationType.UPDATE, path);
+      }
+    } else {
+      handleFirestoreError(err, OperationType.UPDATE, path);
+    }
+  }
+}
+
 export async function markMessagesAsReadFs(conversationId: string, readerId: string): Promise<void> {
   try {
     // Zero out own inbox unread counter

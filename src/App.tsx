@@ -166,6 +166,7 @@ export default function App() {
     user: Profile;
     source: UserReportSource;
     conversationId?: string | null;
+    reportedMessage?: import('@/src/types').ReportedMessageContext | null;
   } | null>(null);
 
   // Two-way visibility: exclude blocked peers from conversations, unread badge, search, and calls
@@ -441,8 +442,13 @@ export default function App() {
             getRelationStatus={socialRelations.getRelationStatus}
             onFollow={socialRelations.followUser}
             onUnblock={socialRelations.unblockUser}
-            onReportUser={(peer, conversationId) => {
-              setReportingTarget({ user: peer, source: 'chat', conversationId });
+            onReportUser={(peer, conversationId, reportedMessage) => {
+              setReportingTarget({
+                user: peer,
+                source: 'chat',
+                conversationId,
+                reportedMessage: reportedMessage || null,
+              });
             }}
           />
         )}
@@ -703,6 +709,7 @@ export default function App() {
         targetUser={reportingTarget?.user || null}
         source={reportingTarget?.source || 'profile'}
         conversationId={reportingTarget?.conversationId || null}
+        reportedMessage={reportingTarget?.reportedMessage || null}
         isAlreadyBlocked={
           reportingTarget?.user?.id
             ? socialRelations.isBlocked(reportingTarget.user.id)

@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { AppNotification, Profile } from '@/src/types';
 import { cn, getAvatarColor, getInitials } from '@/src/lib/utils';
+import { useLanguage } from '@/src/lib/LanguageContext';
 
 interface NotificationModalProps {
   isOpen: boolean;
@@ -37,6 +38,7 @@ export const NotificationModal: React.FC<NotificationModalProps> = ({
   onSelectUser,
   onOpenChat,
 }) => {
+  const { t } = useLanguage();
   if (!isOpen) return null;
 
   const getNotificationIcon = (type: AppNotification['type']) => {
@@ -78,17 +80,17 @@ export const NotificationModal: React.FC<NotificationModalProps> = ({
                 <Bell className="w-5 h-5" />
               </div>
               {unreadCount > 0 && (
-                <span className="absolute -top-1 -right-1 flex h-4 min-w-4 px-1 items-center justify-center rounded-full bg-blue-600 text-[10px] font-bold text-white shadow">
+                <span className="absolute -top-1 -end-1 flex h-4 min-w-4 px-1 items-center justify-center rounded-full bg-blue-600 text-[10px] font-bold text-white shadow">
                   {unreadCount > 9 ? '9+' : unreadCount}
                 </span>
               )}
             </div>
             <div>
               <h3 className="font-bold text-base text-neutral-900 dark:text-neutral-100">
-                Notifications
+                {t('title.notifications')}
               </h3>
               <p className="text-xs text-neutral-500 dark:text-neutral-400">
-                {unreadCount > 0 ? `${unreadCount} unread` : 'All caught up'}
+                {unreadCount > 0 ? `${unreadCount} ${t('status.unread')}` : t('status.allCaughtUp')}
               </p>
             </div>
           </div>
@@ -98,14 +100,15 @@ export const NotificationModal: React.FC<NotificationModalProps> = ({
               <button
                 onClick={onMarkAllAsRead}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/50 transition-colors"
-                title="Mark all as read"
+                title={t('action.markAllRead')}
               >
                 <CheckCheck className="w-3.5 h-3.5" />
-                <span>Mark all read</span>
+                <span>{t('action.markAllRead')}</span>
               </button>
             )}
             <button
               onClick={onClose}
+              title={t('action.close')}
               className="p-1.5 rounded-xl hover:bg-neutral-200 dark:hover:bg-neutral-800 text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 transition-colors"
             >
               <X className="w-5 h-5" />
@@ -121,7 +124,7 @@ export const NotificationModal: React.FC<NotificationModalProps> = ({
                 <Bell className="w-8 h-8 stroke-[1.5]" />
               </div>
               <h4 className="font-semibold text-neutral-700 dark:text-neutral-300 text-sm">
-                No notifications yet
+                {t('desc.noNotifications')}
               </h4>
               <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1 max-w-xs">
                 When someone messages or calls you, you'll see alerts here in real time.
@@ -162,7 +165,7 @@ export const NotificationModal: React.FC<NotificationModalProps> = ({
                         {getInitials(actor?.display_name || 'User')}
                       </div>
                     )}
-                    <div className="absolute -bottom-1 -right-1 p-1 rounded-full bg-white dark:bg-neutral-900 shadow-sm">
+                    <div className="absolute -bottom-1 -end-1 p-1 rounded-full bg-white dark:bg-neutral-900 shadow-sm">
                       {getNotificationIcon(notif.type)}
                     </div>
                   </div>
@@ -195,7 +198,7 @@ export const NotificationModal: React.FC<NotificationModalProps> = ({
                           }}
                           className="px-2.5 py-1 text-[11px] font-medium rounded-xl bg-neutral-100 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300 hover:bg-neutral-200 dark:hover:bg-neutral-700 transition-colors"
                         >
-                          View Profile
+                          {t('action.viewProfile')}
                         </button>
                       )}
 
@@ -209,7 +212,7 @@ export const NotificationModal: React.FC<NotificationModalProps> = ({
                           }}
                           className="px-2.5 py-1 text-[11px] font-medium rounded-xl bg-neutral-100 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300 hover:bg-neutral-200 dark:hover:bg-neutral-700 transition-colors"
                         >
-                          Message
+                          {t('label.chat')}
                         </button>
                       )}
                     </div>
@@ -226,7 +229,7 @@ export const NotificationModal: React.FC<NotificationModalProps> = ({
                         onDeleteNotification(notif.id);
                       }}
                       className="opacity-0 group-hover:opacity-100 p-1 text-neutral-400 hover:text-rose-500 transition-all rounded-lg hover:bg-neutral-100 dark:hover:bg-neutral-800"
-                      title="Delete"
+                      title={t('action.delete')}
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>

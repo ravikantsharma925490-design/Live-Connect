@@ -38,7 +38,7 @@ export const MobileHeader: React.FC<MobileHeaderProps> = ({
         <button
           type="button"
           onClick={openLanguageModal}
-          title={`${currentLanguage.nativeName} (${currentLanguage.name}) - Change Language`}
+          title={`${currentLanguage.nativeName} (${currentLanguage.name}) - ${t('action.selectLanguage', 'Select App Language')}`}
           className="p-1.5 sm:p-2 rounded-xl bg-neutral-100 dark:bg-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-700 text-neutral-700 dark:text-neutral-300 transition-all hover:scale-105 active:scale-95 cursor-pointer flex items-center gap-1"
         >
           <span className="text-sm">{currentLanguage.flag}</span>
@@ -48,7 +48,7 @@ export const MobileHeader: React.FC<MobileHeaderProps> = ({
           <button
             type="button"
             onClick={onOpenNotifications}
-            title="Notifications"
+            title={t('title.notifications', 'Notifications')}
             className="relative p-1.5 sm:p-2 rounded-xl bg-neutral-100 dark:bg-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-700 text-neutral-700 dark:text-neutral-300 transition-all hover:scale-105 active:scale-95 cursor-pointer"
           >
             <Bell className="w-4 h-4" />

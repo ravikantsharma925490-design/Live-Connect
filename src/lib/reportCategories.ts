@@ -1,9 +1,10 @@
 import { getAuthHeaders } from '@/src/lib/authHeader';
 import { isFirebaseSessionActive } from '@/src/lib/firebase/client';
 import { submitUserReportFs } from '@/src/lib/firebase/services';
-import { generateUUID } from '@/src/lib/utils';
+import { formatMessagePreview, generateUUID } from '@/src/lib/utils';
 import {
   Profile,
+  ReportedMessageContext,
   UserReportCategory,
   UserReportSource,
 } from '@/src/types';
@@ -117,10 +118,20 @@ export async function submitUserReport(params: {
   details?: string;
   source: UserReportSource;
   conversationId?: string | null;
+  reportedMessage?: ReportedMessageContext | null;
   alsoBlocked?: boolean;
 }): Promise<{ reportId: string; duplicate?: boolean }> {
   const reportId = `urep_${generateUUID().replace(/-/g, '').slice(0, 20)}`;
-  const cleanDetails = params.details?.trim().slice(0, 1000) || undefined;
+  const rawUserDetails = params.details?.trim() || '';
+
+  let combinedDetails = rawUserDetails;
+  let reportedMessagePreview: string | undefined;
+  if (params.reportedMessage) {
+    reportedMessagePreview = formatMessagePreview(params.reportedMessage.content).slice(0, 320);
+    const msgHeader = `[Reported Message ID: ${params.reportedMessage.id}] "${reportedMessagePreview}"`;
+    combinedDetails = rawUserDetails ? `${msgHeader}\n\n${rawUserDetails}` : msgHeader;
+  }
+  const cleanDetails = combinedDetails.trim().slice(0, 1000) || undefined;
 
   const headers = await getAuthHeaders();
   const res = await fetch('/api/reports/user', {
@@ -138,6 +149,8 @@ export async function submitUserReport(params: {
       details: cleanDetails,
       source: params.source,
       conversationId: params.conversationId || null,
+      reportedMessageId: params.reportedMessage?.id || null,
+      reportedMessagePreview: reportedMessagePreview || null,
       alsoBlocked: Boolean(params.alsoBlocked),
     }),
   });

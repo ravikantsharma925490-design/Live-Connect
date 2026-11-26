@@ -1,5 +1,6 @@
 import React from 'react';
 import { CheckCircle2, ShieldCheck } from 'lucide-react';
+import { useLanguage } from '@/src/lib/LanguageContext';
 
 interface AccountRestoredModalProps {
   isOpen: boolean;
@@ -12,6 +13,7 @@ export const AccountRestoredModal: React.FC<AccountRestoredModalProps> = ({
   strikeCount = 0,
   onContinue,
 }) => {
+  const { t } = useLanguage();
   if (!isOpen) return null;
 
   return (
@@ -43,7 +45,7 @@ export const AccountRestoredModal: React.FC<AccountRestoredModalProps> = ({
           onClick={onContinue}
           className="w-full min-h-[44px] py-3 px-5 rounded-xl bg-[#0095F6] hover:bg-[#0081d6] text-white font-bold text-sm transition-colors cursor-pointer"
         >
-          Continue
+          {t('action.done')}
         </button>
       </div>
     </div>

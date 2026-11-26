@@ -62,7 +62,7 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
   ];
 
   return (
-    <aside className="hidden md:flex flex-col w-64 lg:w-72 h-full bg-white dark:bg-neutral-900 border-r border-neutral-200 dark:border-neutral-800 shrink-0 select-none">
+    <aside className="hidden md:flex flex-col w-64 lg:w-72 h-full bg-white dark:bg-neutral-900 border-e border-neutral-200 dark:border-neutral-800 shrink-0 select-none">
       {/* Brand Header */}
       <div className="p-5 border-b border-neutral-200 dark:border-neutral-800 flex items-center justify-between">
         <div className="flex items-center gap-3">
@@ -85,7 +85,7 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
           <button
             type="button"
             onClick={openLanguageModal}
-            title={`${currentLanguage.nativeName} (${currentLanguage.name}) - Change Language`}
+            title={`${currentLanguage.nativeName} (${currentLanguage.name}) - ${t('action.selectLanguage', 'Select App Language')}`}
             className="p-2 rounded-xl bg-neutral-100 dark:bg-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-700 text-neutral-700 dark:text-neutral-300 transition-all hover:scale-105 active:scale-95 cursor-pointer flex items-center gap-1"
           >
             <span className="text-sm">{currentLanguage.flag}</span>
@@ -96,7 +96,7 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
             <button
               type="button"
               onClick={onOpenNotifications}
-              title="Notifications"
+              title={t('title.notifications', 'Notifications')}
               className="relative p-2 rounded-xl bg-neutral-100 dark:bg-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-700 text-neutral-700 dark:text-neutral-300 transition-all hover:scale-105 active:scale-95 cursor-pointer"
             >
               <Bell className="w-4 h-4" />
@@ -174,7 +174,7 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
         <div className="p-3.5 border-t border-neutral-200 dark:border-neutral-800 bg-neutral-50/50 dark:bg-neutral-950/40 flex items-center justify-between">
           <button
             onClick={() => onChangeTab('profile')}
-            className="flex items-center gap-2.5 min-w-0 p-1.5 rounded-xl hover:bg-neutral-200/60 dark:hover:bg-neutral-800/60 transition-colors text-left flex-1 group cursor-pointer"
+            className="flex items-center gap-2.5 min-w-0 p-1.5 rounded-xl hover:bg-neutral-200/60 dark:hover:bg-neutral-800/60 transition-colors text-start flex-1 group cursor-pointer"
           >
             <UserAvatar
               src={currentUser.avatar_url}
@@ -197,8 +197,8 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
 
           <button
             onClick={onSignOut}
-            title="Sign Out"
-            className="p-2 rounded-xl text-neutral-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/40 transition-colors ml-1 cursor-pointer"
+            title={t('action.logOut', 'Log Out')}
+            className="p-2 rounded-xl text-neutral-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/40 transition-colors ms-1 cursor-pointer"
           >
             <LogOut className="w-4 h-4" />
           </button>

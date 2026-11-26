@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Loader2, Phone, PhoneOff, Video } from 'lucide-react';
 import { Call } from '@/src/types';
 import { cn, getAvatarColor, getInitials } from '@/src/lib/utils';
+import { useLanguage } from '@/src/lib/LanguageContext';
 
 interface IncomingCallModalProps {
   incomingCall: Call | null;
@@ -15,6 +16,7 @@ export const IncomingCallModal: React.FC<IncomingCallModalProps> = ({
   onAccept,
   onReject,
 }) => {
+  const { t } = useLanguage();
   const [isAccepting, setIsAccepting] = useState(false);
 
   useEffect(() => {
@@ -49,7 +51,7 @@ export const IncomingCallModal: React.FC<IncomingCallModalProps> = ({
           ) : (
             <Phone className="w-4 h-4 text-emerald-400 animate-pulse" />
           )}
-          <span>Incoming {isVideo ? 'Video' : 'Audio'} Call</span>
+          <span>{isVideo ? t('label.incomingVideoCall') : t('label.incomingAudioCall')}</span>
         </div>
 
         {/* Pulsing Avatar */}
@@ -96,7 +98,7 @@ export const IncomingCallModal: React.FC<IncomingCallModalProps> = ({
               <PhoneOff className="w-7 h-7" />
             </div>
             <span className="text-xs font-semibold text-neutral-400 group-hover:text-red-400 transition-colors">
-              Decline
+              {t('action.decline')}
             </span>
           </button>
 
@@ -121,7 +123,7 @@ export const IncomingCallModal: React.FC<IncomingCallModalProps> = ({
               )}
             </div>
             <span className="text-xs font-semibold text-neutral-300 group-hover:text-emerald-400 transition-colors">
-              {isAccepting ? 'Connecting...' : 'Accept'}
+              {isAccepting ? 'Connecting...' : t('action.accept')}
             </span>
           </button>
         </div>

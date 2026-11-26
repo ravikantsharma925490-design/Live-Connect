@@ -13,6 +13,7 @@ import {
 import { ActiveCallState, ConnectionState } from '@/src/types';
 import { cn, formatDuration, getAvatarColor, getInitials } from '@/src/lib/utils';
 import { NetworkQualityIndicator } from './NetworkQualityIndicator';
+import { useLanguage } from '@/src/lib/LanguageContext';
 
 interface VideoCallScreenProps {
   activeCallState?: ActiveCallState;
@@ -41,6 +42,7 @@ export const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
   onSwitchCamera,
   onEndCall,
 }) => {
+  const { t } = useLanguage();
   const currentCallState = activeCallState || callState;
   const toggleMic = onToggleMicrophone || onToggleMic || (() => {});
 
@@ -160,7 +162,7 @@ export const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
         )}
 
         {/* Floating Local Picture-in-Picture Video */}
-        <div className="absolute top-4 right-4 z-20 w-32 h-44 sm:w-44 sm:h-60 rounded-2xl overflow-hidden border-2 border-white/20 shadow-2xl bg-neutral-900 group">
+        <div className="absolute top-4 end-4 z-20 w-32 h-44 sm:w-44 sm:h-60 rounded-2xl overflow-hidden border-2 border-white/20 shadow-2xl bg-neutral-900 group">
           <video
             ref={localVideoRef}
             autoPlay
@@ -180,7 +182,7 @@ export const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
             </div>
           )}
 
-          <div className="absolute bottom-1.5 left-2 px-1.5 py-0.5 rounded bg-black/60 backdrop-blur-sm text-[10px] font-medium text-white flex items-center gap-1">
+          <div className="absolute bottom-1.5 start-2 px-1.5 py-0.5 rounded bg-black/60 backdrop-blur-sm text-[10px] font-medium text-white flex items-center gap-1">
             <span>You</span>
             {!localAudioEnabled && <MicOff className="w-2.5 h-2.5 text-red-400" />}
           </div>
@@ -194,7 +196,7 @@ export const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
         )}
 
         {/* Top Info Bar */}
-        <div className="absolute top-4 left-4 z-20 flex flex-col gap-1.5">
+        <div className="absolute top-4 start-4 z-20 flex flex-col gap-1.5">
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-black/50 backdrop-blur-md border border-white/10 text-xs font-semibold">
               <span
@@ -229,7 +231,7 @@ export const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
             toggleMic();
             showFeedback(localAudioEnabled ? 'Microphone Muted' : 'Microphone Unmuted');
           }}
-          title={localAudioEnabled ? 'Mute Mic' : 'Unmute Mic'}
+          title={localAudioEnabled ? t('action.mute') : t('action.unmute')}
           className={cn(
             'w-13 h-13 rounded-full flex items-center justify-center transition-all hover:scale-105 active:scale-95 shadow-lg',
             localAudioEnabled
@@ -263,7 +265,7 @@ export const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
             onSwitchCamera();
             showFeedback('Camera Flipped');
           }}
-          title="Switch Camera"
+          title={t('action.switchCamera')}
           className="w-13 h-13 rounded-full bg-white/20 hover:bg-white/30 text-white backdrop-blur-md border border-white/10 flex items-center justify-center transition-all hover:scale-105 active:scale-95 shadow-lg"
         >
           <SwitchCamera className="w-5 h-5" />
@@ -272,8 +274,8 @@ export const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
         {/* End Call Button */}
         <button
           onClick={onEndCall}
-          title="End Call"
-          className="w-16 h-16 rounded-full bg-red-600 hover:bg-red-700 text-white flex items-center justify-center shadow-lg shadow-red-600/40 transition-all hover:scale-110 active:scale-95 ml-2"
+          title={t('action.endCall')}
+          className="w-16 h-16 rounded-full bg-red-600 hover:bg-red-700 text-white flex items-center justify-center shadow-lg shadow-red-600/40 transition-all hover:scale-110 active:scale-95 ms-2"
         >
           <PhoneOff className="w-7 h-7" />
         </button>

@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from 'react';
 import {
   Phone,
   Video,
@@ -13,22 +13,50 @@ import {
   Pin,
   X,
   Flag,
+  Languages,
+  Globe,
+  Check,
 } from 'lucide-react';
-import { Conversation, Profile, CallType, UserRelationStatus, Message } from '@/src/types';
+import { doc, getDoc, onSnapshot } from 'firebase/firestore';
+import {
+  Conversation,
+  Profile,
+  CallType,
+  UserRelationStatus,
+  Message,
+  ReportedMessageContext,
+} from '@/src/types';
 import { MessageBubble } from './MessageBubble';
 import { TypingBubble } from './TypingBubble';
 import { ChatInput } from './ChatInput';
 import { ImageViewerModal } from './ImageViewerModal';
 import { ChatSkeleton } from '../ui/LoadingSkeleton';
 import { EmptyState } from '../ui/EmptyState';
-import { cn, formatLastSeen, formatChatDateHeader, isDifferentDay } from '@/src/lib/utils';
+import {
+  cn,
+  formatLastSeen,
+  formatChatDateHeader,
+  isDifferentDay,
+  formatMessagePreview,
+} from '@/src/lib/utils';
 import { UserAvatar } from '../ui/UserAvatar';
 import { useMessages } from '@/src/hooks/useMessages';
-import { isFirebaseSessionActive } from '@/src/lib/firebase/client';
+import { db, isFirebaseSessionActive } from '@/src/lib/firebase/client';
 import {
   fetchRelationStatusFs,
   followUserFs,
+  pinConversationMessageFs,
+  inboxMessageDocToMessage,
 } from '@/src/lib/firebase/services';
+import { getAuthHeaders } from '@/src/lib/authHeader';
+import { useLanguage } from '@/src/lib/LanguageContext';
+import { WorldLanguage } from '@/src/lib/worldData';
+import {
+  getChatTranslationSettings,
+  saveChatTranslationSettings,
+  resolveWorldLanguage,
+} from '@/src/lib/messageTranslation';
+import { TranslateLanguageModal } from './TranslateLanguageModal';
 
 interface ChatWindowProps {
   conversation: Conversation | null;
@@ -39,10 +67,15 @@ interface ChatWindowProps {
   onStartCall: (peer: Profile, type: CallType) => void;
   onOpenProfileView?: (profile: Profile) => void;
   onDeleteConversation?: (conversationId: string) => void;
+  onOpenForwardModal?: (message: any) => void;
   relationStatus?: UserRelationStatus;
   onFollow?: (peer: Profile) => Promise<boolean>;
   onUnblock?: (peerId: string) => Promise<boolean>;
-  onReportUser?: (peer: Profile, conversationId?: string) => void;
+  onReportUser?: (
+    peer: Profile,
+    conversationId?: string,
+    reportedMessage?: ReportedMessageContext
+  ) => void;
 }
 
 export const ChatWindow: React.FC<ChatWindowProps> = ({
@@ -54,19 +87,35 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   onStartCall,
   onOpenProfileView,
   onDeleteConversation,
+  onOpenForwardModal,
   relationStatus,
   onFollow,
   onUnblock,
   onReportUser,
 }) => {
+  const { t, currentLanguage } = useLanguage();
   const [showOptionsDropdown, setShowOptionsDropdown] = useState(false);
   const [confirmAction, setConfirmAction] = useState<'clear' | 'delete' | null>(null);
   const [followLoading, setFollowLoading] = useState(false);
   const [localFollowed, setLocalFollowed] = useState(false);
   const [liveRelation, setLiveRelation] = useState<UserRelationStatus | null>(null);
   const [viewingImage, setViewingImage] = useState<{ url: string; caption?: string } | null>(null);
-  const [pinnedMessage, setPinnedMessage] = useState<Message | null>(conversation?.pinned_message || null);
+  const [livePinnedMessageId, setLivePinnedMessageId] = useState<string | null>(
+    conversation?.pinned_message_id || null
+  );
+  const [remotePinnedFallback, setRemotePinnedFallback] = useState<Message | null>(
+    conversation?.pinned_message || null
+  );
   const [replyingToMessage, setReplyingToMessage] = useState<Message | null>(null);
+  const [translationSettings, setTranslationSettings] = useState(() =>
+    getChatTranslationSettings(conversation?.id)
+  );
+  const [translatePickerState, setTranslatePickerState] = useState<{
+    isOpen: boolean;
+    selectedCode: string;
+    title?: string;
+    onPicked?: (lang: WorldLanguage) => void;
+  }>({ isOpen: false, selectedCode: currentLanguage.code });
   const chatContainerRef = useRef<HTMLDivElement | null>(null);
   const isNearBottomRef = useRef(true);
   const justSentRef = useRef(false);
@@ -120,24 +169,100 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   const lastMessage = messages[messages.length - 1];
   const lastMessageKey = lastMessage ? (lastMessage.client_id || lastMessage.id) : null;
 
-  // Sync pinnedMessage on conversation change
+  // Reset transient state on conversation change
   useEffect(() => {
-    setPinnedMessage(conversation?.pinned_message || null);
+    setLivePinnedMessageId(conversation?.pinned_message_id || null);
+    setRemotePinnedFallback(conversation?.pinned_message || null);
     setReplyingToMessage(null);
+    setTranslationSettings(getChatTranslationSettings(conversation?.id));
+    setTranslatePickerState({ isOpen: false, selectedCode: currentLanguage.code });
     isNearBottomRef.current = true;
     justSentRef.current = false;
     prevLastMessageKeyRef.current = null;
-  }, [conversation?.id]);
+  }, [conversation?.id, currentLanguage.code]);
 
-  // Sync pinnedMessage when messages arrive if pinned_message_id is present
+  // Keep livePinnedMessageId synced with conversation prop updates (e.g. SQLite polling)
   useEffect(() => {
-    if (conversation?.pinned_message_id && messages.length > 0) {
-      const found = messages.find((m) => m.id === conversation?.pinned_message_id);
-      if (found) {
-        setPinnedMessage(found);
-      }
+    if (conversation?.pinned_message_id !== undefined) {
+      setLivePinnedMessageId(conversation.pinned_message_id || null);
     }
-  }, [conversation?.pinned_message_id, messages]);
+    if (conversation?.pinned_message) {
+      setRemotePinnedFallback(conversation.pinned_message);
+    }
+  }, [conversation?.pinned_message_id, conversation?.pinned_message]);
+
+  // Real-time Firestore listener on conversations/{id} so pin/unpin syncs immediately for both peers
+  useEffect(() => {
+    if (!conversation?.id || !currentUser?.id) return;
+
+    if (isFirebaseSessionActive(currentUser.id)) {
+      const convRef = doc(db, 'conversations', conversation.id);
+      const unsub = onSnapshot(
+        convRef,
+        (snap) => {
+          if (!snap.exists()) return;
+          const nextPinnedId = (snap.data()?.pinnedMessageId as string | null) || null;
+          setLivePinnedMessageId(nextPinnedId);
+        },
+        () => {}
+      );
+      return () => unsub();
+    }
+
+    if (typeof BroadcastChannel !== 'undefined') {
+      const bus = new BroadcastChannel('liveconnect_messages_sync');
+      bus.onmessage = (event) => {
+        const data = event.data;
+        if (data?.type === 'message_pinned' && data.conversationId === conversation.id) {
+          setLivePinnedMessageId(data.pinnedMessageId || null);
+          setRemotePinnedFallback(data.pinnedMessage || null);
+        }
+      };
+      return () => bus.close();
+    }
+  }, [conversation?.id, currentUser?.id]);
+
+  // Fetch pinned message doc from user's inbox if pinned ID exists outside current message window
+  useEffect(() => {
+    if (!livePinnedMessageId || !conversation?.id || !currentUser?.id) return;
+    if (messages.some((m) => m.id === livePinnedMessageId)) return;
+    if (conversation?.pinned_message?.id === livePinnedMessageId) return;
+    if (remotePinnedFallback?.id === livePinnedMessageId) return;
+
+    if (isFirebaseSessionActive(currentUser.id)) {
+      let cancelled = false;
+      getDoc(doc(db, 'users', currentUser.id, 'inbox', conversation.id, 'messages', livePinnedMessageId))
+        .then((snap) => {
+          if (!cancelled && snap.exists()) {
+            setRemotePinnedFallback(inboxMessageDocToMessage(snap.data()));
+          }
+        })
+        .catch(() => {});
+      return () => {
+        cancelled = true;
+      };
+    }
+  }, [livePinnedMessageId, conversation?.id, conversation?.pinned_message, currentUser?.id, messages, remotePinnedFallback?.id]);
+
+  const pinnedMessage = useMemo(() => {
+    if (!livePinnedMessageId) return null;
+    return (
+      messages.find((m) => m.id === livePinnedMessageId) ||
+      (conversation?.pinned_message?.id === livePinnedMessageId ? conversation.pinned_message : null) ||
+      (remotePinnedFallback?.id === livePinnedMessageId ? remotePinnedFallback : null)
+    );
+  }, [livePinnedMessageId, messages, conversation?.pinned_message, remotePinnedFallback]);
+
+  const messagesMap = useMemo(() => {
+    const map = new Map<string, Message>();
+    messages.forEach((m) => map.set(m.id, m));
+    return map;
+  }, [messages]);
+
+  const resolveReplyMessage = useCallback(
+    (id: string) => messagesMap.get(id),
+    [messagesMap]
+  );
 
   // Scroll helpers
   const checkIsNearBottom = useCallback(() => {
@@ -331,9 +456,145 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     setReplyingToMessage(msgToReply);
   }, []);
 
-  const handlePinMessage = useCallback((msgToPin: Message) => {
-    setPinnedMessage((prev) => (prev?.id === msgToPin.id ? null : msgToPin));
-  }, []);
+  const persistPinnedMessage = useCallback(
+    async (nextPinnedId: string | null, nextPinnedMsg: Message | null) => {
+      if (!conversation?.id) return;
+      const previousId = livePinnedMessageId;
+      const previousFallback = remotePinnedFallback;
+
+      setLivePinnedMessageId(nextPinnedId);
+      setRemotePinnedFallback(nextPinnedMsg);
+
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('liveconnect_conversation_pinned', {
+            detail: {
+              conversationId: conversation.id,
+              pinnedMessageId: nextPinnedId,
+              pinnedMessage: nextPinnedMsg,
+            },
+          })
+        );
+        if (typeof BroadcastChannel !== 'undefined') {
+          try {
+            const bus = new BroadcastChannel('liveconnect_messages_sync');
+            bus.postMessage({
+              type: 'message_pinned',
+              conversationId: conversation.id,
+              pinnedMessageId: nextPinnedId,
+              pinnedMessage: nextPinnedMsg,
+            });
+            bus.close();
+          } catch {}
+        }
+      }
+
+      try {
+        if (isFirebaseSessionActive(currentUser?.id)) {
+          await pinConversationMessageFs(conversation.id, nextPinnedId);
+        } else {
+          const authHeaders = await getAuthHeaders();
+          const res = await fetch('/api/conversations/pin', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...authHeaders },
+            body: JSON.stringify({
+              conversationId: conversation.id,
+              messageId: nextPinnedId,
+            }),
+          });
+          if (!res.ok) {
+            throw new Error('Failed to persist pinned message');
+          }
+        }
+      } catch (err) {
+        console.warn('Pin message update notice:', err);
+        setLivePinnedMessageId(previousId);
+        setRemotePinnedFallback(previousFallback);
+      }
+    },
+    [conversation?.id, currentUser?.id, livePinnedMessageId, remotePinnedFallback]
+  );
+
+  const handlePinMessage = useCallback(
+    (msgToPin: Message) => {
+      const isCurrentlyPinned = livePinnedMessageId === msgToPin.id;
+      void persistPinnedMessage(isCurrentlyPinned ? null : msgToPin.id, isCurrentlyPinned ? null : msgToPin);
+    },
+    [livePinnedMessageId, persistPinnedMessage]
+  );
+
+  const handleUnpinMessage = useCallback(() => {
+    void persistPinnedMessage(null, null);
+  }, [persistPinnedMessage]);
+
+  const handleDeleteMessageWithUnpin = useCallback(
+    async (messageId: string) => {
+      if (livePinnedMessageId === messageId) {
+        void persistPinnedMessage(null, null);
+      }
+      await deleteMessage(messageId);
+    },
+    [deleteMessage, livePinnedMessageId, persistPinnedMessage]
+  );
+
+  const activeTargetLang = useMemo(
+    () =>
+      translationSettings.customLangCode
+        ? resolveWorldLanguage(translationSettings.customLangCode)
+        : currentLanguage,
+    [translationSettings.customLangCode, currentLanguage]
+  );
+
+  const handleOpenTranslatePicker = useCallback(
+    (selectedCode: string, onPicked: (lang: WorldLanguage) => void, title?: string) => {
+      setTranslatePickerState({
+        isOpen: true,
+        selectedCode,
+        title,
+        onPicked,
+      });
+    },
+    []
+  );
+
+  const handleToggleAutoTranslate = useCallback(() => {
+    if (!conversation?.id) return;
+    const updated = saveChatTranslationSettings(conversation.id, {
+      autoTranslate: !translationSettings.autoTranslate,
+    });
+    setTranslationSettings(updated);
+    setShowOptionsDropdown(false);
+  }, [conversation?.id, translationSettings.autoTranslate]);
+
+  const handleOpenChatTranslationLangPicker = useCallback(() => {
+    setShowOptionsDropdown(false);
+    if (!conversation?.id) return;
+    const convId = conversation.id;
+    handleOpenTranslatePicker(
+      activeTargetLang.code,
+      (picked) => {
+        const updated = saveChatTranslationSettings(convId, {
+          customLangCode: picked.code,
+        });
+        setTranslationSettings(updated);
+      },
+      t('action.translationLanguage', 'Chat Translation Language')
+    );
+  }, [conversation?.id, activeTargetLang.code, handleOpenTranslatePicker, t]);
+
+  const handleReportMessage = useCallback(
+    (msgToReport: Message) => {
+      if (!conversation?.id || !onReportUser || isSelf) return;
+      const reportedPeer = msgToReport.sender || otherUser;
+      if (!reportedPeer) return;
+      onReportUser(reportedPeer, conversation.id, {
+        id: msgToReport.id,
+        content: msgToReport.content,
+        createdAt: msgToReport.created_at,
+      });
+    },
+    [conversation?.id, onReportUser, isSelf, otherUser]
+  );
 
   if (!conversation) {
     return (
@@ -466,12 +727,12 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
             <div className="text-center space-y-1">
               <h3 className="text-base font-bold text-neutral-900 dark:text-neutral-100">
-                {confirmAction === 'clear' ? 'Clear All Messages?' : 'Delete Conversation?'}
+                {confirmAction === 'clear'
+                  ? t('desc.clearMessagesTitle', 'Clear All Messages?')
+                  : t('desc.deleteConversationTitle', 'Delete Conversation?')}
               </h3>
               <p className="text-xs text-neutral-500 dark:text-neutral-400">
-                {confirmAction === 'clear'
-                  ? 'All messages in this chat will be permanently deleted for you.'
-                  : `Are you sure you want to delete the chat with ${displayName}? This cannot be undone.`}
+                {displayName}
               </p>
             </div>
 
@@ -480,13 +741,13 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                 onClick={() => setConfirmAction(null)}
                 className="py-2.5 px-4 rounded-xl border border-neutral-300 dark:border-neutral-700 font-semibold text-xs text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors cursor-pointer"
               >
-                Cancel
+                {t('action.cancel', 'Cancel')}
               </button>
               <button
                 onClick={confirmAction === 'clear' ? handleClearMessages : handleDeleteConversation}
                 className="py-2.5 px-4 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-xs shadow-md shadow-red-500/20 transition-all active:scale-95 cursor-pointer"
               >
-                {confirmAction === 'clear' ? 'Clear Messages' : 'Delete Chat'}
+                {confirmAction === 'clear' ? t('action.clearAll', 'Clear All') : t('action.delete', 'Delete')}
               </button>
             </div>
           </div>
@@ -501,7 +762,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             onClick={onBack}
             className="md:hidden p-2 rounded-xl text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
           >
-            <ArrowLeft className="w-5 h-5" />
+            <ArrowLeft className="w-5 h-5 rtl:rotate-180" />
           </button>
 
           {/* Avatar */}
@@ -538,15 +799,19 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
               </h3>
               {!isSelf && isMutual && !isBlocked ? (
                 <span className="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
-                  <UserCheck className="w-3 h-3" /> Mutual Follow
+                  <UserCheck className="w-3 h-3" /> {t('action.mutual', 'Friends (Mutual)')}
                 </span>
               ) : null}
             </div>
             <p className="text-xs text-neutral-500 dark:text-neutral-400 truncate flex items-center gap-1.5">
               {isSelf ? (
-                <span className="text-blue-600 dark:text-blue-400 font-medium">Message yourself (Personal notes)</span>
+                <span className="text-blue-600 dark:text-blue-400 font-medium">
+                  {t('status.personalNotes', 'Message yourself (Personal notes)')}
+                </span>
               ) : isOnline ? (
-                <span className="text-emerald-600 dark:text-emerald-400 font-medium">Online</span>
+                <span className="text-emerald-600 dark:text-emerald-400 font-medium">
+                  {t('status.online', 'Online')}
+                </span>
               ) : (
                 <span>{formatLastSeen(lastSeenString, isOnline)}</span>
               )}
@@ -563,11 +828,11 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                 if (!currentUser) return;
                 onStartCall(currentUser, 'audio');
               }}
-              title="Call your other device (e.g. Phone to PC)"
+              title={t('action.callOtherDevice', 'Call Other Device')}
               className="px-3 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold flex items-center gap-1.5 shadow-sm active:scale-95 transition-all cursor-pointer"
             >
               <Phone className="w-3.5 h-3.5" />
-              <span>Call Other Device</span>
+              <span>{t('action.callOtherDevice', 'Call Other Device')}</span>
             </button>
           ) : (
             <>
@@ -577,7 +842,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                   if (!otherUser || !canCall) return;
                   onStartCall(otherUser, 'audio');
                 }}
-                title={isBlocked ? 'User is blocked' : 'Start Audio Call'}
+                title={isBlocked ? t('action.blocked', 'Blocked') : t('action.audioCall', 'Audio Call')}
                 disabled={!otherUser || !canCall}
                 className={cn(
                   'p-2.5 rounded-xl transition-all shadow-xs',
@@ -595,7 +860,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                   if (!otherUser || !canCall) return;
                   onStartCall(otherUser, 'video');
                 }}
-                title={isBlocked ? 'User is blocked' : 'Start Video Call'}
+                title={isBlocked ? t('action.blocked', 'Blocked') : t('action.videoCall', 'Video Call')}
                 disabled={!otherUser || !canCall}
                 className={cn(
                   'p-2.5 rounded-xl transition-all shadow-xs flex items-center gap-1.5 font-medium text-xs px-3',
@@ -605,7 +870,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                 )}
               >
                 <Video className="w-4 h-4" />
-                <span className="hidden sm:inline">Call</span>
+                <span className="hidden sm:inline">{t('label.call', 'Call')}</span>
               </button>
             </>
           )}
@@ -627,16 +892,52 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                   className="fixed inset-0 z-20"
                   onClick={() => setShowOptionsDropdown(false)}
                 />
-                <div className="absolute right-0 top-full mt-1.5 w-48 bg-white dark:bg-neutral-900 rounded-2xl border border-neutral-200 dark:border-neutral-800 shadow-xl py-1.5 z-30 animate-in fade-in slide-in-from-top-2 duration-150">
+                <div className="absolute end-0 top-full mt-1.5 w-60 bg-white dark:bg-neutral-900 rounded-2xl border border-neutral-200 dark:border-neutral-800 shadow-xl py-1.5 z-30 animate-in fade-in slide-in-from-top-2 duration-150">
+                  <button
+                    type="button"
+                    onClick={handleToggleAutoTranslate}
+                    className="w-full px-3.5 py-2 text-start text-xs font-semibold text-neutral-700 dark:text-neutral-200 hover:bg-neutral-100 dark:hover:bg-neutral-800 flex items-center justify-between gap-2 transition-colors cursor-pointer"
+                  >
+                    <span className="flex items-center gap-2 min-w-0">
+                      <Languages className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+                      <span className="truncate">{t('action.autoTranslate', 'Auto-Translate')}</span>
+                    </span>
+                    <span
+                      className={cn(
+                        'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-bold shrink-0',
+                        translationSettings.autoTranslate
+                          ? 'bg-emerald-100 dark:bg-emerald-950/70 text-emerald-700 dark:text-emerald-300'
+                          : 'bg-neutral-100 dark:bg-neutral-800 text-neutral-500'
+                      )}
+                    >
+                      {translationSettings.autoTranslate && <Check className="w-2.5 h-2.5" />}
+                      {translationSettings.autoTranslate ? 'ON' : 'OFF'}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleOpenChatTranslationLangPicker}
+                    className="w-full px-3.5 py-2 text-start text-xs font-semibold text-neutral-700 dark:text-neutral-200 hover:bg-neutral-100 dark:hover:bg-neutral-800 flex items-center justify-between gap-2 transition-colors border-b border-neutral-100 dark:border-neutral-800 cursor-pointer"
+                  >
+                    <span className="flex items-center gap-2 min-w-0">
+                      <Globe className="w-3.5 h-3.5 text-sky-500 shrink-0" />
+                      <span className="truncate">{t('action.translationLang', 'Translate To')}</span>
+                    </span>
+                    <span className="text-[11px] font-semibold text-blue-600 dark:text-blue-400 truncate max-w-[92px]">
+                      {activeTargetLang.flag} {activeTargetLang.nativeName}
+                    </span>
+                  </button>
+
                   <button
                     onClick={() => {
                       setShowOptionsDropdown(false);
                       setConfirmAction('clear');
                     }}
-                    className="w-full px-3.5 py-2 text-left text-xs font-semibold text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 flex items-center gap-2 transition-colors"
+                    className="w-full px-3.5 py-2 text-start text-xs font-semibold text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 flex items-center gap-2 transition-colors"
                   >
                     <Eraser className="w-3.5 h-3.5 text-neutral-400" />
-                    <span>Clear Messages</span>
+                    <span>{t('action.clearAll', 'Clear All')}</span>
                   </button>
 
                   {!isSelf && otherUser && onReportUser && (
@@ -645,10 +946,10 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                         setShowOptionsDropdown(false);
                         onReportUser(otherUser, conversation.id);
                       }}
-                      className="w-full px-3.5 py-2 text-left text-xs font-semibold text-amber-600 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/40 flex items-center gap-2 transition-colors border-t border-neutral-100 dark:border-neutral-800 cursor-pointer"
+                      className="w-full px-3.5 py-2 text-start text-xs font-semibold text-amber-600 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/40 flex items-center gap-2 transition-colors border-t border-neutral-100 dark:border-neutral-800 cursor-pointer"
                     >
                       <Flag className="w-3.5 h-3.5" />
-                      <span>Report User</span>
+                      <span>{t('action.reportUser', 'Report User')}</span>
                     </button>
                   )}
 
@@ -657,10 +958,10 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                       setShowOptionsDropdown(false);
                       setConfirmAction('delete');
                     }}
-                    className="w-full px-3.5 py-2 text-left text-xs font-semibold text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 flex items-center gap-2 transition-colors border-t border-neutral-100 dark:border-neutral-800 cursor-pointer"
+                    className="w-full px-3.5 py-2 text-start text-xs font-semibold text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 flex items-center gap-2 transition-colors border-t border-neutral-100 dark:border-neutral-800 cursor-pointer"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
-                    <span>Delete Conversation</span>
+                    <span>{t('action.delete', 'Delete')}</span>
                   </button>
                 </div>
               </>
@@ -690,26 +991,53 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             </div>
             <div className="min-w-0 flex-1">
               <span className="font-bold text-amber-800 dark:text-amber-300 block text-[11px]">
-                Pinned Message
+                {t('label.pinnedMessage', 'Pinned Message')}
               </span>
               <p className="text-amber-900 dark:text-amber-200/90 truncate text-xs font-medium">
-                {pinnedMessage.content?.startsWith('[VOICE:')
-                  ? '🎙️ Voice Note'
-                  : pinnedMessage.content?.startsWith('[IMAGE:')
-                  ? '📷 Photo Attachment'
-                  : pinnedMessage.content?.startsWith('[STICKER:')
-                  ? '🎨 Expressive Sticker'
-                  : pinnedMessage.content}
+                {formatMessagePreview(pinnedMessage.content)}
               </p>
             </div>
           </div>
           <button
-            onClick={() => setPinnedMessage(null)}
+            type="button"
+            onClick={handleUnpinMessage}
             className="p-1 rounded-lg text-amber-600 dark:text-amber-400 hover:bg-amber-200/50 dark:hover:bg-amber-900/50 transition-colors cursor-pointer"
-            title="Unpin banner"
+            title="Unpin message"
           >
             <X className="w-4 h-4" />
           </button>
+        </div>
+      )}
+
+      {/* Auto-Translate Active Banner */}
+      {translationSettings.autoTranslate && (
+        <div className="bg-indigo-50/90 dark:bg-indigo-950/40 border-b border-indigo-200/80 dark:border-indigo-800/50 px-4 py-1.5 flex items-center justify-between gap-2 text-xs z-10">
+          <div className="flex items-center gap-2 min-w-0">
+            <Languages className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400 shrink-0" />
+            <span className="text-indigo-900 dark:text-indigo-200 truncate">
+              {t('desc.autoTranslatingTo', 'Auto-translating to')}{' '}
+              <strong>
+                {activeTargetLang.flag} {activeTargetLang.nativeName}
+              </strong>
+            </span>
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              onClick={handleOpenChatTranslationLangPicker}
+              className="px-2 py-0.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-[11px] transition-colors cursor-pointer"
+            >
+              {t('action.change', 'Change')}
+            </button>
+            <button
+              type="button"
+              onClick={handleToggleAutoTranslate}
+              className="p-1 rounded-lg text-indigo-600 dark:text-indigo-400 hover:bg-indigo-200/50 dark:hover:bg-indigo-900/50 transition-colors cursor-pointer"
+              title="Turn off auto-translate"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
         </div>
       )}
 
@@ -750,16 +1078,22 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                       message={msg}
                       isMine={isMine}
                       showAvatar={showAvatar}
-                      onDeleteMessage={deleteMessage}
+                      onDeleteMessage={handleDeleteMessageWithUnpin}
                       onStartCall={onStartCall}
                       onViewImage={handleViewImage}
                       otherUser={otherUser}
                       conversation={conversation}
                       onReplyMessage={handleReplyMessage}
+                      onForwardMessage={onOpenForwardModal}
                       onPinMessage={handlePinMessage}
-                      isPinned={pinnedMessage?.id === msg.id}
+                      onReportMessage={!isSelf && otherUser && onReportUser ? handleReportMessage : undefined}
+                      resolveReplyMessage={resolveReplyMessage}
+                      isPinned={livePinnedMessageId === msg.id}
                       onOpenProfileView={onOpenProfileView}
                       shouldAnimate={msg.should_animate}
+                      defaultTargetLang={activeTargetLang}
+                      autoTranslate={translationSettings.autoTranslate}
+                      onOpenTranslatePicker={handleOpenTranslatePicker}
                     />
                   </React.Fragment>
                 );
@@ -777,7 +1111,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                 onClick={fetchMessages}
                 className="text-xs text-blue-600 hover:underline mt-2 font-medium cursor-pointer"
               >
-                Retry
+                {t('action.tryAgain', 'Try Again')}
               </button>
             </div>
           ) : (
@@ -803,34 +1137,30 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
           <div className="p-3.5 rounded-2xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/50 flex items-center justify-between gap-3 text-xs text-rose-700 dark:text-rose-300">
             <div className="flex items-center gap-2">
               <ShieldAlert className="w-4 h-4 shrink-0 text-rose-500" />
-              <span>Communication is blocked. You cannot send messages or make calls.</span>
+              <span>{t('desc.communicationBlocked', 'Communication is blocked. You cannot send messages or make calls.')}</span>
             </div>
             {relationStatus?.isBlockedByMe && onUnblock && otherUser && (
               <button
                 onClick={() => onUnblock(otherUser.id)}
                 className="px-3 py-1 text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white rounded-xl shadow-xs transition-colors shrink-0 cursor-pointer"
               >
-                Unblock
+                {t('action.unblock', 'Unblock')}
               </button>
             )}
           </div>
         ) : !isSelf && !canChat ? (
           /* Case 2: Not Permitted to Chat (User has been unfollowed or not followed back) */
           <div className="p-3.5 rounded-2xl bg-neutral-50 dark:bg-neutral-800/80 border border-neutral-200 dark:border-neutral-700/80 flex flex-col sm:flex-row items-center justify-between gap-2.5 text-xs">
-            <div className="flex items-center gap-2.5 text-center sm:text-left">
+            <div className="flex items-center gap-2.5 text-center sm:text-start">
               <div className="p-2 rounded-xl bg-amber-500/10 text-amber-600 dark:text-amber-400 shrink-0">
                 <Users className="w-4 h-4" />
               </div>
               <div>
                 <p className="font-bold text-neutral-900 dark:text-neutral-100">
-                  {isFollowingUser
-                    ? `Waiting for @${otherUser?.username || 'user'} to follow back`
-                    : `Follow @${otherUser?.username || 'user'} to connect`}
+                  {t('desc.mutualFollowRequired', 'Mutual follow required to call & chat')}
                 </p>
                 <p className="text-[11px] text-neutral-500 dark:text-neutral-400">
-                  {isFollowingUser
-                    ? `@${otherUser?.username || 'This user'} must follow you back before you can send messages or call.`
-                    : 'Follow this user to start connecting.'}
+                  @{otherUser?.username || 'user'}
                 </p>
               </div>
             </div>
@@ -843,11 +1173,11 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                 disabled={followLoading}
                 className="px-4 py-2 text-xs font-bold bg-blue-600 hover:bg-blue-700 text-white rounded-xl shadow-md shadow-blue-500/20 transition-all hover:scale-105 active:scale-95 disabled:opacity-50 shrink-0 cursor-pointer"
               >
-                {followLoading ? 'Processing...' : 'Follow'}
+                {followLoading ? '...' : t('action.follow', 'Follow')}
               </button>
             ) : (
               <span className="px-3 py-1.5 text-xs font-semibold rounded-xl bg-neutral-200 dark:bg-neutral-700 text-neutral-700 dark:text-neutral-300 shrink-0">
-                Waiting for Follow Back
+                {t('action.following', 'Following')}
               </span>
             )}
           </div>
@@ -858,7 +1188,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             {!isSelf && isFollowedByUser && !isFollowingUser && (
               <div className="px-3 py-1.5 rounded-xl bg-blue-50 dark:bg-blue-950/40 border border-blue-200/60 dark:border-blue-900/40 flex items-center justify-between text-xs">
                 <span className="text-[11px] text-blue-700 dark:text-blue-300 font-medium">
-                  @{otherUser?.username || 'This user'} follows you.
+                  @{otherUser?.username || 'user'}
                 </span>
                 <button
                   type="button"
@@ -866,7 +1196,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                   disabled={followLoading}
                   className="px-2.5 py-1 text-[11px] font-bold bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-all cursor-pointer shrink-0"
                 >
-                  {followLoading ? '...' : 'Follow Back'}
+                  {followLoading ? '...' : t('action.followBack', 'Follow Back')}
                 </button>
               </div>
             )}
@@ -880,6 +1210,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
               conversation={conversation}
               replyingToMessage={replyingToMessage}
               onCancelReply={() => setReplyingToMessage(null)}
+              defaultTargetLang={activeTargetLang}
+              onOpenTranslatePicker={handleOpenTranslatePicker}
             />
           </div>
         )}
@@ -890,6 +1222,22 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
         imageUrl={viewingImage?.url || null}
         caption={viewingImage?.caption}
         onClose={() => setViewingImage(null)}
+      />
+
+      {/* All 106+ Languages Message Translation Picker Modal */}
+      <TranslateLanguageModal
+        isOpen={translatePickerState.isOpen}
+        selectedLanguageCode={translatePickerState.selectedCode}
+        title={translatePickerState.title}
+        onSelectLanguage={(lang) => {
+          translatePickerState.onPicked?.(lang);
+        }}
+        onClose={() =>
+          setTranslatePickerState((prev) => ({
+            ...prev,
+            isOpen: false,
+          }))
+        }
       />
     </div>
   );

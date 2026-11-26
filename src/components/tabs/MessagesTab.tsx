@@ -1,10 +1,17 @@
 import React, { useState } from 'react';
 import { Search, MessageSquarePlus, Radio, Trash2 } from 'lucide-react';
-import { Conversation, Profile, CallType, UserRelationStatus } from '@/src/types';
+import {
+  Conversation,
+  Profile,
+  CallType,
+  UserRelationStatus,
+  ReportedMessageContext,
+} from '@/src/types';
 import { ConversationItem } from '../chat/ConversationItem';
 import { ChatWindow } from '../chat/ChatWindow';
 import { ConversationSkeleton } from '../ui/LoadingSkeleton';
 import { EmptyState } from '../ui/EmptyState';
+import { useLanguage } from '@/src/lib/LanguageContext';
 
 interface MessagesTabProps {
   conversations: Conversation[];
@@ -22,7 +29,11 @@ interface MessagesTabProps {
   getRelationStatus?: (userId: string) => UserRelationStatus;
   onFollow?: (peer: Profile) => Promise<boolean>;
   onUnblock?: (peerId: string) => Promise<boolean>;
-  onReportUser?: (peer: Profile, conversationId?: string) => void;
+  onReportUser?: (
+    peer: Profile,
+    conversationId?: string,
+    reportedMessage?: ReportedMessageContext
+  ) => void;
 }
 
 export const MessagesTab: React.FC<MessagesTabProps> = ({
@@ -43,6 +54,7 @@ export const MessagesTab: React.FC<MessagesTabProps> = ({
   onUnblock,
   onReportUser,
 }) => {
+  const { t } = useLanguage();
   const [searchQuery, setSearchQuery] = useState('');
   const [convToDelete, setConvToDelete] = useState<Conversation | null>(null);
 
@@ -90,14 +102,10 @@ export const MessagesTab: React.FC<MessagesTabProps> = ({
 
             <div className="text-center space-y-1">
               <h3 className="text-base font-bold text-neutral-900 dark:text-neutral-100">
-                Delete Conversation?
+                {t('desc.deleteConversationTitle', 'Delete Conversation?')}
               </h3>
               <p className="text-xs text-neutral-500 dark:text-neutral-400">
-                Are you sure you want to delete this chat with{' '}
-                <span className="font-semibold text-neutral-800 dark:text-neutral-200">
-                  {convToDelete.other_member?.display_name || convToDelete.other_member?.username || 'User'}
-                </span>
-                ? All messages in this conversation will be permanently removed.
+                {convToDelete.other_member?.display_name || convToDelete.other_member?.username || 'User'}
               </p>
             </div>
 
@@ -106,13 +114,13 @@ export const MessagesTab: React.FC<MessagesTabProps> = ({
                 onClick={() => setConvToDelete(null)}
                 className="py-2.5 px-4 rounded-xl border border-neutral-300 dark:border-neutral-700 font-semibold text-xs text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
               >
-                Cancel
+                {t('action.cancel', 'Cancel')}
               </button>
               <button
                 onClick={confirmDelete}
                 className="py-2.5 px-4 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-xs shadow-md shadow-red-500/20 transition-all active:scale-95"
               >
-                Delete
+                {t('action.delete', 'Delete')}
               </button>
             </div>
           </div>
@@ -123,27 +131,27 @@ export const MessagesTab: React.FC<MessagesTabProps> = ({
       <div
         className={`${
           hasActiveChatOnMobile ? 'hidden md:flex' : 'flex'
-        } flex-col w-full md:w-80 lg:w-96 h-full bg-white dark:bg-neutral-900 border-r border-neutral-200 dark:border-neutral-800 shrink-0`}
+        } flex-col w-full md:w-80 lg:w-96 h-full bg-white dark:bg-neutral-900 border-e border-neutral-200 dark:border-neutral-800 shrink-0`}
       >
         {/* Messages Header */}
         <div className="p-4 border-b border-neutral-200 dark:border-neutral-800 flex items-center justify-between">
           <div>
             <h2 className="text-xl font-extrabold text-neutral-900 dark:text-neutral-100 tracking-tight">
-              Messages
+              {t('title.messages', 'Messages')}
             </h2>
             <p className="text-xs text-neutral-500 font-medium">
-              {conversations.length} conversation{conversations.length === 1 ? '' : 's'}
+              {conversations.length} • {t('nav.messages', 'Messages')}
             </p>
           </div>
 
           <div className="flex items-center gap-1.5">
             <button
               onClick={onOpenSearch}
-              title="Start new chat"
+              title={t('action.newChat', 'New Chat')}
               className="p-2.5 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white shadow-md shadow-blue-500/20 transition-all hover:scale-105 active:scale-95 flex items-center gap-1.5 text-xs font-semibold"
             >
               <MessageSquarePlus className="w-4 h-4" />
-              <span>New Chat</span>
+              <span>{t('action.newChat', 'New Chat')}</span>
             </button>
           </div>
         </div>
@@ -151,13 +159,13 @@ export const MessagesTab: React.FC<MessagesTabProps> = ({
         {/* Search Filter Input */}
         <div className="px-4 py-2.5">
           <div className="relative">
-            <Search className="w-4 h-4 text-neutral-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+            <Search className="w-4 h-4 text-neutral-400 absolute start-3.5 top-1/2 -translate-y-1/2" />
             <input
               type="text"
-              placeholder="Search conversations..."
+              placeholder={t('desc.searchConversations', 'Search conversations...')}
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full pl-9 pr-3.5 py-2 text-base rounded-xl bg-neutral-100 dark:bg-neutral-800/80 border border-transparent focus:border-neutral-300 dark:focus:border-neutral-700 text-neutral-900 dark:text-neutral-100 placeholder-neutral-400 focus:outline-none focus:bg-white dark:focus:bg-neutral-900 transition-all"
+              className="w-full ps-9 pe-3.5 py-2 text-base rounded-xl bg-neutral-100 dark:bg-neutral-800/80 border border-transparent focus:border-neutral-300 dark:focus:border-neutral-700 text-neutral-900 dark:text-neutral-100 placeholder-neutral-400 focus:outline-none focus:bg-white dark:focus:bg-neutral-900 transition-all"
             />
           </div>
         </div>
@@ -182,11 +190,11 @@ export const MessagesTab: React.FC<MessagesTabProps> = ({
             <EmptyState
               type="no-conversations"
               onAction={onOpenSearch}
-              actionLabel="Find People to Chat"
+              actionLabel={t('desc.findPeopleToChat', 'Find People to Chat')}
             />
           ) : (
             <div className="p-8 text-center text-xs text-neutral-400">
-              No conversations found matching &quot;{searchQuery}&quot;
+              {t('desc.noUsersFound', 'No user found')} &quot;{searchQuery}&quot;
             </div>
           )}
         </div>
@@ -208,6 +216,7 @@ export const MessagesTab: React.FC<MessagesTabProps> = ({
           onStartCall={onStartCall}
           onOpenProfileView={onOpenProfileView}
           onDeleteConversation={onDeleteConversation}
+          onOpenForwardModal={onOpenForwardModal}
           relationStatus={activeRelationStatus}
           onFollow={onFollow}
           onUnblock={onUnblock}

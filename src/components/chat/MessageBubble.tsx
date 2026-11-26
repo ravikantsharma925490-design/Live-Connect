@@ -1,6 +1,6 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react';
 import { Message, Profile, CallType, Conversation } from '@/src/types';
-import { cn, formatTime } from '@/src/lib/utils';
+import { cn, formatTime, formatMessagePreview } from '@/src/lib/utils';
 import { UserAvatar } from '../ui/UserAvatar';
 import {
   Check,
@@ -18,7 +18,14 @@ import {
   PinOff,
   Reply,
   Share2,
+  Flag,
+  Languages,
+  Globe,
+  X,
 } from 'lucide-react';
+import { useLanguage } from '@/src/lib/LanguageContext';
+import { WorldLanguage } from '@/src/lib/worldData';
+import { getCachedTranslation, translateChatText } from '@/src/lib/messageTranslation';
 
 // WhatsApp-style accurate SVG call icons
 const WhatsAppMissedVoiceIcon = ({ className }: { className?: string }) => (
@@ -540,10 +547,28 @@ interface MessageBubbleProps {
   onForwardMessage?: (message: Message) => void;
   onReactMessage?: (messageId: string, emoji: string) => void;
   onPinMessage?: (message: Message) => void;
+  onReportMessage?: (message: Message) => void;
+  resolveReplyMessage?: (id: string) => Message | undefined;
   isPinned?: boolean;
   onOpenProfileView?: (profile: Profile) => void;
   shouldAnimate?: boolean;
+  defaultTargetLang?: WorldLanguage;
+  autoTranslate?: boolean;
+  onOpenTranslatePicker?: (
+    selectedCode: string,
+    onPicked: (lang: WorldLanguage) => void,
+    title?: string
+  ) => void;
 }
+
+const SWIPE_REPLY_THRESHOLD = 52;
+const SWIPE_MAX_OFFSET = 78;
+const HOLD_DURATION_MS = 1000;
+
+const isInteractiveTarget = (target: EventTarget | null): boolean => {
+  if (!target || !(target instanceof Element)) return false;
+  return Boolean(target.closest('button, a, video, audio, input, textarea'));
+};
 
 const MessageBubbleComponent: React.FC<MessageBubbleProps> = ({
   message,
@@ -553,106 +578,277 @@ const MessageBubbleComponent: React.FC<MessageBubbleProps> = ({
   onStartCall,
   onViewImage,
   otherUser,
-  conversation,
   onReplyMessage,
   onForwardMessage,
-  onReactMessage,
   onPinMessage,
+  onReportMessage,
+  resolveReplyMessage,
   isPinned = false,
-  onOpenProfileView,
   shouldAnimate,
+  defaultTargetLang,
+  autoTranslate = false,
+  onOpenTranslatePicker,
 }) => {
+  const { t, currentLanguage } = useLanguage();
+  const resolvedTargetLang = defaultTargetLang || currentLanguage;
   const [shouldAnimateOnMount] = useState(
     () => Boolean(shouldAnimate ?? (message as Message & { should_animate?: boolean }).should_animate)
   );
   const [showConfirm, setShowConfirm] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
+  const [menuCoords, setMenuCoords] = useState<{ top: number; left: number } | null>(null);
   const [copied, setCopied] = useState(false);
+  const [swipeOffset, setSwipeOffset] = useState(0);
+  const [isSwiping, setIsSwiping] = useState(false);
+  const [translation, setTranslation] = useState<{
+    text: string;
+    detectedLanguage: string;
+    lang: WorldLanguage;
+  } | null>(null);
+  const [showTranslation, setShowTranslation] = useState(false);
+  const [isTranslating, setIsTranslating] = useState(false);
+  const [translateError, setTranslateError] = useState<string | null>(null);
+  const [copiedTranslation, setCopiedTranslation] = useState(false);
+  const activeTranslateReqRef = useRef(0);
+
+  const rowRef = useRef<HTMLDivElement | null>(null);
+  const bubbleRef = useRef<HTMLDivElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
-  const longPressTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const touchStartPosRef = useRef<{ x: number; y: number } | null>(null);
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const swipeOffsetRef = useRef(0);
+  const suppressNextClickRef = useRef(false);
+  const mouseStartPosRef = useRef<{ x: number; y: number } | null>(null);
+  const touchGestureRef = useRef<{
+    startX: number;
+    startY: number;
+    mode: 'pending' | 'swipe' | 'scroll';
+    thresholdHit: boolean;
+  } | null>(null);
 
-  // Close menu when clicking outside
-  useEffect(() => {
-    if (!showMenu) return;
-    const handleClickOutside = (e: MouseEvent | TouchEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setShowMenu(false);
-        setShowConfirm(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClickOutside);
-    document.addEventListener('touchstart', handleClickOutside);
-    return () => {
-      document.removeEventListener('mousedown', handleClickOutside);
-      document.removeEventListener('touchstart', handleClickOutside);
-      if (longPressTimerRef.current) {
-        clearTimeout(longPressTimerRef.current);
-      }
-    };
-  }, [showMenu]);
-
-  const handleTouchStart = (e: React.TouchEvent) => {
-    if (e.touches[0]) {
-      touchStartPosRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
-    }
-    if (longPressTimerRef.current) {
-      clearTimeout(longPressTimerRef.current);
-    }
-    // 1-second long press
-    longPressTimerRef.current = setTimeout(() => {
-      try {
-        if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
-          navigator.vibrate?.(50);
-        }
-      } catch (err) {}
-      setShowMenu(true);
-    }, 1000);
-  };
-
-  const handleTouchMove = (e: React.TouchEvent) => {
-    if (touchStartPosRef.current && e.touches[0]) {
-      const dx = Math.abs(e.touches[0].clientX - touchStartPosRef.current.x);
-      const dy = Math.abs(e.touches[0].clientY - touchStartPosRef.current.y);
-      if (dx > 10 || dy > 10) {
-        handleTouchEnd();
-      }
-    }
-  };
-
-  const handleTouchEnd = () => {
+  const clearHoldTimer = useCallback(() => {
     if (longPressTimerRef.current) {
       clearTimeout(longPressTimerRef.current);
       longPressTimerRef.current = null;
     }
+  }, []);
+
+  const closeMenu = useCallback(() => {
+    setShowMenu(false);
+    setShowConfirm(false);
+    setMenuCoords(null);
+  }, []);
+
+  const openMenuAtElement = useCallback(
+    (anchorEl?: HTMLElement | null) => {
+      const targetEl = anchorEl || bubbleRef.current || rowRef.current;
+      if (targetEl && typeof window !== 'undefined') {
+        const rect = targetEl.getBoundingClientRect();
+        const estWidth = 196;
+        const estHeight = 250;
+        const pad = 12;
+
+        let left = isMine ? rect.right - estWidth : rect.left;
+        left = Math.max(pad, Math.min(left, window.innerWidth - estWidth - pad));
+
+        let top = rect.top - estHeight - 8;
+        if (top < pad) {
+          top = rect.bottom + 8;
+        }
+        top = Math.max(pad, Math.min(top, window.innerHeight - estHeight - pad));
+
+        setMenuCoords({ top, left });
+      } else {
+        setMenuCoords({ top: 120, left: 24 });
+      }
+      setShowConfirm(false);
+      setShowMenu(true);
+    },
+    [isMine]
+  );
+
+  // Refine floating menu coordinates based on exact rendered width/height
+  useLayoutEffect(() => {
+    if (!showMenu || !menuRef.current || typeof window === 'undefined') return;
+    const anchorEl = bubbleRef.current || rowRef.current;
+    if (!anchorEl) return;
+    const anchorRect = anchorEl.getBoundingClientRect();
+    const menuRect = menuRef.current.getBoundingClientRect();
+    const pad = 12;
+
+    let left = isMine ? anchorRect.right - menuRect.width : anchorRect.left;
+    left = Math.max(pad, Math.min(left, window.innerWidth - menuRect.width - pad));
+
+    let top = anchorRect.top - menuRect.height - 8;
+    if (top < pad) {
+      top = anchorRect.bottom + 8;
+    }
+    if (top + menuRect.height > window.innerHeight - pad) {
+      top = Math.max(pad, window.innerHeight - menuRect.height - pad);
+    }
+
+    setMenuCoords((prev) =>
+      prev && Math.abs(prev.top - top) < 2 && Math.abs(prev.left - left) < 2
+        ? prev
+        : { top, left }
+    );
+  }, [showMenu, showConfirm, isMine]);
+
+  // Close menu on outside click or Escape
+  useEffect(() => {
+    if (!showMenu) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') closeMenu();
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [showMenu, closeMenu]);
+
+  useEffect(() => {
+    return () => {
+      clearHoldTimer();
+    };
+  }, [clearHoldTimer]);
+
+  const handleTouchStart = (e: React.TouchEvent) => {
+    if (showMenu || e.touches.length !== 1 || isInteractiveTarget(e.target)) return;
+    const touch = e.touches[0];
+    if (!touch) return;
+
+    touchGestureRef.current = {
+      startX: touch.clientX,
+      startY: touch.clientY,
+      mode: 'pending',
+      thresholdHit: false,
+    };
+    clearHoldTimer();
+    longPressTimerRef.current = setTimeout(() => {
+      longPressTimerRef.current = null;
+      touchGestureRef.current = null;
+      suppressNextClickRef.current = true;
+      setTimeout(() => {
+        suppressNextClickRef.current = false;
+      }, 450);
+      try {
+        if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+          navigator.vibrate?.(45);
+        }
+      } catch {}
+      openMenuAtElement(bubbleRef.current || rowRef.current);
+    }, HOLD_DURATION_MS);
+  };
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    const gesture = touchGestureRef.current;
+    const touch = e.touches[0];
+    if (!gesture || !touch) return;
+
+    const dx = touch.clientX - gesture.startX;
+    const dy = touch.clientY - gesture.startY;
+    const absDx = Math.abs(dx);
+    const absDy = Math.abs(dy);
+
+    if (absDx > 8 || absDy > 8) {
+      clearHoldTimer();
+    }
+
+    if (gesture.mode === 'pending') {
+      if (onReplyMessage && dx > 10 && absDx > absDy * 1.2) {
+        gesture.mode = 'swipe';
+        setIsSwiping(true);
+      } else if (absDy > 10 || dx < -10) {
+        gesture.mode = 'scroll';
+      }
+    }
+
+    if (gesture.mode === 'swipe') {
+      const clamped =
+        dx <= 0
+          ? 0
+          : dx <= SWIPE_REPLY_THRESHOLD
+          ? dx
+          : Math.min(SWIPE_MAX_OFFSET, SWIPE_REPLY_THRESHOLD + (dx - SWIPE_REPLY_THRESHOLD) * 0.45);
+      swipeOffsetRef.current = clamped;
+      setSwipeOffset(clamped);
+
+      if (clamped >= SWIPE_REPLY_THRESHOLD && !gesture.thresholdHit) {
+        gesture.thresholdHit = true;
+        try {
+          if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+            navigator.vibrate?.(20);
+          }
+        } catch {}
+      } else if (clamped < SWIPE_REPLY_THRESHOLD - 6) {
+        gesture.thresholdHit = false;
+      }
+    }
+  };
+
+  const handleTouchEndOrCancel = () => {
+    clearHoldTimer();
+    const gesture = touchGestureRef.current;
+    touchGestureRef.current = null;
+
+    if (gesture?.mode === 'swipe') {
+      const triggered = gesture.thresholdHit || swipeOffsetRef.current >= SWIPE_REPLY_THRESHOLD;
+      swipeOffsetRef.current = 0;
+      setIsSwiping(false);
+      setSwipeOffset(0);
+
+      if (triggered && onReplyMessage) {
+        suppressNextClickRef.current = true;
+        setTimeout(() => {
+          suppressNextClickRef.current = false;
+        }, 300);
+        onReplyMessage(message);
+      }
+    }
+  };
+
+  const handleMouseDown = (e: React.MouseEvent) => {
+    if (e.button !== 0 || showMenu || isInteractiveTarget(e.target)) return;
+    mouseStartPosRef.current = { x: e.clientX, y: e.clientY };
+    clearHoldTimer();
+    longPressTimerRef.current = setTimeout(() => {
+      longPressTimerRef.current = null;
+      mouseStartPosRef.current = null;
+      suppressNextClickRef.current = true;
+      setTimeout(() => {
+        suppressNextClickRef.current = false;
+      }, 450);
+      openMenuAtElement(bubbleRef.current || rowRef.current);
+    }, HOLD_DURATION_MS);
+  };
+
+  const handleMouseMove = (e: React.MouseEvent) => {
+    if (!mouseStartPosRef.current) return;
+    const dx = Math.abs(e.clientX - mouseStartPosRef.current.x);
+    const dy = Math.abs(e.clientY - mouseStartPosRef.current.y);
+    if (dx > 8 || dy > 8) {
+      clearHoldTimer();
+      mouseStartPosRef.current = null;
+    }
+  };
+
+  const handleMouseUpOrLeave = () => {
+    clearHoldTimer();
+    mouseStartPosRef.current = null;
   };
 
   const handleContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
-    handleTouchEnd();
-    setShowMenu(true);
-  };
-
-  const handleCopy = () => {
-    try {
-      if (navigator?.clipboard?.writeText) {
-        navigator.clipboard.writeText(message.content);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
-      }
-    } catch (e) {}
-    setShowMenu(false);
+    clearHoldTimer();
+    openMenuAtElement(bubbleRef.current || rowRef.current);
   };
 
   const handleDelete = (e?: React.MouseEvent) => {
     e?.stopPropagation();
     if (showConfirm) {
       onDeleteMessage?.(message.id);
-      setShowConfirm(false);
-      setShowMenu(false);
+      closeMenu();
     } else {
       setShowConfirm(true);
-      setTimeout(() => setShowConfirm(false), 4500);
     }
   };
 
@@ -690,7 +886,7 @@ const MessageBubbleComponent: React.FC<MessageBubbleProps> = ({
       subtitle = isMissed ? 'No answer' : details;
     } else {
       if (isMissed) {
-        title = isVideo ? 'Missed video call' : 'Missed voice call';
+        title = isVideo ? t('label.missedVideoCall') : t('label.missedAudioCall');
         subtitle = 'Tap to call back';
       } else {
         title = isVideo ? 'Video call' : 'Voice call';
@@ -726,7 +922,7 @@ const MessageBubbleComponent: React.FC<MessageBubbleProps> = ({
                 title="Click again to confirm delete"
               >
                 <Trash2 className="w-3 h-3" />
-                <span>Delete</span>
+                <span>{t('action.delete')}</span>
               </button>
             ) : (
               <div className="relative" ref={menuRef}>
@@ -833,7 +1029,7 @@ const MessageBubbleComponent: React.FC<MessageBubbleProps> = ({
                 title="Click again to confirm delete"
               >
                 <Trash2 className="w-3 h-3" />
-                <span>Delete</span>
+                <span>{t('action.delete')}</span>
               </button>
             ) : (
               <div className="relative" ref={menuRef}>
@@ -972,317 +1168,541 @@ const MessageBubbleComponent: React.FC<MessageBubbleProps> = ({
     }
   }
 
+  // 6. Standard text & reply parsing
+  let replyId = message.reply_to_message_id || null;
+  let textBody = message.content || '';
+  if (!isSticker && !isImage && !isVideo && !isVoice && textBody.startsWith('[REPLY:')) {
+    const closing = textBody.indexOf(']');
+    if (closing !== -1) {
+      replyId = replyId || textBody.substring(7, closing);
+      textBody = textBody.substring(closing + 1).trim();
+    }
+  }
+
+  const copyableText = isSticker
+    ? `${stickerIcon} ${stickerLabel}`.trim()
+    : isImage
+    ? imageCaption.trim()
+    : isVideo
+    ? videoCaption.trim()
+    : isVoice
+    ? ''
+    : textBody.trim();
+
+  const translatableText =
+    !isSticker && !isVoice
+      ? isImage
+        ? imageCaption.trim()
+        : isVideo
+        ? videoCaption.trim()
+        : textBody.trim()
+      : '';
+
+  const canCopyText = Boolean(copyableText);
+
+  const handleTranslate = useCallback(
+    async (targetLang: WorldLanguage) => {
+      if (!translatableText) return;
+      const cached = getCachedTranslation(translatableText, targetLang.code);
+      if (cached) {
+        activeTranslateReqRef.current += 1;
+        setTranslation({
+          text: cached.translatedText,
+          detectedLanguage: cached.detectedLanguage,
+          lang: targetLang,
+        });
+        setTranslateError(null);
+        setIsTranslating(false);
+        setShowTranslation(true);
+        return;
+      }
+
+      const reqId = ++activeTranslateReqRef.current;
+      setShowTranslation(true);
+      setIsTranslating(true);
+      setTranslateError(null);
+
+      try {
+        const result = await translateChatText({
+          text: translatableText,
+          targetLang,
+        });
+        if (activeTranslateReqRef.current !== reqId) return;
+        setTranslation({
+          text: result.translatedText,
+          detectedLanguage: result.detectedLanguage,
+          lang: targetLang,
+        });
+        setTranslateError(null);
+      } catch (err: any) {
+        if (activeTranslateReqRef.current !== reqId) return;
+        setTranslateError(err?.message || 'Could not translate message.');
+      } finally {
+        if (activeTranslateReqRef.current === reqId) {
+          setIsTranslating(false);
+        }
+      }
+    },
+    [translatableText]
+  );
+
+  useEffect(() => {
+    if (!autoTranslate || isMine || !translatableText || !resolvedTargetLang) return;
+    void handleTranslate(resolvedTargetLang);
+  }, [autoTranslate, isMine, translatableText, resolvedTargetLang?.code, handleTranslate]);
+
+  const handleCopy = (e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    if (!copyableText) return;
+    try {
+      if (navigator?.clipboard?.writeText) {
+        void navigator.clipboard.writeText(copyableText);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1800);
+      }
+    } catch {}
+    closeMenu();
+  };
+
+  const handleCopyTranslation = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!translation?.text) return;
+    try {
+      if (navigator?.clipboard?.writeText) {
+        void navigator.clipboard.writeText(translation.text);
+        setCopiedTranslation(true);
+        setTimeout(() => setCopiedTranslation(false), 1800);
+      }
+    } catch {}
+  };
+
+  const renderTranslationBlock = (onColoredBubble: boolean) => {
+    if (!showTranslation && !isTranslating && !translateError) return null;
+    const activeLang = translation?.lang || resolvedTargetLang;
+
+    return (
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className={cn(
+          'mt-2 pt-2 border-t space-y-1 text-xs',
+          onColoredBubble
+            ? 'border-white/25 text-white'
+            : 'border-neutral-200 dark:border-neutral-700/80 text-neutral-800 dark:text-neutral-100'
+        )}
+      >
+        <div className="flex items-center justify-between gap-2 text-[10.5px]">
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              if (onOpenTranslatePicker) {
+                onOpenTranslatePicker(
+                  activeLang.code,
+                  (picked) => void handleTranslate(picked),
+                  t('action.translateTo', 'Translate Message To')
+                );
+              }
+            }}
+            className={cn(
+              'inline-flex items-center gap-1 font-semibold px-1.5 py-0.5 rounded-md transition-colors',
+              onOpenTranslatePicker && 'cursor-pointer',
+              onColoredBubble
+                ? 'bg-white/15 hover:bg-white/25 text-blue-50'
+                : 'bg-blue-50 dark:bg-blue-950/60 hover:bg-blue-100 dark:hover:bg-blue-900/60 text-blue-600 dark:text-blue-400'
+            )}
+            title="Change translation language (106+)"
+          >
+            <Languages className="w-3 h-3 shrink-0" />
+            <span>
+              {activeLang.flag} {activeLang.nativeName}
+            </span>
+          </button>
+
+          <div className="flex items-center gap-1 shrink-0">
+            {translation?.text && !isTranslating && !translateError && (
+              <button
+                type="button"
+                onClick={handleCopyTranslation}
+                className={cn(
+                  'p-1 rounded-md transition-colors cursor-pointer',
+                  onColoredBubble
+                    ? 'hover:bg-white/20 text-blue-100'
+                    : 'hover:bg-neutral-200/70 dark:hover:bg-neutral-700 text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200'
+                )}
+                title="Copy translation"
+              >
+                {copiedTranslation ? (
+                  <Check className="w-3 h-3 text-emerald-400" />
+                ) : (
+                  <Copy className="w-3 h-3" />
+                )}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                activeTranslateReqRef.current += 1;
+                setIsTranslating(false);
+                setShowTranslation(false);
+                setTranslateError(null);
+              }}
+              className={cn(
+                'p-1 rounded-md transition-colors cursor-pointer',
+                onColoredBubble
+                  ? 'hover:bg-white/20 text-blue-100'
+                  : 'hover:bg-neutral-200/70 dark:hover:bg-neutral-700 text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200'
+              )}
+              title="Hide translation"
+            >
+              <X className="w-3 h-3" />
+            </button>
+          </div>
+        </div>
+
+        {isTranslating ? (
+          <div
+            className={cn(
+              'flex items-center gap-1.5 text-xs py-0.5',
+              onColoredBubble ? 'text-blue-100' : 'text-neutral-500 dark:text-neutral-400'
+            )}
+          >
+            <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+            <span>Translating to {activeLang.nativeName}...</span>
+          </div>
+        ) : translateError ? (
+          <div className="flex items-center justify-between gap-2 text-[11px] py-0.5">
+            <span className={onColoredBubble ? 'text-amber-200' : 'text-rose-600 dark:text-rose-400'}>
+              {translateError}
+            </span>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                void handleTranslate(activeLang);
+              }}
+              className={cn(
+                'font-bold underline shrink-0 cursor-pointer',
+                onColoredBubble ? 'text-white' : 'text-blue-600 dark:text-blue-400'
+              )}
+            >
+              Retry
+            </button>
+          </div>
+        ) : translation ? (
+          <p
+            dir={translation.lang.dir}
+            className="text-sm whitespace-pre-wrap leading-relaxed select-text"
+          >
+            {translation.text}
+          </p>
+        ) : null}
+      </div>
+    );
+  };
+
+  const resolvedReplyMsg =
+    message.reply_to_message ||
+    (replyId && resolveReplyMessage ? resolveReplyMessage(replyId) : undefined);
+
+  const replySender =
+    resolvedReplyMsg?.sender?.display_name ||
+    resolvedReplyMsg?.sender?.username ||
+    (resolvedReplyMsg
+      ? otherUser && resolvedReplyMsg.sender_id === otherUser.id
+        ? otherUser.display_name || otherUser.username || 'User'
+        : 'You'
+      : 'Message');
+
+  const replySnippet = resolvedReplyMsg?.content
+    ? formatMessagePreview(resolvedReplyMsg.content)
+    : '';
+
+  const swipeProgress = Math.min(1, swipeOffset / SWIPE_REPLY_THRESHOLD);
+
+  const renderPinnedPill = (onColoredBubble: boolean) => {
+    if (!isPinned) return null;
+    return (
+      <span
+        className={cn(
+          'inline-flex items-center gap-0.5 font-semibold mr-1',
+          onColoredBubble ? 'text-amber-200' : 'text-amber-500 dark:text-amber-400'
+        )}
+      >
+        <Pin className="w-3 h-3 fill-current" />
+        <span>Pinned</span>
+      </span>
+    );
+  };
+
+  const renderOptionsTrigger = () => (
+    <div className="flex items-center gap-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 focus-within:opacity-100 transition-opacity shrink-0">
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          if (showMenu) {
+            closeMenu();
+          } else {
+            openMenuAtElement(bubbleRef.current || e.currentTarget);
+          }
+        }}
+        className="p-1.5 rounded-lg text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 hover:bg-neutral-200/80 dark:hover:bg-neutral-800 transition-colors cursor-pointer"
+        title="Message options"
+      >
+        <MoreHorizontal className="w-4 h-4" />
+      </button>
+    </div>
+  );
+
   return (
     <div
+      ref={rowRef}
       id={`msg-${message.id}`}
       onTouchStart={handleTouchStart}
       onTouchMove={handleTouchMove}
-      onTouchEnd={handleTouchEnd}
-      onTouchCancel={handleTouchEnd}
+      onTouchEnd={handleTouchEndOrCancel}
+      onTouchCancel={handleTouchEndOrCancel}
+      onMouseDown={handleMouseDown}
+      onMouseMove={handleMouseMove}
+      onMouseUp={handleMouseUpOrLeave}
+      onMouseLeave={handleMouseUpOrLeave}
       onContextMenu={handleContextMenu}
       className={cn(
-        'flex items-end gap-1.5 my-1.5 group relative transition-colors rounded-2xl p-0.5',
+        'flex items-end gap-1.5 my-1.5 group relative transition-colors rounded-2xl p-0.5 touch-pan-y select-none [-webkit-touch-callout:none]',
         shouldAnimateOnMount && 'animate-in fade-in duration-150',
         isMine ? 'justify-end' : 'justify-start'
       )}
     >
-      {/* Left Avatar for receiver */}
-      {!isMine && showAvatar && (
-        <UserAvatar
-          src={message.sender?.avatar_url}
-          name={message.sender?.display_name || 'User'}
-          id={message.sender_id}
-          className="w-7 h-7 mb-1 shadow-xs"
-        />
-      )}
-
-      {/* Options Menu for Sender */}
-      {isMine && (
-        <div className="flex items-center gap-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
-          {showConfirm ? (
-            <button
-              onClick={handleDelete}
-              className="text-[11px] bg-rose-600 hover:bg-rose-700 active:scale-95 text-white font-bold px-2 py-1 rounded-xl shadow-md transition-all flex items-center gap-1 animate-pulse"
-              title="Click again to confirm delete"
-            >
-              <Trash2 className="w-3 h-3" />
-              <span>Delete</span>
-            </button>
-          ) : (
-            <div className="relative" ref={menuRef}>
-              <button
-                onClick={() => setShowMenu(!showMenu)}
-                className="p-1.5 rounded-lg text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 hover:bg-neutral-200/80 dark:hover:bg-neutral-800 transition-colors cursor-pointer"
-                title="Message options"
-              >
-                <MoreHorizontal className="w-4 h-4" />
-              </button>
-
-              {showMenu && (
-                <div
-                  className={cn(
-                    'absolute bottom-full mb-1 z-30 min-w-[140px] p-1 rounded-xl bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 shadow-xl space-y-0.5 animate-in fade-in zoom-in-95 duration-100',
-                    isMine ? 'right-0' : 'left-0'
-                  )}
-                >
-                  {onReplyMessage && (
-                    <button
-                      onClick={() => {
-                        setShowMenu(false);
-                        onReplyMessage(message);
-                      }}
-                      className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs font-medium text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-lg transition-colors cursor-pointer"
-                    >
-                      <Reply className="w-3.5 h-3.5 text-blue-500" />
-                      <span>Reply</span>
-                    </button>
-                  )}
-
-                  {onPinMessage && (
-                    <button
-                      onClick={() => {
-                        setShowMenu(false);
-                        onPinMessage(message);
-                      }}
-                      className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs font-medium text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-lg transition-colors cursor-pointer"
-                    >
-                      {isPinned ? (
-                        <>
-                          <PinOff className="w-3.5 h-3.5 text-amber-500" />
-                          <span>Unpin</span>
-                        </>
-                      ) : (
-                        <>
-                          <Pin className="w-3.5 h-3.5 text-amber-500" />
-                          <span>Pin Message</span>
-                        </>
-                      )}
-                    </button>
-                  )}
-
-                  {onForwardMessage && (
-                    <button
-                      onClick={() => {
-                        setShowMenu(false);
-                        onForwardMessage(message);
-                      }}
-                      className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs font-medium text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-lg transition-colors cursor-pointer"
-                    >
-                      <Share2 className="w-3.5 h-3.5 text-purple-500" />
-                      <span>Forward</span>
-                    </button>
-                  )}
-
-                  {!isVoice && !isImage && (
-                    <button
-                      onClick={handleCopy}
-                      className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs font-medium text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-lg transition-colors cursor-pointer"
-                    >
-                      {copied ? (
-                        <>
-                          <Check className="w-3.5 h-3.5 text-emerald-500" />
-                          <span className="text-emerald-600 dark:text-emerald-400">Copied!</span>
-                        </>
-                      ) : (
-                        <>
-                          <Copy className="w-3.5 h-3.5" />
-                          <span>Copy Text</span>
-                        </>
-                      )}
-                    </button>
-                  )}
-
-                  {onDeleteMessage && (
-                    <button
-                      onClick={handleDelete}
-                      className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs font-medium text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-lg transition-colors cursor-pointer"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                      <span>Delete</span>
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Main Content Bubble */}
-      {isSticker ? (
-        /* Render Expressive Sticker */
-        <div className="flex flex-col items-end group/stk">
-          <div className="text-6xl p-2 select-none filter drop-shadow-md hover:scale-110 transition-transform duration-200 cursor-default animate-in zoom-in-75">
-            {stickerIcon}
-          </div>
-          <div
-            className={cn(
-              'flex items-center gap-1 text-[10px] select-none px-1.5 py-0.5 rounded-md',
-              isMine ? 'text-neutral-500' : 'text-neutral-400'
-            )}
-          >
-            <span>{formatTime(message.created_at)}</span>
-            {isMine && (
-              <span className="inline-flex items-center ml-0.5">
-                {message.is_read ? (
-                  <CheckCheck className="w-3.5 h-3.5 text-green-500 dark:text-green-400" strokeWidth={2.5} />
-                ) : (
-                  <Check className="w-3 h-3 text-neutral-400" strokeWidth={2} />
-                )}
-              </span>
-            )}
-          </div>
-        </div>
-      ) : isImage ? (
-        /* Render Photo / Image Attachment */
+      {/* Swipe-Right Reply Indicator */}
+      {swipeOffset > 4 && (
         <div
-          className={cn(
-            'rounded-2xl shadow-xs overflow-hidden w-[280px] sm:w-[320px] border transition-all',
-            isMine
-              ? 'bg-blue-600 text-white rounded-br-xs border-blue-500'
-              : 'bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 border-neutral-200/90 dark:border-neutral-700/60 rounded-bl-xs'
-          )}
+          className="absolute left-1.5 top-1/2 -translate-y-1/2 pointer-events-none z-10 flex items-center justify-center"
+          style={{
+            opacity: Math.min(1, swipeProgress * 1.15),
+            transform: `translate3d(0, -50%, 0) scale(${0.65 + swipeProgress * 0.4})`,
+          }}
         >
           <div
-            onClick={() => onViewImage?.(imageUrl, imageCaption)}
-            className="relative cursor-pointer group/img overflow-hidden w-full min-h-[180px] bg-neutral-900/10 dark:bg-neutral-800/50 flex items-center justify-center"
+            className={cn(
+              'w-8 h-8 rounded-full flex items-center justify-center shadow-md transition-colors',
+              swipeProgress >= 1
+                ? 'bg-blue-600 text-white'
+                : 'bg-neutral-200 dark:bg-neutral-700 text-blue-600 dark:text-blue-400'
+            )}
           >
-            <img
-              src={imageUrl}
-              alt={imageCaption || 'Attached photo'}
-              className="w-full max-h-72 object-cover transition-transform duration-300 group-hover/img:scale-102"
-              loading="lazy"
-            />
-            <div className="absolute inset-0 bg-black/0 group-hover/img:bg-black/20 transition-colors flex items-center justify-center opacity-0 group-hover/img:opacity-100">
-              <div className="p-2 rounded-full bg-black/60 text-white backdrop-blur-xs">
-                <Maximize2 className="w-4 h-4" />
+            <Reply className="w-4 h-4" />
+          </div>
+        </div>
+      )}
+
+      {/* Sliding Row Content Wrapper */}
+      <div
+        style={{
+          transform: swipeOffset > 0 ? `translate3d(${swipeOffset}px, 0, 0)` : undefined,
+          transition: isSwiping ? 'none' : 'transform 220ms cubic-bezier(0.22, 1, 0.36, 1)',
+        }}
+        className={cn(
+          'flex items-end gap-1.5 max-w-full min-w-0',
+          isMine ? 'justify-end' : 'justify-start'
+        )}
+      >
+        {/* Left Avatar for receiver */}
+        {!isMine && showAvatar && (
+          <UserAvatar
+            src={message.sender?.avatar_url}
+            name={message.sender?.display_name || 'User'}
+            id={message.sender_id}
+            className="w-7 h-7 mb-1 shadow-xs shrink-0"
+          />
+        )}
+
+        {/* Options trigger for Sender (left of bubble) */}
+        {isMine && renderOptionsTrigger()}
+
+        {/* Main Content Bubble Wrapper (anchor for floating menu) */}
+        <div
+          ref={bubbleRef}
+          onClickCapture={(e) => {
+            if (suppressNextClickRef.current) {
+              e.stopPropagation();
+              e.preventDefault();
+            }
+          }}
+          className={cn(
+            'min-w-0',
+            !isSticker && !isImage && !isVideo && !isVoice && 'max-w-[82%] md:max-w-[65%]'
+          )}
+        >
+          {isSticker ? (
+            /* Render Expressive Sticker */
+            <div className="flex flex-col items-end group/stk select-none">
+              <div className="text-6xl p-2 select-none filter drop-shadow-md hover:scale-110 transition-transform duration-200 cursor-default animate-in zoom-in-75">
+                {stickerIcon}
+              </div>
+              <div
+                className={cn(
+                  'flex items-center gap-1 text-[10px] select-none px-1.5 py-0.5 rounded-md',
+                  isMine ? 'text-neutral-500' : 'text-neutral-400'
+                )}
+              >
+                {renderPinnedPill(false)}
+                <span>{formatTime(message.created_at)}</span>
+                {isMine && (
+                  <span className="inline-flex items-center ml-0.5">
+                    {message.is_read ? (
+                      <CheckCheck className="w-3.5 h-3.5 text-green-500 dark:text-green-400" strokeWidth={2.5} />
+                    ) : (
+                      <Check className="w-3 h-3 text-neutral-400" strokeWidth={2} />
+                    )}
+                  </span>
+                )}
               </div>
             </div>
-          </div>
-
-          {/* Caption & Timestamp */}
-          <div className="p-2.5 space-y-1">
-            {imageCaption && (
-              <p className="text-sm whitespace-pre-wrap leading-relaxed">{imageCaption}</p>
-            )}
+          ) : isImage ? (
+            /* Render Photo / Image Attachment */
             <div
               className={cn(
-                'flex items-center justify-end gap-1 text-[10px] select-none',
-                isMine ? 'text-blue-100/90' : 'text-neutral-400'
+                'rounded-2xl shadow-xs overflow-hidden w-[280px] sm:w-[320px] border transition-all select-none',
+                isMine
+                  ? 'bg-blue-600 text-white rounded-br-xs border-blue-500'
+                  : 'bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 border-neutral-200/90 dark:border-neutral-700/60 rounded-bl-xs'
               )}
             >
-              <span>{formatTime(message.created_at)}</span>
-              {isMine && (
-                <span className="inline-flex items-center ml-0.5">
-                  {message.is_read ? (
-                    <CheckCheck className="w-4 h-4 text-green-300" strokeWidth={2.5} />
-                  ) : (
-                    <Check className="w-3.5 h-3.5 text-blue-200/70" strokeWidth={2} />
-                  )}
-                </span>
-              )}
-            </div>
-          </div>
-        </div>
-      ) : isVideo ? (
-        /* Render Video Attachment */
-        <div
-          className={cn(
-            'rounded-2xl shadow-xs overflow-hidden w-[280px] sm:w-[340px] border transition-all',
-            isMine
-              ? 'bg-blue-600 text-white rounded-br-xs border-blue-500'
-              : 'bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 border-neutral-200/90 dark:border-neutral-700/60 rounded-bl-xs'
-          )}
-        >
-          <div className="relative overflow-hidden bg-black/95 aspect-video min-h-[190px] w-full flex items-center justify-center">
-            <video
-              src={videoUrl}
-              controls
-              preload="auto"
-              playsInline
-              className="w-full h-full object-contain rounded-t-2xl"
-            />
-          </div>
+              <div
+                onClick={() => onViewImage?.(imageUrl, imageCaption)}
+                className="relative cursor-pointer group/img overflow-hidden w-full min-h-[180px] bg-neutral-900/10 dark:bg-neutral-800/50 flex items-center justify-center"
+              >
+                <img
+                  src={imageUrl}
+                  alt={imageCaption || 'Attached photo'}
+                  draggable={false}
+                  className="w-full max-h-72 object-cover transition-transform duration-300 group-hover/img:scale-102 pointer-events-none"
+                  loading="lazy"
+                />
+                <div className="absolute inset-0 bg-black/0 group-hover/img:bg-black/20 transition-colors flex items-center justify-center opacity-0 group-hover/img:opacity-100">
+                  <div className="p-2 rounded-full bg-black/60 text-white backdrop-blur-xs">
+                    <Maximize2 className="w-4 h-4" />
+                  </div>
+                </div>
+              </div>
 
-          {/* Caption & Timestamp */}
-          <div className="p-2.5 space-y-1">
-            {videoCaption && (
-              <p className="text-sm whitespace-pre-wrap leading-relaxed">{videoCaption}</p>
-            )}
-            <div
-              className={cn(
-                'flex items-center justify-end gap-1 text-[10px] select-none',
-                isMine ? 'text-blue-100/90' : 'text-neutral-400'
-              )}
-            >
-              <span>{formatTime(message.created_at)}</span>
-              {isMine && (
-                <span className="inline-flex items-center ml-0.5">
-                  {message.is_read ? (
-                    <CheckCheck className="w-4 h-4 text-green-300" strokeWidth={2.5} />
-                  ) : (
-                    <Check className="w-3.5 h-3.5 text-blue-200/70" strokeWidth={2} />
-                  )}
-                </span>
-              )}
-            </div>
-          </div>
-        </div>
-      ) : isVoice ? (
-
-        /* Render Voice Note Player */
-        <div
-          className={cn(
-            'px-3.5 py-2.5 rounded-2xl shadow-xs relative text-sm select-none transition-all',
-            isMine
-              ? 'bg-blue-600 text-white rounded-br-xs'
-              : 'bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 border border-neutral-200/90 dark:border-neutral-700/60 rounded-bl-xs'
-          )}
-        >
-          <VoiceNotePlayer
-            audioSrc={voiceAudioSrc}
-            durationSec={voiceDuration}
-            isMine={isMine}
-          />
-          <div
-            className={cn(
-              'flex items-center justify-end gap-1 mt-1 text-[10px] select-none',
-              isMine ? 'text-blue-100/90' : 'text-neutral-400'
-            )}
-          >
-            <Mic className="w-3 h-3 opacity-70" />
-            <span>{formatTime(message.created_at)}</span>
-            {isMine && (
-              <span className="inline-flex items-center ml-0.5">
-                {message.is_read ? (
-                  <CheckCheck className="w-4 h-4 text-green-300" strokeWidth={2.5} />
-                ) : (
-                  <Check className="w-3.5 h-3.5 text-blue-200/70" strokeWidth={2} />
+              {/* Caption & Timestamp */}
+              <div className="p-2.5 space-y-1">
+                {imageCaption && (
+                  <>
+                    <p className="text-sm whitespace-pre-wrap leading-relaxed">{imageCaption}</p>
+                    {renderTranslationBlock(isMine)}
+                  </>
                 )}
-              </span>
-            )}
-          </div>
-        </div>
-      ) : (
-        /* Render Standard Text Message */
-        (() => {
-          let replyId = message.reply_to_message_id || null;
-          let replySender = message.reply_to_message?.sender?.display_name || 'Message';
-          let replySnippet = message.reply_to_message?.content || '';
-          let textBody = message.content || '';
-
-          if (textBody.startsWith('[REPLY:')) {
-            const closing = textBody.indexOf(']');
-            if (closing !== -1) {
-              replyId = replyId || textBody.substring(7, closing);
-              textBody = textBody.substring(closing + 1).trim();
-            }
-          }
-
-          return (
+                <div
+                  className={cn(
+                    'flex items-center justify-end gap-1 text-[10px] select-none',
+                    isMine ? 'text-blue-100/90' : 'text-neutral-400'
+                  )}
+                >
+                  {renderPinnedPill(isMine)}
+                  <span>{formatTime(message.created_at)}</span>
+                  {isMine && (
+                    <span className="inline-flex items-center ml-0.5">
+                      {message.is_read ? (
+                        <CheckCheck className="w-4 h-4 text-green-300" strokeWidth={2.5} />
+                      ) : (
+                        <Check className="w-3.5 h-3.5 text-blue-200/70" strokeWidth={2} />
+                      )}
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+          ) : isVideo ? (
+            /* Render Video Attachment */
             <div
               className={cn(
-                'max-w-[82%] md:max-w-[65%] px-4 py-2.5 rounded-2xl shadow-xs relative text-sm leading-relaxed break-words select-text transition-all',
+                'rounded-2xl shadow-xs overflow-hidden w-[280px] sm:w-[340px] border transition-all select-none',
+                isMine
+                  ? 'bg-blue-600 text-white rounded-br-xs border-blue-500'
+                  : 'bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 border-neutral-200/90 dark:border-neutral-700/60 rounded-bl-xs'
+              )}
+            >
+              <div className="relative overflow-hidden bg-black/95 aspect-video min-h-[190px] w-full flex items-center justify-center">
+                <video
+                  src={videoUrl}
+                  controls
+                  preload="auto"
+                  playsInline
+                  className="w-full h-full object-contain rounded-t-2xl"
+                />
+              </div>
+
+              {/* Caption & Timestamp */}
+              <div className="p-2.5 space-y-1">
+                {videoCaption && (
+                  <>
+                    <p className="text-sm whitespace-pre-wrap leading-relaxed">{videoCaption}</p>
+                    {renderTranslationBlock(isMine)}
+                  </>
+                )}
+                <div
+                  className={cn(
+                    'flex items-center justify-end gap-1 text-[10px] select-none',
+                    isMine ? 'text-blue-100/90' : 'text-neutral-400'
+                  )}
+                >
+                  {renderPinnedPill(isMine)}
+                  <span>{formatTime(message.created_at)}</span>
+                  {isMine && (
+                    <span className="inline-flex items-center ml-0.5">
+                      {message.is_read ? (
+                        <CheckCheck className="w-4 h-4 text-green-300" strokeWidth={2.5} />
+                      ) : (
+                        <Check className="w-3.5 h-3.5 text-blue-200/70" strokeWidth={2} />
+                      )}
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+          ) : isVoice ? (
+            /* Render Voice Note Player */
+            <div
+              className={cn(
+                'px-3.5 py-2.5 rounded-2xl shadow-xs relative text-sm select-none transition-all',
+                isMine
+                  ? 'bg-blue-600 text-white rounded-br-xs'
+                  : 'bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 border border-neutral-200/90 dark:border-neutral-700/60 rounded-bl-xs'
+              )}
+            >
+              <VoiceNotePlayer
+                audioSrc={voiceAudioSrc}
+                durationSec={voiceDuration}
+                isMine={isMine}
+              />
+              <div
+                className={cn(
+                  'flex items-center justify-end gap-1 mt-1 text-[10px] select-none',
+                  isMine ? 'text-blue-100/90' : 'text-neutral-400'
+                )}
+              >
+                {renderPinnedPill(isMine)}
+                <Mic className="w-3 h-3 opacity-70" />
+                <span>{formatTime(message.created_at)}</span>
+                {isMine && (
+                  <span className="inline-flex items-center ml-0.5">
+                    {message.is_read ? (
+                      <CheckCheck className="w-4 h-4 text-green-300" strokeWidth={2.5} />
+                    ) : (
+                      <Check className="w-3.5 h-3.5 text-blue-200/70" strokeWidth={2} />
+                    )}
+                  </span>
+                )}
+              </div>
+            </div>
+          ) : (
+            /* Render Standard Text Message */
+            <div
+              className={cn(
+                'px-4 py-2.5 rounded-2xl shadow-xs relative text-sm leading-relaxed break-words select-none [-webkit-touch-callout:none] transition-all',
                 isMine
                   ? 'bg-blue-600 text-white rounded-br-xs'
                   : 'bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 border border-neutral-200/90 dark:border-neutral-700/60 rounded-bl-xs'
@@ -1322,6 +1742,7 @@ const MessageBubbleComponent: React.FC<MessageBubbleProps> = ({
               )}
 
               <p className="whitespace-pre-wrap">{textBody}</p>
+              {renderTranslationBlock(isMine)}
 
               <div
                 className={cn(
@@ -1329,12 +1750,7 @@ const MessageBubbleComponent: React.FC<MessageBubbleProps> = ({
                   isMine ? 'text-blue-100/90' : 'text-neutral-400'
                 )}
               >
-                {isPinned && (
-                  <span className="inline-flex items-center gap-0.5 text-amber-300 font-medium mr-1">
-                    <Pin className="w-3 h-3 fill-amber-300" />
-                    <span>Pinned</span>
-                  </span>
-                )}
+                {renderPinnedPill(isMine)}
                 <span>{formatTime(message.created_at)}</span>
                 {isMine && (
                   <span className="inline-flex items-center ml-0.5">
@@ -1347,115 +1763,185 @@ const MessageBubbleComponent: React.FC<MessageBubbleProps> = ({
                 )}
               </div>
             </div>
-          );
-        })()
-      )}
-
-      {/* Options Menu for Receiver */}
-      {!isMine && (
-        <div className="flex items-center gap-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
-          {showConfirm ? (
-            <button
-              onClick={handleDelete}
-              className="text-[11px] bg-rose-600 hover:bg-rose-700 active:scale-95 text-white font-bold px-2 py-1 rounded-xl shadow-md transition-all flex items-center gap-1 animate-pulse"
-              title="Click again to confirm delete"
-            >
-              <Trash2 className="w-3 h-3" />
-              <span>Delete</span>
-            </button>
-          ) : (
-            <div className="relative" ref={menuRef}>
-              <button
-                onClick={() => setShowMenu(!showMenu)}
-                className="p-1.5 rounded-lg text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 hover:bg-neutral-200/80 dark:hover:bg-neutral-800 transition-colors"
-                title="Message options"
-              >
-                <MoreHorizontal className="w-4 h-4" />
-              </button>
-
-              {showMenu && (
-                <div className="absolute bottom-full left-0 mb-1 z-30 min-w-[140px] p-1 rounded-xl bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 shadow-xl space-y-0.5 animate-in fade-in zoom-in-95 duration-100">
-                  {onReplyMessage && (
-                    <button
-                      onClick={() => {
-                        setShowMenu(false);
-                        onReplyMessage(message);
-                      }}
-                      className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs font-medium text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-lg transition-colors cursor-pointer"
-                    >
-                      <Reply className="w-3.5 h-3.5 text-blue-500" />
-                      <span>Reply</span>
-                    </button>
-                  )}
-
-                  {onPinMessage && (
-                    <button
-                      onClick={() => {
-                        setShowMenu(false);
-                        onPinMessage(message);
-                      }}
-                      className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs font-medium text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-lg transition-colors cursor-pointer"
-                    >
-                      {isPinned ? (
-                        <>
-                          <PinOff className="w-3.5 h-3.5 text-amber-500" />
-                          <span>Unpin</span>
-                        </>
-                      ) : (
-                        <>
-                          <Pin className="w-3.5 h-3.5 text-amber-500" />
-                          <span>Pin Message</span>
-                        </>
-                      )}
-                    </button>
-                  )}
-
-                  {onForwardMessage && (
-                    <button
-                      onClick={() => {
-                        setShowMenu(false);
-                        onForwardMessage(message);
-                      }}
-                      className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs font-medium text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-lg transition-colors cursor-pointer"
-                    >
-                      <Share2 className="w-3.5 h-3.5 text-purple-500" />
-                      <span>Forward</span>
-                    </button>
-                  )}
-
-                  {!isVoice && !isImage && (
-                    <button
-                      onClick={handleCopy}
-                      className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs font-medium text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-lg transition-colors cursor-pointer"
-                    >
-                      {copied ? (
-                        <>
-                          <Check className="w-3.5 h-3.5 text-emerald-500" />
-                          <span className="text-emerald-600 dark:text-emerald-400">Copied!</span>
-                        </>
-                      ) : (
-                        <>
-                          <Copy className="w-3.5 h-3.5" />
-                          <span>Copy Text</span>
-                        </>
-                      )}
-                    </button>
-                  )}
-
-                  {onDeleteMessage && (
-                    <button
-                      onClick={handleDelete}
-                      className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs font-medium text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-lg transition-colors"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                      <span>Delete</span>
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
           )}
         </div>
+
+        {/* Options trigger for Receiver (right of bubble) */}
+        {!isMine && renderOptionsTrigger()}
+      </div>
+
+      {/* Unified Floating Context Menu (1-sec Hold / Right-Click / Options Trigger) */}
+      {showMenu && (
+        <>
+          <div
+            className="fixed inset-0 z-40"
+            onClick={(e) => {
+              e.stopPropagation();
+              closeMenu();
+            }}
+          />
+          <div
+            ref={menuRef}
+            onClick={(e) => e.stopPropagation()}
+            style={
+              menuCoords
+                ? { top: `${menuCoords.top}px`, left: `${menuCoords.left}px` }
+                : undefined
+            }
+            className="fixed z-50 min-w-[186px] py-1.5 px-1.5 rounded-[20px] bg-white dark:bg-neutral-900 border border-neutral-200/80 dark:border-neutral-700/80 shadow-[0_12px_36px_rgba(0,0,0,0.14)] dark:shadow-[0_12px_36px_rgba(0,0,0,0.5)] animate-in fade-in zoom-in-95 duration-120 space-y-0.5 select-none"
+          >
+            {onReplyMessage && (
+              <button
+                type="button"
+                onClick={() => {
+                  closeMenu();
+                  onReplyMessage(message);
+                }}
+                className="w-full flex items-center gap-3 px-3.5 py-2.5 text-[14px] font-medium text-neutral-800 dark:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-xl transition-colors cursor-pointer"
+              >
+                <Reply className="w-4 h-4 text-blue-500 shrink-0" />
+                <span>Reply</span>
+              </button>
+            )}
+
+            {onPinMessage && (
+              <button
+                type="button"
+                onClick={() => {
+                  closeMenu();
+                  onPinMessage(message);
+                }}
+                className="w-full flex items-center gap-3 px-3.5 py-2.5 text-[14px] font-medium text-neutral-800 dark:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-xl transition-colors cursor-pointer"
+              >
+                {isPinned ? (
+                  <>
+                    <PinOff className="w-4 h-4 text-amber-500 shrink-0" />
+                    <span>Unpin</span>
+                  </>
+                ) : (
+                  <>
+                    <Pin className="w-4 h-4 text-amber-500 shrink-0" />
+                    <span>Pin Message</span>
+                  </>
+                )}
+              </button>
+            )}
+
+            {canCopyText && (
+              <button
+                type="button"
+                onClick={handleCopy}
+                className="w-full flex items-center gap-3 px-3.5 py-2.5 text-[14px] font-medium text-neutral-800 dark:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-xl transition-colors cursor-pointer"
+              >
+                {copied ? (
+                  <>
+                    <Check className="w-4 h-4 text-emerald-500 shrink-0" />
+                    <span className="text-emerald-600 dark:text-emerald-400">Copied!</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-4 h-4 text-neutral-700 dark:text-neutral-300 shrink-0" />
+                    <span>Copy Text</span>
+                  </>
+                )}
+              </button>
+            )}
+
+            {translatableText && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => {
+                    closeMenu();
+                    if (showTranslation && !translateError) {
+                      activeTranslateReqRef.current += 1;
+                      setIsTranslating(false);
+                      setShowTranslation(false);
+                      setTranslateError(null);
+                    } else {
+                      void handleTranslate(resolvedTargetLang);
+                    }
+                  }}
+                  className="w-full flex items-center justify-between gap-2 px-3.5 py-2.5 text-[14px] font-medium text-neutral-800 dark:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-xl transition-colors cursor-pointer"
+                >
+                  <span className="flex items-center gap-3">
+                    <Languages className="w-4 h-4 text-indigo-500 shrink-0" />
+                    <span>
+                      {showTranslation && !translateError
+                        ? t('action.hideTranslation', 'Hide Translation')
+                        : t('action.translate', 'Translate')}
+                    </span>
+                  </span>
+                  <span className="text-[11px] font-semibold text-neutral-400 shrink-0">
+                    {resolvedTargetLang.flag}
+                  </span>
+                </button>
+
+                {onOpenTranslatePicker && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      closeMenu();
+                      onOpenTranslatePicker(
+                        translation?.lang.code || resolvedTargetLang.code,
+                        (picked) => void handleTranslate(picked),
+                        t('action.translateTo', 'Translate Message To')
+                      );
+                    }}
+                    className="w-full flex items-center gap-3 px-3.5 py-2.5 text-[14px] font-medium text-neutral-800 dark:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-xl transition-colors cursor-pointer"
+                  >
+                    <Globe className="w-4 h-4 text-sky-500 shrink-0" />
+                    <span>{t('action.translateTo106', 'Translate to... (106+)')}</span>
+                  </button>
+                )}
+              </>
+            )}
+
+            {onForwardMessage && (
+              <button
+                type="button"
+                onClick={() => {
+                  closeMenu();
+                  onForwardMessage(message);
+                }}
+                className="w-full flex items-center gap-3 px-3.5 py-2.5 text-[14px] font-medium text-neutral-800 dark:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-xl transition-colors cursor-pointer"
+              >
+                <Share2 className="w-4 h-4 text-purple-500 shrink-0" />
+                <span>Forward</span>
+              </button>
+            )}
+
+            {!isMine && onReportMessage && (
+              <button
+                type="button"
+                onClick={() => {
+                  closeMenu();
+                  onReportMessage(message);
+                }}
+                className="w-full flex items-center gap-3 px-3.5 py-2.5 text-[14px] font-medium text-amber-600 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/40 rounded-xl transition-colors cursor-pointer"
+              >
+                <Flag className="w-4 h-4 shrink-0" />
+                <span>{t('action.report')}</span>
+              </button>
+            )}
+
+            {onDeleteMessage && (
+              <button
+                type="button"
+                onClick={handleDelete}
+                className={cn(
+                  'w-full flex items-center gap-3 px-3.5 py-2.5 text-[14px] font-medium rounded-xl transition-colors cursor-pointer',
+                  showConfirm
+                    ? 'bg-rose-600 text-white hover:bg-rose-700 font-semibold'
+                    : 'text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40'
+                )}
+              >
+                <Trash2 className="w-4 h-4 shrink-0" />
+                <span>{showConfirm ? `Confirm ${t('action.delete')}?` : t('action.delete')}</span>
+              </button>
+            )}
+          </div>
+        </>
       )}
     </div>
   );

@@ -15,7 +15,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
   authError,
   clearError,
 }) => {
-  const { currentLanguage, openLanguageModal } = useLanguage();
+  const { currentLanguage, openLanguageModal, t } = useLanguage();
   const [loading, setLoading] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const [popupBlocked, setPopupBlocked] = useState(false);
@@ -37,7 +37,9 @@ export const AuthPage: React.FC<AuthPageProps> = ({
     setPopupBlocked(false);
 
     if (!agreedTerms) {
-      setLocalError('Please agree to the Terms of Use and Privacy Policy to continue.');
+      setLocalError(
+        t('auth.mustAgreeTerms', 'Please agree to the Terms of Use and Privacy Policy to continue.')
+      );
       return;
     }
 
@@ -74,14 +76,14 @@ export const AuthPage: React.FC<AuthPageProps> = ({
       <div className="absolute bottom-1/4 left-1/3 w-80 h-80 bg-cyan-500/10 rounded-full blur-3xl pointer-events-none" />
 
       {/* Language Selector Top Right */}
-      <div className="absolute top-4 right-4 z-20">
+      <div className="absolute top-4 end-4 z-20">
         <button
           type="button"
           onClick={openLanguageModal}
           className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-neutral-900/90 border border-neutral-800 text-neutral-300 hover:text-white text-xs font-semibold backdrop-blur-md transition-all hover:border-neutral-700 cursor-pointer shadow-lg"
         >
           <span>{currentLanguage.flag}</span>
-          <span>{currentLanguage.name}</span>
+          <span>{currentLanguage.nativeName}</span>
         </button>
       </div>
 
@@ -120,7 +122,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
               </span>
             </h1>
             <p className="text-xs text-neutral-400 mt-1 font-medium">
-              Free, Secure & Real-time HD Messaging & Calling
+              {t('auth.tagline', 'Free, Secure & Real-time HD Messaging & Calling')}
             </p>
           </div>
         </div>
@@ -156,7 +158,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                 className="mt-0.5 w-4 h-4 rounded border-neutral-600 bg-neutral-900 text-blue-500 focus:ring-blue-500 focus:ring-offset-neutral-900 cursor-pointer transition-all"
               />
               <span className="text-xs text-neutral-300 group-hover:text-white leading-relaxed">
-                I agree to the{' '}
+                {t('auth.agreePrefix', 'I agree to the')}{' '}
                 <button
                   type="button"
                   onClick={(e) => {
@@ -165,9 +167,9 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                   }}
                   className="text-blue-400 font-semibold underline hover:text-blue-300 cursor-pointer"
                 >
-                  Terms of Use
+                  {t('auth.termsOfUse', 'Terms of Use')}
                 </button>{' '}
-                and{' '}
+                {t('auth.and', 'and')}{' '}
                 <button
                   type="button"
                   onClick={(e) => {
@@ -176,7 +178,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                   }}
                   className="text-blue-400 font-semibold underline hover:text-blue-300 cursor-pointer"
                 >
-                  Privacy Policy
+                  {t('auth.privacyPolicy', 'Privacy Policy')}
                 </button>
               </span>
             </label>
@@ -210,14 +212,18 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                     d="M43.611,20.083H42V20H24v8h11.303c-0.792,2.237-2.231,4.166-4.087,5.571c0.001-0.001,0.002-0.001,0.003-0.002l6.19,5.238C36.971,39.205,44,34,44,24C44,22.659,43.862,21.35,43.611,20.083z"
                   />
                 </svg>
-                <span className="text-sm font-bold">Continue with Google</span>
+                <span className="text-sm font-bold">
+                  {t('auth.continueWithGoogle', 'Continue with Google')}
+                </span>
               </>
             )}
           </button>
 
           <div className="flex items-center justify-center gap-1.5 text-[11px] text-neutral-400">
             <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-            <span>Sign in or create your account instantly with Google</span>
+            <span>
+              {t('auth.googleInstantHint', 'Sign in or create your account instantly with Google')}
+            </span>
           </div>
         </div>
       </div>

@@ -95,12 +95,18 @@ export const CallsTab: React.FC<CallsTabProps> = ({
 
   const getStatusText = (item: CallHistoryItem) => {
     if (item.isMissed) {
-      return item.call_type === 'video' ? 'Missed Video Call' : 'Missed Audio Call';
+      return item.call_type === 'video'
+        ? t('label.missedVideoCall', 'Missed Video Call')
+        : t('label.missedAudioCall', 'Missed Audio Call');
     }
     if (item.direction === 'incoming') {
-      return item.call_type === 'video' ? 'Incoming Video Call' : 'Incoming Audio Call';
+      return item.call_type === 'video'
+        ? t('label.incomingVideoCall', 'Incoming Video Call')
+        : t('label.incomingAudioCall', 'Incoming Audio Call');
     }
-    return item.call_type === 'video' ? 'Outgoing Video Call' : 'Outgoing Audio Call';
+    return item.call_type === 'video'
+      ? t('label.outgoingVideoCall', 'Outgoing Video Call')
+      : t('label.outgoingAudioCall', 'Outgoing Audio Call');
   };
 
   return (
@@ -128,11 +134,8 @@ export const CallsTab: React.FC<CallsTabProps> = ({
 
             <div className="text-center space-y-1">
               <h3 className="text-base font-bold text-neutral-900 dark:text-neutral-100">
-                Clear All Calls?
+                {t('desc.clearAllCallsTitle', 'Clear All Calls?')}
               </h3>
-              <p className="text-xs text-neutral-500 dark:text-neutral-400">
-                This will permanently delete your call records.
-              </p>
             </div>
 
             <div className="grid grid-cols-2 gap-2 pt-2">
@@ -141,19 +144,19 @@ export const CallsTab: React.FC<CallsTabProps> = ({
                 onClick={() => setShowClearHistoryConfirm(false)}
                 className="py-2.5 px-4 rounded-xl border border-neutral-300 dark:border-neutral-700 font-semibold text-xs text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors cursor-pointer"
               >
-                Cancel
+                {t('action.cancel', 'Cancel')}
               </button>
               <button
                 type="button"
                 onClick={() => {
                   onClearAllHistory?.();
                   setShowClearHistoryConfirm(false);
-                  setToastMessage('Call list cleared.');
+                  setToastMessage(t('action.clearAll', 'Clear All'));
                   setTimeout(() => setToastMessage(null), 3000);
                 }}
                 className="py-2.5 px-4 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-xs shadow-md shadow-red-500/20 transition-all active:scale-95 cursor-pointer"
               >
-                Clear All
+                {t('action.clearAll', 'Clear All')}
               </button>
             </div>
           </div>
@@ -170,11 +173,8 @@ export const CallsTab: React.FC<CallsTabProps> = ({
 
             <div className="text-center space-y-1">
               <h3 className="text-base font-bold text-neutral-900 dark:text-neutral-100">
-                Delete Call Record?
+                {t('action.delete', 'Delete')}
               </h3>
-              <p className="text-xs text-neutral-500 dark:text-neutral-400">
-                Are you sure you want to remove this record?
-              </p>
             </div>
 
             <div className="grid grid-cols-2 gap-2 pt-2">
@@ -183,7 +183,7 @@ export const CallsTab: React.FC<CallsTabProps> = ({
                 onClick={() => setCallToDelete(null)}
                 className="py-2.5 px-4 rounded-xl border border-neutral-300 dark:border-neutral-700 font-semibold text-xs text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors cursor-pointer"
               >
-                Cancel
+                {t('action.cancel', 'Cancel')}
               </button>
               <button
                 type="button"
@@ -195,7 +195,7 @@ export const CallsTab: React.FC<CallsTabProps> = ({
                 }}
                 className="py-2.5 px-4 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-xs shadow-md shadow-red-500/20 transition-all active:scale-95 cursor-pointer"
               >
-                Delete
+                {t('action.delete', 'Delete')}
               </button>
             </div>
           </div>
@@ -214,17 +214,17 @@ export const CallsTab: React.FC<CallsTabProps> = ({
             {history.length > 0 && onClearAllHistory && (
               <button
                 onClick={() => setShowClearHistoryConfirm(true)}
-                title="Clear all calls"
+                title={t('action.clearAll', 'Clear All')}
                 className="p-2.5 px-3 rounded-2xl bg-red-50 dark:bg-red-950/40 hover:bg-red-100 dark:hover:bg-red-900/60 text-red-600 dark:text-red-400 border border-red-200/60 dark:border-red-800/60 transition-all active:scale-95 flex items-center gap-1.5 text-xs font-semibold cursor-pointer"
               >
                 <Trash2 className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">Clear</span>
+                <span className="hidden sm:inline">{t('action.clear', 'Clear')}</span>
               </button>
             )}
 
             <button
               onClick={() => onRefreshHistory?.()}
-              title="Refresh"
+              title={t('action.refresh', 'Refresh')}
               disabled={historyLoading}
               className="p-2.5 rounded-2xl bg-neutral-100 dark:bg-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-700 text-neutral-600 dark:text-neutral-300 transition-all active:scale-95 cursor-pointer"
             >
@@ -233,11 +233,11 @@ export const CallsTab: React.FC<CallsTabProps> = ({
 
             <button
               onClick={onOpenSearchModal}
-              title="New Call / Search ID"
+              title={t('action.newCall', 'New Call')}
               className="flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs shadow-md shadow-blue-500/20 transition-all hover:scale-105 active:scale-95 cursor-pointer"
             >
               <UserPlus className="w-4 h-4" />
-              <span>New Call</span>
+              <span>{t('action.newCall', 'New Call')}</span>
             </button>
           </div>
         </div>
@@ -245,13 +245,13 @@ export const CallsTab: React.FC<CallsTabProps> = ({
         {/* Search Filter */}
         {history.length > 0 && (
           <div className="relative w-full">
-            <Search className="w-4 h-4 text-neutral-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+            <Search className="w-4 h-4 text-neutral-400 absolute start-3.5 top-1/2 -translate-y-1/2" />
             <input
               type="text"
-              placeholder="Search calls..."
+              placeholder={t('desc.searchCalls', 'Search calls...')}
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full pl-10 pr-4 py-2.5 text-base sm:text-base rounded-2xl bg-neutral-100 dark:bg-neutral-800/90 border border-neutral-200 dark:border-neutral-700/80 text-neutral-900 dark:text-neutral-100 placeholder-neutral-400 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all shadow-xs"
+              className="w-full ps-10 pe-4 py-2.5 text-base sm:text-base rounded-2xl bg-neutral-100 dark:bg-neutral-800/90 border border-neutral-200 dark:border-neutral-700/80 text-neutral-900 dark:text-neutral-100 placeholder-neutral-400 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all shadow-xs"
             />
           </div>
         )}
@@ -436,12 +436,10 @@ export const CallsTab: React.FC<CallsTabProps> = ({
               </div>
               <div className="space-y-1">
                 <h4 className="text-base font-bold text-neutral-900 dark:text-neutral-100">
-                  {searchQuery ? 'No matching calls' : 'No calls yet'}
+                  {t('desc.noCalls', 'No calls yet')}
                 </h4>
                 <p className="text-xs text-neutral-500 dark:text-neutral-400 leading-relaxed">
-                  {searchQuery
-                    ? `No call matched "${searchQuery}".`
-                    : 'Whenever you make or receive audio or video calls, they will appear right here.'}
+                  {t('desc.callsSubtitle', 'Instant crystal-clear HD audio and video calls powered by WebRTC')}
                 </p>
               </div>
               <button
@@ -449,7 +447,7 @@ export const CallsTab: React.FC<CallsTabProps> = ({
                 className="inline-flex items-center gap-2 px-5 py-2.5 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold shadow-md shadow-blue-500/20 transition-all hover:scale-105 active:scale-95 cursor-pointer"
               >
                 <UserPlus className="w-4 h-4" />
-                <span>Start a Call</span>
+                <span>{t('action.startACall', 'Start a Call')}</span>
               </button>
             </div>
           )}

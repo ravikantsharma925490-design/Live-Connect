@@ -15,9 +15,15 @@ import {
   PartyPopper,
   Laugh,
   Check,
+  Languages,
+  Loader2,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { uploadMediaToServer } from '@/src/lib/mediaUpload';
+import { formatMessagePreview } from '@/src/lib/utils';
+import { useLanguage } from '@/src/lib/LanguageContext';
+import { WorldLanguage } from '@/src/lib/worldData';
+import { translateChatText } from '@/src/lib/messageTranslation';
 
 // Determine optimal supported audio MIME type across Chrome, Safari, Android & iOS
 function getOptimalAudioMimeType(): string {
@@ -192,6 +198,12 @@ interface ChatInputProps {
   conversation?: Conversation | null;
   replyingToMessage?: Message | null;
   onCancelReply?: () => void;
+  defaultTargetLang?: WorldLanguage;
+  onOpenTranslatePicker?: (
+    selectedCode: string,
+    onPicked: (lang: WorldLanguage) => void,
+    title?: string
+  ) => void;
 }
 
 export const ChatInput: React.FC<ChatInputProps> = ({
@@ -203,11 +215,16 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   conversation,
   replyingToMessage,
   onCancelReply,
+  defaultTargetLang,
+  onOpenTranslatePicker,
 }) => {
+  const { t, currentLanguage } = useLanguage();
   const [inputText, setInputText] = useState('');
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showStickerPicker, setShowStickerPicker] = useState(false);
   const [activeCategory, setActiveCategory] = useState(0);
+  const [isTranslatingDraft, setIsTranslatingDraft] = useState(false);
+  const [draftTranslateError, setDraftTranslateError] = useState<string | null>(null);
 
   // Staged Image Attachment State
   const [stagedImage, setStagedImage] = useState<string | null>(null);
@@ -227,6 +244,20 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   const stickerModalRef = useRef<HTMLDivElement | null>(null);
   const isSubmittingRef = useRef<boolean>(false);
   const lastTypingSentRef = useRef<number>(0);
+
+  useEffect(() => {
+    setDraftTranslateError(null);
+  }, [conversation?.id]);
+
+  // Auto-focus input when user initiates a reply (e.g. swipe-right or menu Reply)
+  useEffect(() => {
+    if (replyingToMessage?.id && !disabled) {
+      const id = requestAnimationFrame(() => {
+        inputRef.current?.focus();
+      });
+      return () => cancelAnimationFrame(id);
+    }
+  }, [replyingToMessage?.id, disabled]);
 
   // Close modals on outside click
   useEffect(() => {
@@ -583,6 +614,36 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     return `${mins}:${s < 10 ? '0' : ''}${s}`;
   };
 
+  const handleTranslateDraft = () => {
+    const clean = inputText.trim();
+    if (!clean || isTranslatingDraft || disabled) return;
+    const fallbackLang = defaultTargetLang || currentLanguage;
+
+    const runTranslation = async (lang: WorldLanguage) => {
+      setIsTranslatingDraft(true);
+      setDraftTranslateError(null);
+      try {
+        const res = await translateChatText({ text: clean, targetLang: lang });
+        setInputText(res.translatedText);
+        inputRef.current?.focus();
+      } catch (err: any) {
+        setDraftTranslateError(err?.message || 'Could not translate draft.');
+      } finally {
+        setIsTranslatingDraft(false);
+      }
+    };
+
+    if (onOpenTranslatePicker) {
+      onOpenTranslatePicker(
+        fallbackLang.code,
+        (picked) => void runTranslation(picked),
+        t('action.translateDraftTitle', 'Translate Message Before Sending')
+      );
+    } else {
+      void runTranslation(fallbackLang);
+    }
+  };
+
   const hasContent = inputText.trim().length > 0 || Boolean(stagedImage);
 
   return (
@@ -595,6 +656,19 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         onChange={handleFileChange}
         className="hidden"
       />
+
+      {draftTranslateError && (
+        <div className="mb-2 px-3 py-1.5 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/50 flex items-center justify-between gap-2 text-xs text-rose-700 dark:text-rose-300">
+          <span className="truncate">{draftTranslateError}</span>
+          <button
+            type="button"
+            onClick={() => setDraftTranslateError(null)}
+            className="p-0.5 rounded hover:bg-rose-200/50 dark:hover:bg-rose-900/50 shrink-0 cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
 
       {/* Reply Preview Banner */}
       <AnimatePresence>
@@ -610,7 +684,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                 Replying to {replyingToMessage.sender?.display_name || replyingToMessage.sender?.username || 'User'}
               </span>
               <p className="text-neutral-600 dark:text-neutral-300 truncate">
-                {replyingToMessage.content}
+                {formatMessagePreview(replyingToMessage.content)}
               </p>
             </div>
             <button
@@ -734,7 +808,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
               <div className="flex items-center gap-1.5">
                 <Sparkles className="w-4 h-4 text-amber-500" />
                 <span className="text-xs font-bold text-neutral-900 dark:text-neutral-100">
-                  Expressive Stickers
+                  {t('label.stickers', 'Expressive Stickers')}
                 </span>
               </div>
               <button
@@ -780,7 +854,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             <div className="w-3 h-3 rounded-full bg-rose-600 animate-ping shrink-0" />
             <div className="flex items-center gap-2">
               <span className="text-xs font-bold text-rose-700 dark:text-rose-300">
-                Recording Voice Note...
+                {t('desc.recordingVoiceNote', 'Recording Voice Note...')}
               </span>
               <span className="text-xs font-mono font-semibold px-2 py-0.5 rounded-md bg-rose-200/70 dark:bg-rose-900/80 text-rose-900 dark:text-rose-100">
                 {formatRecTime(recordingSeconds)}
@@ -794,7 +868,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
               disabled={isUploadingMedia}
               onClick={cancelVoiceRecording}
               className="p-2 rounded-full text-neutral-500 hover:text-rose-600 hover:bg-rose-100 dark:hover:bg-rose-900/50 transition-colors cursor-pointer disabled:opacity-40"
-              title="Discard recording"
+              title={t('action.cancel', 'Cancel')}
             >
               <Trash2 className="w-4 h-4" />
             </button>
@@ -803,14 +877,14 @@ export const ChatInput: React.FC<ChatInputProps> = ({
               disabled={isUploadingMedia}
               onClick={finishAndSendVoiceRecording}
               className="px-3.5 py-1.5 rounded-full bg-rose-600 hover:bg-rose-700 active:scale-95 text-white text-xs font-bold shadow-md flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50"
-              title="Send voice note"
+              title={t('action.send', 'Send')}
             >
               {isUploadingMedia ? (
                 <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
               ) : (
                 <Send className="w-3.5 h-3.5" />
               )}
-              <span>{isUploadingMedia ? 'Sending...' : 'Send'}</span>
+              <span>{isUploadingMedia ? t('action.sending', 'Sending...') : t('action.send', 'Send')}</span>
             </button>
           </div>
         </motion.div>
@@ -832,7 +906,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                 ? 'text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-neutral-800'
                 : 'text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-200 hover:bg-neutral-200/60 dark:hover:bg-neutral-800'
             }`}
-            title="Choose Emoji"
+            title="Emoji"
           >
             <Smile className="w-5 h-5" strokeWidth={1.9} />
           </button>
@@ -841,10 +915,17 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           <input
             ref={inputRef}
             type="text"
-            placeholder={stagedImage ? "Add a caption..." : `Message ${displayName || ''}...`}
+            placeholder={
+              stagedImage
+                ? t('desc.addCaption', 'Add a caption...')
+                : displayName
+                ? t('desc.messageUser', `Message ${displayName}...`, { name: displayName })
+                : t('desc.typeMessage', 'Type a message...')
+            }
             value={inputText}
             onChange={(e) => {
               setInputText(e.target.value);
+              if (draftTranslateError) setDraftTranslateError(null);
               if (onTyping) {
                 const now = Date.now();
                 if (!lastTypingSentRef.current || now - lastTypingSentRef.current > 2000) {
@@ -898,6 +979,22 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             >
               <Sticker className="w-5 h-5" strokeWidth={1.9} />
             </button>
+
+            {inputText.trim().length > 0 && (
+              <button
+                type="button"
+                onClick={handleTranslateDraft}
+                disabled={disabled || isTranslatingDraft}
+                className="p-2 rounded-full text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/60 transition-colors cursor-pointer disabled:opacity-50"
+                title={t('action.translateDraft', 'Translate message (106+ languages)')}
+              >
+                {isTranslatingDraft ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Languages className="w-4 h-4" />
+                )}
+              </button>
+            )}
 
             {/* Dynamic Send Button (Shown when user has text or attachment) */}
             <AnimatePresence>

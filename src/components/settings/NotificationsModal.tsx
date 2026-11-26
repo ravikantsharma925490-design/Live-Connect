@@ -14,6 +14,7 @@ import {
 import { cn } from '@/src/lib/utils';
 import { audioTones } from '@/src/lib/audio-tones';
 import { notificationService } from '@/src/lib/notification-service';
+import { useLanguage } from '@/src/lib/LanguageContext';
 
 interface NotificationsModalProps {
   isOpen: boolean;
@@ -24,6 +25,7 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
   isOpen,
   onClose,
 }) => {
+  const { t } = useLanguage();
   const [callSoundEnabled, setCallSoundEnabled] = useState<boolean>(() => {
     if (typeof window !== 'undefined') {
       return localStorage.getItem('liveconnect_perm_call_sound') !== 'false';
@@ -147,7 +149,7 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
   const handleTestPushNotification = async () => {
     if (!pushNotifEnabled) {
       setStatusMessage({
-        text: 'Pehle Push Notifications switch ko ON karein test karne ke liye.',
+        text: 'Please turn ON Push Notifications first to send a test alert.',
         type: 'info',
       });
       return;
@@ -161,7 +163,7 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
 
     if (sent) {
       setStatusMessage({
-        text: 'Test Notification successfully sent! Dekhiye screen ke upar popup aagaya.',
+        text: 'Test notification sent! Check the alert popup at the top of your screen.',
         type: 'success',
       });
     }
@@ -201,10 +203,10 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
             </div>
             <div>
               <h3 className="font-extrabold text-base text-neutral-900 dark:text-neutral-100">
-                Notification Settings
+                {t('title.notifications')}
               </h3>
               <p className="text-xs text-neutral-500">
-                Incoming call ringtones, message chimes & push alerts
+                {t('desc.notificationsSub')}
               </p>
             </div>
           </div>
@@ -232,7 +234,7 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
             <div className="flex-1 leading-relaxed">{statusMessage.text}</div>
             <button
               onClick={() => setStatusMessage(null)}
-              className="text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 font-bold ml-1"
+              className="text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 font-bold ms-1"
             >
               ✕
             </button>
@@ -257,7 +259,7 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
               <div className="min-w-0">
                 <div className="flex items-center gap-2 flex-wrap">
                   <h4 className="text-sm font-bold text-neutral-900 dark:text-neutral-100">
-                    Push Notifications
+                    {t('label.pushNotifications')}
                   </h4>
                   <span
                     className={cn(
@@ -289,7 +291,7 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
               <span
                 className={cn(
                   'pointer-events-none inline-block h-6 w-6 transform rounded-full bg-white shadow-md transition duration-200 ease-in-out',
-                  pushNotifEnabled ? 'translate-x-5' : 'translate-x-0'
+                  pushNotifEnabled ? 'ltr:translate-x-5 rtl:-translate-x-5' : 'translate-x-0'
                 )}
               />
             </button>
@@ -343,7 +345,7 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
               <span
                 className={cn(
                   'pointer-events-none inline-block h-6 w-6 transform rounded-full bg-white shadow-md transition duration-200 ease-in-out',
-                  callSoundEnabled ? 'translate-x-5' : 'translate-x-0'
+                  callSoundEnabled ? 'ltr:translate-x-5 rtl:-translate-x-5' : 'translate-x-0'
                 )}
               />
             </button>
@@ -397,7 +399,7 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
               <span
                 className={cn(
                   'pointer-events-none inline-block h-6 w-6 transform rounded-full bg-white shadow-md transition duration-200 ease-in-out',
-                  msgSoundEnabled ? 'translate-x-5' : 'translate-x-0'
+                  msgSoundEnabled ? 'ltr:translate-x-5 rtl:-translate-x-5' : 'translate-x-0'
                 )}
               />
             </button>
@@ -407,12 +409,12 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
           <div className="p-3.5 rounded-2xl bg-amber-500/10 border border-amber-500/20 text-xs space-y-2">
             <div className="flex items-center gap-2 font-bold text-amber-700 dark:text-amber-400">
               <Info className="w-4 h-4 shrink-0" />
-              <span>Browser Me Notification Kaise Allow Karein?</span>
+              <span>How to Allow Browser Notifications</span>
             </div>
-            <ul className="text-neutral-600 dark:text-neutral-300 space-y-1 pl-5 list-disc text-[11px] leading-relaxed">
-              <li><strong>Mobile (Chrome)</strong>: Upar 3 dots (⋮) ➔ Site Settings ➔ Notifications ➔ <strong>Allow</strong> karein.</li>
-              <li><strong>Computer / Laptop</strong>: URL bar me 🔒 lock icon par click karein ➔ Notifications ko <strong>"Allow"</strong> select karein.</li>
-              <li>Agar browser popup block bhi ho, toh bhi <strong>In-App Screen Top Banner</strong> aur Ringtone 100% chalegi!</li>
+            <ul className="text-neutral-600 dark:text-neutral-300 space-y-1 ps-5 list-disc text-[11px] leading-relaxed">
+              <li><strong>Mobile (Chrome)</strong>: Tap menu (⋮) → Site Settings → Notifications → Select <strong>Allow</strong>.</li>
+              <li><strong>Desktop</strong>: Click the lock 🔒 icon in the URL bar → Set Notifications to <strong>Allow</strong>.</li>
+              <li>Even if browser popups are blocked, <strong>In-App Top Banners</strong> and ringtones will still alert you!</li>
             </ul>
           </div>
 
@@ -465,7 +467,7 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
             onClick={onClose}
             className="px-5 py-2 rounded-xl bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 text-xs font-bold hover:opacity-90 transition-opacity cursor-pointer"
           >
-            Done
+            {t('action.done')}
           </button>
         </div>
       </div>

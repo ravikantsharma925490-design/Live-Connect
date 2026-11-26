@@ -3,6 +3,7 @@ import { WORLD_COUNTRIES } from '@/src/lib/worldData';
 import { checkUsernameAvailability } from '@/src/hooks/useAuth';
 import { User, CheckCircle2, AlertCircle, Camera, Sparkles, Globe, ChevronDown, Upload, Trash2, Loader2 } from 'lucide-react';
 import { uploadMediaToCloudinary, compressProfileImageIfNeeded } from '@/src/lib/cloudinaryClient';
+import { useLanguage } from '@/src/lib/LanguageContext';
 
 interface OnboardingScreenProps {
   prefillName?: string;
@@ -24,6 +25,7 @@ export function OnboardingScreen({
   prefillEmail = '',
   onComplete,
 }: OnboardingScreenProps) {
+  const { t } = useLanguage();
   const [displayName, setDisplayName] = useState(prefillName);
   const [username, setUsername] = useState(() => {
     if (prefillEmail) {
@@ -273,7 +275,7 @@ export function OnboardingScreen({
             )}
 
             {prefillAvatar && avatarUrl === prefillAvatar && !uploadingPhoto && (
-              <div className="absolute bottom-1 right-1 bg-blue-600 text-[10px] font-bold px-2 py-0.5 rounded-full text-white shadow border border-blue-400/40 z-30">
+              <div className="absolute bottom-1 end-1 bg-blue-600 text-[10px] font-bold px-2 py-0.5 rounded-full text-white shadow border border-blue-400/40 z-30">
                 Google
               </div>
             )}
@@ -291,7 +293,7 @@ export function OnboardingScreen({
               ) : (
                 <Upload className="w-3.5 h-3.5 shrink-0" />
               )}
-              <span>{uploadingPhoto ? 'Uploading...' : avatarUrl ? 'Change Photo' : 'Upload Photo'}</span>
+              <span>{uploadingPhoto ? 'Uploading...' : avatarUrl ? t('action.changePhoto') : t('action.uploadPhoto')}</span>
             </button>
 
             {avatarUrl && (
@@ -305,7 +307,7 @@ export function OnboardingScreen({
                 className="px-3.5 py-1.5 rounded-xl bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/30 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap disabled:opacity-50"
               >
                 <Trash2 className="w-3.5 h-3.5 shrink-0" />
-                <span>Remove</span>
+                <span>{t('action.remove')}</span>
               </button>
             )}
           </div>
@@ -332,7 +334,7 @@ export function OnboardingScreen({
           {/* Display Name (Required) */}
           <div>
             <label className="block text-xs font-semibold text-neutral-300 mb-1.5">
-              Display Name <span className="text-red-400">*</span>
+              {t('auth.fullName')} <span className="text-red-400">*</span>
             </label>
             <input
               type="text"
@@ -350,10 +352,10 @@ export function OnboardingScreen({
           {/* Username (Required & Unique) */}
           <div>
             <label className="block text-xs font-semibold text-neutral-300 mb-1.5">
-              Username <span className="text-red-400">*</span>
+              {t('auth.username')} <span className="text-red-400">*</span>
             </label>
             <div className="relative">
-              <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-neutral-500 font-bold text-sm">
+              <span className="absolute start-3.5 top-1/2 -translate-y-1/2 text-neutral-500 font-bold text-sm">
                 @
               </span>
               <input
@@ -362,16 +364,16 @@ export function OnboardingScreen({
                 value={username}
                 onChange={(e) => setUsername(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ''))}
                 placeholder="rahul_sharma"
-                className="w-full pl-8 pr-10 py-2.5 rounded-xl bg-neutral-800/80 border border-neutral-700 text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all font-mono"
+                className="w-full ps-8 pe-10 py-2.5 rounded-xl bg-neutral-800/80 border border-neutral-700 text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all font-mono"
               />
               {checkingUsername && (
-                <div className="absolute right-3.5 top-1/2 -translate-y-1/2 w-4 h-4 border-2 border-neutral-400/30 border-t-neutral-200 rounded-full animate-spin" />
+                <div className="absolute end-3.5 top-1/2 -translate-y-1/2 w-4 h-4 border-2 border-neutral-400/30 border-t-neutral-200 rounded-full animate-spin" />
               )}
               {!checkingUsername && usernameAvailable === true && (
-                <CheckCircle2 className="absolute right-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-emerald-400" />
+                <CheckCircle2 className="absolute end-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-emerald-400" />
               )}
               {!checkingUsername && usernameAvailable === false && (
-                <AlertCircle className="absolute right-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-red-400" />
+                <AlertCircle className="absolute end-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-red-400" />
               )}
             </div>
             {usernameError ? (
@@ -388,7 +390,7 @@ export function OnboardingScreen({
           {/* Gender (Required) */}
           <div>
             <label className="block text-xs font-semibold text-neutral-300 mb-1.5">
-              Gender <span className="text-red-400">*</span>
+              {t('auth.selectGender')} <span className="text-red-400">*</span>
             </label>
             <select
               required
@@ -397,7 +399,7 @@ export function OnboardingScreen({
               className="w-full py-2.5 px-3.5 rounded-xl bg-neutral-800/80 border border-neutral-700 text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all cursor-pointer"
             >
               <option value="" disabled>
-                -- Select Gender (Required) --
+                -- {t('auth.selectGender')} --
               </option>
               <option value="male">Male</option>
               <option value="female">Female</option>
@@ -408,7 +410,7 @@ export function OnboardingScreen({
           {/* Bio (Optional) */}
           <div>
             <label className="block text-xs font-semibold text-neutral-300 mb-1.5">
-              Bio <span className="text-neutral-500 font-normal">(Optional)</span>
+              {t('auth.bio')} <span className="text-neutral-500 font-normal">(Optional)</span>
             </label>
             <textarea
               value={bio}
@@ -422,17 +424,17 @@ export function OnboardingScreen({
           {/* Country */}
           <div>
             <label className="block text-xs font-semibold text-neutral-300 mb-1.5">
-              Country <span className="text-red-400">*</span>
+              {t('auth.selectCountry')} <span className="text-red-400">*</span>
             </label>
             <div className="relative">
-              <Globe className="w-4 h-4 text-neutral-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <Globe className="w-4 h-4 text-neutral-400 absolute start-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
               <select
                 required
                 value={country}
                 onChange={(e) => setCountry(e.target.value)}
-                className="w-full pl-10 pr-8 py-2.5 rounded-xl bg-neutral-800/80 border border-neutral-700 text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all appearance-none cursor-pointer"
+                className="w-full ps-10 pe-8 py-2.5 rounded-xl bg-neutral-800/80 border border-neutral-700 text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all appearance-none cursor-pointer"
               >
-                <option value="">Select Country</option>
+                <option value="">{t('auth.selectCountry')}</option>
                 {WORLD_COUNTRIES.map((c) => (
                   <option key={c.name} value={c.name}>
                     {c.flag} {c.name}
@@ -440,7 +442,7 @@ export function OnboardingScreen({
                 ))}
                 <option value="Other">🌍 Other</option>
               </select>
-              <ChevronDown className="w-4 h-4 text-neutral-400 absolute right-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <ChevronDown className="w-4 h-4 text-neutral-400 absolute end-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
             </div>
           </div>
 

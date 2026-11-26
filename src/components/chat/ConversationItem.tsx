@@ -3,6 +3,7 @@ import { Conversation } from '@/src/types';
 import { cn, formatDate, getAvatarColor, getInitials } from '@/src/lib/utils';
 import { Check, CheckCheck, Trash2, Phone, Video, PhoneMissed, PhoneOutgoing, PhoneIncoming, MoreVertical, X } from 'lucide-react';
 import { UserAvatar } from '@/src/components/ui/UserAvatar';
+import { useLanguage } from '@/src/lib/LanguageContext';
 
 interface ConversationItemProps {
   conversation: Conversation;
@@ -21,6 +22,7 @@ export const ConversationItem: React.FC<ConversationItemProps> = ({
   onSelect,
   onDelete,
 }) => {
+  const { t } = useLanguage();
   const [showLongPressModal, setShowLongPressModal] = useState(false);
   const [isPressing, setIsPressing] = useState(false);
   const longPressTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -149,7 +151,7 @@ export const ConversationItem: React.FC<ConversationItemProps> = ({
         return (
           <span className={cn('inline-flex items-center gap-1 font-medium', isSelected ? 'text-red-200' : 'text-[#ea4335] dark:text-[#ef4444]')}>
             <PhoneMissed className={cn('w-3.5 h-3.5 shrink-0', isSelected ? 'text-red-200' : 'text-[#ea4335] dark:text-[#ef4444]')} />
-            <span className="truncate">{isVideo ? 'Missed video call' : 'Missed voice call'}</span>
+            <span className="truncate">{isVideo ? t('label.missedVideoCall') : t('label.missedAudioCall')}</span>
           </span>
         );
       }
@@ -218,7 +220,7 @@ export const ConversationItem: React.FC<ConversationItemProps> = ({
         role="button"
         tabIndex={0}
         className={cn(
-          'w-full text-left p-3 rounded-2xl flex items-center gap-3 transition-all relative group cursor-pointer select-none',
+          'w-full text-start p-3 rounded-2xl flex items-center gap-3 transition-all relative group cursor-pointer select-none',
           isPressing && 'scale-[0.98] bg-neutral-200/80 dark:bg-neutral-800 transition-transform duration-300',
           isSelected
             ? 'bg-blue-600 text-white shadow-md shadow-blue-500/10'
@@ -302,7 +304,7 @@ export const ConversationItem: React.FC<ConversationItemProps> = ({
                   e.stopPropagation();
                   onDelete(e);
                 }}
-                title="Delete conversation"
+                title={t('action.delete')}
                 className={cn(
                   'hidden sm:flex opacity-0 group-hover:opacity-100 p-1.5 rounded-xl transition-all shrink-0 cursor-pointer',
                   isSelected
@@ -372,7 +374,7 @@ export const ConversationItem: React.FC<ConversationItemProps> = ({
                 }}
                 className="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium text-neutral-800 dark:text-neutral-200 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
               >
-                Open Chat
+                {t('action.startChat')}
               </button>
 
               {onDelete && (
@@ -384,7 +386,7 @@ export const ConversationItem: React.FC<ConversationItemProps> = ({
                   className="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/40 hover:bg-red-100 dark:hover:bg-red-900/50 transition-colors"
                 >
                   <Trash2 className="w-4 h-4" />
-                  <span>Delete Conversation</span>
+                  <span>{t('desc.deleteConversationTitle')}</span>
                 </button>
               )}
 
@@ -392,7 +394,7 @@ export const ConversationItem: React.FC<ConversationItemProps> = ({
                 onClick={() => setShowLongPressModal(false)}
                 className="w-full text-center py-2.5 text-xs text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 font-medium"
               >
-                Cancel
+                {t('action.cancel')}
               </button>
             </div>
           </div>

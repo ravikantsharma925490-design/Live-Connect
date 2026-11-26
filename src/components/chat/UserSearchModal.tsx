@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Search, X, MessageSquare, AtSign, User, Phone, Video } from 'lucide-react';
 import { Profile } from '@/src/types';
 import { cn, getAvatarColor, getInitials } from '@/src/lib/utils';
+import { useLanguage } from '@/src/lib/LanguageContext';
 
 interface UserSearchModalProps {
   isOpen: boolean;
@@ -20,6 +21,7 @@ export const UserSearchModal: React.FC<UserSearchModalProps> = ({
   onStartCall,
   isUserOnline,
 }) => {
+  const { t } = useLanguage();
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<Profile[]>([]);
   const [loading, setLoading] = useState(false);
@@ -95,11 +97,11 @@ export const UserSearchModal: React.FC<UserSearchModalProps> = ({
         {/* Search header */}
         <div className="p-4 border-b border-neutral-200 dark:border-neutral-800 bg-neutral-50/70 dark:bg-neutral-800/40 flex items-center gap-3">
           <div className="relative flex-1">
-            <Search className="w-4 h-4 text-neutral-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+            <Search className="w-4 h-4 text-neutral-400 absolute start-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
             <input
               type="text"
               autoFocus
-              placeholder="Search by username or name..."
+              placeholder={t('desc.searchPlaceholder', 'Type User ID or @username...')}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={(e) => {
@@ -108,16 +110,17 @@ export const UserSearchModal: React.FC<UserSearchModalProps> = ({
                   executeSearch(query);
                 }
               }}
-              className="w-full pl-10 pr-10 py-2.5 rounded-2xl border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-white placeholder-neutral-400 text-base focus:outline-none focus:ring-2 focus:ring-blue-500 shadow-inner"
+              className="w-full ps-10 pe-10 py-2.5 rounded-2xl border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-white placeholder-neutral-400 text-base focus:outline-none focus:ring-2 focus:ring-blue-500 shadow-inner"
             />
             {loading && (
-              <div className="absolute right-3.5 top-1/2 -translate-y-1/2">
+              <div className="absolute end-3.5 top-1/2 -translate-y-1/2">
                 <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
               </div>
             )}
           </div>
           <button
             onClick={onClose}
+            aria-label={t('action.close', 'Close')}
             className="p-2 rounded-2xl text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors cursor-pointer"
           >
             <X className="w-5 h-5" />
@@ -129,14 +132,14 @@ export const UserSearchModal: React.FC<UserSearchModalProps> = ({
           {loading && results.length === 0 && (
             <div className="flex items-center justify-center py-12 text-sm text-neutral-400 gap-2">
               <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
-              Searching users...
+              {t('action.search', 'Search')}...
             </div>
           )}
 
           {results.length > 0 && (
             <div className="space-y-1.5">
               <p className="px-3 py-1 text-[11px] font-semibold text-neutral-400 uppercase tracking-wider">
-                Matching Users ({results.length})
+                {t('title.searchUser', 'Search Users')} ({results.length})
               </p>
               {results.map((u) => {
                 const online = isUserOnline(u);
@@ -189,7 +192,7 @@ export const UserSearchModal: React.FC<UserSearchModalProps> = ({
                         <>
                           <button
                             type="button"
-                            title="Voice Call"
+                            title={t('action.audioCall', 'Audio Call')}
                             onClick={(e) => {
                               e.stopPropagation();
                               onStartCall(u, 'audio');
@@ -200,7 +203,7 @@ export const UserSearchModal: React.FC<UserSearchModalProps> = ({
                           </button>
                           <button
                             type="button"
-                            title="Video Call"
+                            title={t('action.videoCall', 'Video Call')}
                             onClick={(e) => {
                               e.stopPropagation();
                               onStartCall(u, 'video');
@@ -226,7 +229,7 @@ export const UserSearchModal: React.FC<UserSearchModalProps> = ({
                         ) : (
                           <MessageSquare className="w-3.5 h-3.5" />
                         )}
-                        <span>{isSelected ? 'Opening...' : 'Chat'}</span>
+                        <span>{isSelected ? '...' : t('label.chat', 'Chat')}</span>
                       </button>
                     </div>
                   </div>
@@ -238,16 +241,15 @@ export const UserSearchModal: React.FC<UserSearchModalProps> = ({
           {!loading && hasSearched && results.length === 0 && (
             <div className="flex flex-col items-center justify-center py-12 text-center text-neutral-400">
               <AtSign className="w-8 h-8 opacity-40 mb-2" />
-              <p className="text-sm font-medium">No users found</p>
-              <p className="text-xs text-neutral-500 mt-0.5">Try searching another username or name</p>
+              <p className="text-sm font-medium">{t('desc.noUsersFound', 'No user found')}</p>
             </div>
           )}
 
           {!loading && !hasSearched && (
             <div className="flex flex-col items-center justify-center py-12 text-center text-neutral-400">
               <Search className="w-8 h-8 opacity-40 mb-2" />
-              <p className="text-sm font-medium">Type a name or username</p>
-              <p className="text-xs text-neutral-500 mt-0.5">Instant search across all registered users</p>
+              <p className="text-sm font-medium">{t('title.searchUser', 'Search Users')}</p>
+              <p className="text-xs text-neutral-500 mt-0.5">{t('desc.searchPlaceholder', 'Type User ID or @username...')}</p>
             </div>
           )}
         </div>

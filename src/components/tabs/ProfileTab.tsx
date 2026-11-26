@@ -181,7 +181,7 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
           <div className="p-6 md:p-8 rounded-3xl bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 shadow-sm relative overflow-hidden">
             <div className="absolute top-0 right-0 w-48 h-48 bg-blue-500/5 dark:bg-blue-500/10 rounded-full blur-3xl pointer-events-none" />
 
-            <div className="flex flex-col sm:flex-row items-center sm:items-start gap-5 relative z-10 text-center sm:text-left">
+            <div className="flex flex-col sm:flex-row items-center sm:items-start gap-5 relative z-10 text-center sm:text-start">
               {/* Profile Avatar */}
               <UserAvatar
                 src={currentUser.avatar_url}
@@ -222,7 +222,7 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
                       {followersCount}
                     </span>
                     <span className="text-[11px] text-neutral-500 group-hover:text-blue-600 dark:group-hover:text-blue-400">
-                      Followers
+                      {t('label.followers', 'Followers')}
                     </span>
                   </button>
 
@@ -239,7 +239,7 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
                       {followingCount}
                     </span>
                     <span className="text-[11px] text-neutral-500 group-hover:text-blue-600 dark:group-hover:text-blue-400">
-                      Following
+                      {t('label.following', 'Following')}
                     </span>
                   </button>
                 </div>
@@ -265,10 +265,10 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
                 <div className="flex flex-wrap items-center justify-center sm:justify-start gap-4 pt-3 text-xs text-neutral-400 font-medium">
                   <span className="flex items-center gap-1.5 text-emerald-500 font-semibold">
                     <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
-                    Online
+                    {t('status.online', 'Online')}
                   </span>
                   <span>•</span>
-                  <span>Active Now</span>
+                  <span>{t('status.activeNow', 'Active Now')}</span>
                   {currentUser.created_at && (
                     <>
                       <span>•</span>
@@ -284,21 +284,21 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
           <div className="rounded-3xl bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 shadow-xs overflow-hidden divide-y divide-neutral-100 dark:divide-neutral-800">
             <div className="px-6 py-4 bg-neutral-50/50 dark:bg-neutral-800/30 flex items-center justify-between">
               <h4 className="text-xs font-bold text-neutral-400 dark:text-neutral-500 uppercase tracking-wider">
-                Settings & Preferences
+                {t('title.settings', 'Settings & Preferences')}
               </h4>
             </div>
 
             {/* 1. App Language Selector */}
             <button
               onClick={openLanguageModal}
-              className="w-full p-4 md:px-6 flex items-center justify-between hover:bg-neutral-50/50 dark:hover:bg-neutral-800/40 transition-colors text-left group cursor-pointer"
+              className="w-full p-4 md:px-6 flex items-center justify-between hover:bg-neutral-50/50 dark:hover:bg-neutral-800/40 transition-colors text-start group cursor-pointer"
             >
               <div className="flex items-center gap-3.5">
                 <div className="p-2.5 rounded-2xl bg-blue-500/10 text-blue-600 dark:text-blue-400">
                   <Globe className="w-5 h-5" />
                 </div>
                 <div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <h5 className="text-sm font-bold text-neutral-900 dark:text-neutral-100 group-hover:text-blue-600 transition-colors">
                       {t('title.appLanguage', 'App Language')}
                     </h5>
@@ -307,12 +307,12 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
                     </span>
                   </div>
                   <p className="text-xs text-neutral-500">
-                    {currentLanguage.name} ({currentLanguage.country}) • 100+ World Languages available
+                    {currentLanguage.name} ({currentLanguage.country}) • {t('desc.worldLanguagesAvailable', '106+ World Languages available')}
                   </p>
                 </div>
               </div>
 
-              <ChevronRight className="w-4 h-4 text-neutral-400 group-hover:translate-x-0.5 transition-transform" />
+              <ChevronRight className="w-4 h-4 text-neutral-400 group-hover:translate-x-0.5 rtl:rotate-180 transition-transform" />
             </button>
 
             {/* 2. Dark Mode Theme */}
@@ -344,7 +344,7 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
                 <span
                   className={cn(
                     'pointer-events-none inline-block h-6 w-6 transform rounded-full bg-white shadow-md transition duration-200 ease-in-out',
-                    isDarkMode ? 'translate-x-5' : 'translate-x-0'
+                    isDarkMode ? 'ltr:translate-x-5 rtl:-translate-x-5' : 'translate-x-0'
                   )}
                 />
               </button>
@@ -353,7 +353,7 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
             {/* 3. Notifications Modal */}
             <button
               onClick={() => setIsNotifModalOpen(true)}
-              className="w-full p-4 md:px-6 flex items-center justify-between hover:bg-neutral-50/50 dark:hover:bg-neutral-800/40 transition-colors text-left group cursor-pointer"
+              className="w-full p-4 md:px-6 flex items-center justify-between hover:bg-neutral-50/50 dark:hover:bg-neutral-800/40 transition-colors text-start group cursor-pointer"
             >
               <div className="flex items-center gap-3.5">
                 <div className="p-2.5 rounded-2xl bg-purple-500/10 text-purple-600 dark:text-purple-400">
@@ -369,13 +369,13 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
                 </div>
               </div>
 
-              <ChevronRight className="w-4 h-4 text-neutral-400 group-hover:translate-x-0.5 transition-transform" />
+              <ChevronRight className="w-4 h-4 text-neutral-400 group-hover:translate-x-0.5 rtl:rotate-180 transition-transform" />
             </button>
 
             {/* 4. App Permissions Modal */}
             <button
               onClick={onOpenSettingsModal}
-              className="w-full p-4 md:px-6 flex items-center justify-between hover:bg-neutral-50/50 dark:hover:bg-neutral-800/40 transition-colors text-left group cursor-pointer"
+              className="w-full p-4 md:px-6 flex items-center justify-between hover:bg-neutral-50/50 dark:hover:bg-neutral-800/40 transition-colors text-start group cursor-pointer"
             >
               <div className="flex items-center gap-3.5">
                 <div className="p-2.5 rounded-2xl bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
@@ -391,14 +391,14 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
                 </div>
               </div>
 
-              <ChevronRight className="w-4 h-4 text-neutral-400 group-hover:translate-x-0.5 transition-transform" />
+              <ChevronRight className="w-4 h-4 text-neutral-400 group-hover:translate-x-0.5 rtl:rotate-180 transition-transform" />
             </button>
 
             {/* 4b. Account Status & Strikes */}
             {onOpenAccountStatus && (
               <button
                 onClick={onOpenAccountStatus}
-                className="w-full p-4 md:px-6 flex items-center justify-between hover:bg-neutral-50/50 dark:hover:bg-neutral-800/40 transition-colors text-left group cursor-pointer"
+                className="w-full p-4 md:px-6 flex items-center justify-between hover:bg-neutral-50/50 dark:hover:bg-neutral-800/40 transition-colors text-start group cursor-pointer"
               >
                 <div className="flex items-center gap-3.5">
                   <div className="p-2.5 rounded-2xl bg-[#0095F6]/10 text-[#0095F6]">
@@ -406,14 +406,11 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
                   </div>
                   <div>
                     <h5 className="text-sm font-bold text-neutral-900 dark:text-neutral-100 group-hover:text-[#0095F6] transition-colors">
-                      Account Status & Strikes
+                      {t('title.accountStatus', 'Account Status & Strikes')}
                     </h5>
-                    <p className="text-xs text-neutral-500">
-                      Standing, warnings, feature restrictions, appeals & data export
-                    </p>
                   </div>
                 </div>
-                <ChevronRight className="w-4 h-4 text-neutral-400 group-hover:translate-x-0.5 transition-transform" />
+                <ChevronRight className="w-4 h-4 text-neutral-400 group-hover:translate-x-0.5 rtl:rotate-180 transition-transform" />
               </button>
             )}
 
@@ -421,7 +418,7 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
             {onOpenAdminPanel && (
               <button
                 onClick={onOpenAdminPanel}
-                className="w-full p-4 md:px-6 flex items-center justify-between hover:bg-neutral-50/50 dark:hover:bg-neutral-800/40 transition-colors text-left group cursor-pointer"
+                className="w-full p-4 md:px-6 flex items-center justify-between hover:bg-neutral-50/50 dark:hover:bg-neutral-800/40 transition-colors text-start group cursor-pointer"
               >
                 <div className="flex items-center gap-3.5">
                   <div className="p-2.5 rounded-2xl bg-indigo-500/10 text-indigo-600 dark:text-indigo-400">
@@ -429,21 +426,18 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
                   </div>
                   <div>
                     <h5 className="text-sm font-bold text-neutral-900 dark:text-neutral-100 group-hover:text-indigo-600 transition-colors">
-                      Trust & Safety Admin Console
+                      {t('title.adminConsole', 'Trust & Safety Admin Console')}
                     </h5>
-                    <p className="text-xs text-neutral-500">
-                      Manage user strikes, suspensions, bans, appeals & audit logs
-                    </p>
                   </div>
                 </div>
-                <ChevronRight className="w-4 h-4 text-neutral-400 group-hover:translate-x-0.5 transition-transform" />
+                <ChevronRight className="w-4 h-4 text-neutral-400 group-hover:translate-x-0.5 rtl:rotate-180 transition-transform" />
               </button>
             )}
 
             {/* 5. Blocked Accounts / Users */}
             <button
               onClick={() => setIsBlockedModalOpen(true)}
-              className="w-full p-4 md:px-6 flex items-center justify-between hover:bg-neutral-50/50 dark:hover:bg-neutral-800/40 transition-colors text-left group cursor-pointer"
+              className="w-full p-4 md:px-6 flex items-center justify-between hover:bg-neutral-50/50 dark:hover:bg-neutral-800/40 transition-colors text-start group cursor-pointer"
             >
               <div className="flex items-center gap-3.5">
                 <div className="p-2.5 rounded-2xl bg-red-500/10 text-red-600 dark:text-red-400">
@@ -468,13 +462,13 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
                 </div>
               </div>
 
-              <ChevronRight className="w-4 h-4 text-neutral-400 group-hover:translate-x-0.5 transition-transform" />
+              <ChevronRight className="w-4 h-4 text-neutral-400 group-hover:translate-x-0.5 rtl:rotate-180 transition-transform" />
             </button>
 
             {/* 6. Help Center & Privacy */}
             <button
               onClick={() => handleOpenHelpCenter('default')}
-              className="w-full p-4 md:px-6 flex items-center justify-between hover:bg-neutral-50/50 dark:hover:bg-neutral-800/40 transition-colors text-left group cursor-pointer"
+              className="w-full p-4 md:px-6 flex items-center justify-between hover:bg-neutral-50/50 dark:hover:bg-neutral-800/40 transition-colors text-start group cursor-pointer"
             >
               <div className="flex items-center gap-3.5">
                 <div className="p-2.5 rounded-2xl bg-amber-500/10 text-amber-500">
@@ -490,7 +484,7 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
                 </div>
               </div>
 
-              <ChevronRight className="w-4 h-4 text-neutral-400 group-hover:translate-x-0.5 transition-transform" />
+              <ChevronRight className="w-4 h-4 text-neutral-400 group-hover:translate-x-0.5 rtl:rotate-180 transition-transform" />
             </button>
 
           </div>
@@ -503,17 +497,14 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
                 className="w-full py-3 rounded-2xl bg-red-50 hover:bg-red-100 dark:bg-red-950/40 dark:hover:bg-red-900/50 text-red-600 dark:text-red-400 border border-red-200/80 dark:border-red-900/50 font-bold text-sm transition-all flex items-center justify-center gap-2 active:scale-98 cursor-pointer"
               >
                 <LogOut className="w-4 h-4" />
-                <span>Log Out</span>
+                <span>{t('action.logOut', 'Log Out')}</span>
               </button>
             ) : (
               <div className="space-y-3 p-2 animate-in fade-in">
                 <div className="text-center">
                   <h5 className="text-sm font-bold text-neutral-900 dark:text-neutral-100">
-                    Are you sure you want to sign out?
+                    {t('desc.signOutConfirm', 'Are you sure you want to sign out?')}
                   </h5>
-                  <p className="text-xs text-neutral-500 mt-0.5">
-                    You can log back in anytime with your email and password.
-                  </p>
                 </div>
 
                 <div className="grid grid-cols-2 gap-2.5 pt-1">
@@ -521,13 +512,13 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
                     onClick={() => setShowSignOutConfirm(false)}
                     className="py-2.5 rounded-xl bg-neutral-100 hover:bg-neutral-200 dark:bg-neutral-800 dark:hover:bg-neutral-700 text-neutral-700 dark:text-neutral-300 font-semibold text-xs transition-colors cursor-pointer"
                   >
-                    Cancel
+                    {t('action.cancel', 'Cancel')}
                   </button>
                   <button
                     onClick={onSignOut}
                     className="py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-semibold text-xs transition-colors shadow-xs cursor-pointer"
                   >
-                    Confirm Sign Out
+                    {t('action.confirmSignOut', 'Confirm Sign Out')}
                   </button>
                 </div>
               </div>

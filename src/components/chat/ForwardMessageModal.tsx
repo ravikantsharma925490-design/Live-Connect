@@ -4,6 +4,7 @@ import { Conversation, Message, Profile } from '@/src/types';
 import { UserAvatar } from '../ui/UserAvatar';
 import { isFirebaseSessionActive } from '@/src/lib/firebase/client';
 import { sendMessageToFirestoreFs } from '@/src/lib/firebase/services';
+import { useLanguage } from '@/src/lib/LanguageContext';
 
 interface ForwardMessageModalProps {
   isOpen: boolean;
@@ -22,6 +23,7 @@ export const ForwardMessageModal: React.FC<ForwardMessageModalProps> = ({
   currentUser,
   onForwardSuccess,
 }) => {
+  const { t } = useLanguage();
   const [selectedConvId, setSelectedConvId] = useState<string | null>(null);
   const [forwarding, setForwarding] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -120,7 +122,7 @@ export const ForwardMessageModal: React.FC<ForwardMessageModalProps> = ({
             Select Chat to Forward to:
           </p>
 
-          <div className="max-h-56 overflow-y-auto space-y-1 pr-1">
+          <div className="max-h-56 overflow-y-auto space-y-1 pe-1">
             {conversations.length > 0 ? (
               conversations.map((conv) => {
                 const isSelected = selectedConvId === conv.id;
@@ -176,7 +178,7 @@ export const ForwardMessageModal: React.FC<ForwardMessageModalProps> = ({
             onClick={onClose}
             className="px-3 py-2 rounded-xl text-xs font-semibold text-neutral-600 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800"
           >
-            Cancel
+            {t('action.cancel')}
           </button>
           <button
             onClick={handleForward}
@@ -190,7 +192,7 @@ export const ForwardMessageModal: React.FC<ForwardMessageModalProps> = ({
             ) : (
               <Send className="w-3.5 h-3.5" />
             )}
-            {done ? 'Forwarded!' : 'Forward'}
+            {done ? 'Forwarded!' : t('action.send')}
           </button>
         </div>
       </div>

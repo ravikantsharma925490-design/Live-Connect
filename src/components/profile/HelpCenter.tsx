@@ -26,6 +26,7 @@ import { PrivacyPolicy } from '../legal/PrivacyPolicy';
 import { TermsConditions } from '../legal/TermsConditions';
 import { isFirebaseSessionActive } from '@/src/lib/firebase/client';
 import { submitProblemReportFs } from '@/src/lib/firebase/services';
+import { useLanguage } from '@/src/lib/LanguageContext';
 
 interface HelpCenterProps {
   currentUser?: Profile | null;
@@ -40,6 +41,7 @@ export const HelpCenter: React.FC<HelpCenterProps> = ({
   initialShowTerms = false,
   onBack,
 }) => {
+  const { t } = useLanguage();
   const [showPrivacyPolicy, setShowPrivacyPolicy] = useState<boolean>(initialShowPrivacy);
   const [showTermsConditions, setShowTermsConditions] = useState<boolean>(initialShowTerms);
   const [selectedSection, setSelectedSection] = useState<string | null>(null);
@@ -323,16 +325,16 @@ export const HelpCenter: React.FC<HelpCenterProps> = ({
             className="p-2.5 rounded-2xl bg-neutral-100 dark:bg-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-700 text-neutral-700 dark:text-neutral-300 transition-all active:scale-95 flex items-center gap-1 text-xs font-bold"
             title="Back to Profile"
           >
-            <ArrowLeft className="w-4 h-4" />
+            <ArrowLeft className="w-4 h-4 rtl:rotate-180" />
             <span className="hidden sm:inline">Back</span>
           </button>
           <div>
             <h2 className="text-xl md:text-2xl font-extrabold text-neutral-900 dark:text-neutral-100 tracking-tight flex items-center gap-2">
               <HelpCircle className="w-6 h-6 text-blue-600 dark:text-blue-400" />
-              <span>Help Center</span>
+              <span>{t('title.helpCenter')}</span>
             </h2>
             <p className="text-xs text-neutral-500 font-medium mt-0.5">
-              Guides, FAQs, troubleshooting, and support
+              {t('desc.helpCenterSub')}
             </p>
           </div>
         </div>
@@ -341,13 +343,13 @@ export const HelpCenter: React.FC<HelpCenterProps> = ({
       {/* Search Input Bar */}
       <div className="p-4 md:px-6 bg-white/60 dark:bg-neutral-900/60 backdrop-blur-md border-b border-neutral-200/80 dark:border-neutral-800/80">
         <div className="relative max-w-xl mx-auto">
-          <Search className="w-4 h-4 text-neutral-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+          <Search className="w-4 h-4 text-neutral-400 absolute start-3.5 top-1/2 -translate-y-1/2" />
           <input
             type="text"
             placeholder="Search help topics, FAQs, or troubleshooting..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full pl-10 pr-4 py-2.5 text-base rounded-2xl bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 text-neutral-900 dark:text-neutral-100 placeholder-neutral-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all shadow-xs"
+            className="w-full ps-10 pe-4 py-2.5 text-base rounded-2xl bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 text-neutral-900 dark:text-neutral-100 placeholder-neutral-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all shadow-xs"
           />
         </div>
       </div>
@@ -359,7 +361,7 @@ export const HelpCenter: React.FC<HelpCenterProps> = ({
           <div className="rounded-3xl bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 shadow-xs overflow-hidden">
             <button
               onClick={() => setSelectedSection(selectedSection === 'faq' ? null : 'faq')}
-              className="w-full p-4 md:p-5 flex items-center justify-between text-left hover:bg-neutral-50/50 dark:hover:bg-neutral-800/40 transition-colors"
+              className="w-full p-4 md:p-5 flex items-center justify-between text-start hover:bg-neutral-50/50 dark:hover:bg-neutral-800/40 transition-colors"
             >
               <div className="flex items-center gap-3.5">
                 <div className="p-2.5 rounded-2xl bg-amber-500/10 text-amber-500">
@@ -414,7 +416,7 @@ export const HelpCenter: React.FC<HelpCenterProps> = ({
           <div className="rounded-3xl bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 shadow-xs overflow-hidden">
             <button
               onClick={() => setSelectedSection(selectedSection === 'messaging' ? null : 'messaging')}
-              className="w-full p-4 md:p-5 flex items-center justify-between text-left hover:bg-neutral-50/50 dark:hover:bg-neutral-800/40 transition-colors"
+              className="w-full p-4 md:p-5 flex items-center justify-between text-start hover:bg-neutral-50/50 dark:hover:bg-neutral-800/40 transition-colors"
             >
               <div className="flex items-center gap-3.5">
                 <div className="p-2.5 rounded-2xl bg-blue-500/10 text-blue-500">
@@ -463,7 +465,7 @@ export const HelpCenter: React.FC<HelpCenterProps> = ({
           <div className="rounded-3xl bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 shadow-xs overflow-hidden">
             <button
               onClick={() => setSelectedSection(selectedSection === 'audio-call' ? null : 'audio-call')}
-              className="w-full p-4 md:p-5 flex items-center justify-between text-left hover:bg-neutral-50/50 dark:hover:bg-neutral-800/40 transition-colors"
+              className="w-full p-4 md:p-5 flex items-center justify-between text-start hover:bg-neutral-50/50 dark:hover:bg-neutral-800/40 transition-colors"
             >
               <div className="flex items-center gap-3.5">
                 <div className="p-2.5 rounded-2xl bg-emerald-500/10 text-emerald-500">
@@ -512,7 +514,7 @@ export const HelpCenter: React.FC<HelpCenterProps> = ({
           <div className="rounded-3xl bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 shadow-xs overflow-hidden">
             <button
               onClick={() => setSelectedSection(selectedSection === 'video-call' ? null : 'video-call')}
-              className="w-full p-4 md:p-5 flex items-center justify-between text-left hover:bg-neutral-50/50 dark:hover:bg-neutral-800/40 transition-colors"
+              className="w-full p-4 md:p-5 flex items-center justify-between text-start hover:bg-neutral-50/50 dark:hover:bg-neutral-800/40 transition-colors"
             >
               <div className="flex items-center gap-3.5">
                 <div className="p-2.5 rounded-2xl bg-indigo-500/10 text-indigo-500">
@@ -561,7 +563,7 @@ export const HelpCenter: React.FC<HelpCenterProps> = ({
           <div className="rounded-3xl bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 shadow-xs overflow-hidden">
             <button
               onClick={() => setSelectedSection(selectedSection === 'account-privacy' ? null : 'account-privacy')}
-              className="w-full p-4 md:p-5 flex items-center justify-between text-left hover:bg-neutral-50/50 dark:hover:bg-neutral-800/40 transition-colors"
+              className="w-full p-4 md:p-5 flex items-center justify-between text-start hover:bg-neutral-50/50 dark:hover:bg-neutral-800/40 transition-colors"
             >
               <div className="flex items-center gap-3.5">
                 <div className="p-2.5 rounded-2xl bg-purple-500/10 text-purple-500">
@@ -623,7 +625,7 @@ export const HelpCenter: React.FC<HelpCenterProps> = ({
           <div className="rounded-3xl bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 shadow-xs overflow-hidden">
             <button
               onClick={() => setSelectedSection(selectedSection === 'report-problem' ? null : 'report-problem')}
-              className="w-full p-4 md:p-5 flex items-center justify-between text-left hover:bg-neutral-50/50 dark:hover:bg-neutral-800/40 transition-colors"
+              className="w-full p-4 md:p-5 flex items-center justify-between text-start hover:bg-neutral-50/50 dark:hover:bg-neutral-800/40 transition-colors"
             >
               <div className="flex items-center gap-3.5">
                 <div className="p-2.5 rounded-2xl bg-rose-500/10 text-rose-500">
@@ -748,7 +750,7 @@ export const HelpCenter: React.FC<HelpCenterProps> = ({
           <div className="rounded-3xl bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 shadow-xs overflow-hidden">
             <button
               onClick={() => setSelectedSection(selectedSection === 'contact-support' ? null : 'contact-support')}
-              className="w-full p-4 md:p-5 flex items-center justify-between text-left hover:bg-neutral-50/50 dark:hover:bg-neutral-800/40 transition-colors"
+              className="w-full p-4 md:p-5 flex items-center justify-between text-start hover:bg-neutral-50/50 dark:hover:bg-neutral-800/40 transition-colors"
             >
               <div className="flex items-center gap-3.5">
                 <div className="p-2.5 rounded-2xl bg-cyan-500/10 text-cyan-500">

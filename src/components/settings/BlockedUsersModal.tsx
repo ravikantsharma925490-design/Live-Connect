@@ -14,6 +14,7 @@ import { cn, getAvatarColor, getInitials } from '@/src/lib/utils';
 import { isFirebaseSessionActive } from '@/src/lib/firebase/client';
 import { fetchMultiplePublicProfilesFs } from '@/src/lib/firebase/services';
 import { getAuthHeaders } from '@/src/lib/authHeader';
+import { useLanguage } from '@/src/lib/LanguageContext';
 
 interface BlockedUsersModalProps {
   isOpen: boolean;
@@ -30,6 +31,7 @@ export const BlockedUsersModal: React.FC<BlockedUsersModalProps> = ({
   onUnblock,
   currentUserId,
 }) => {
+  const { t } = useLanguage();
   const [blockedUsers, setBlockedUsers] = useState<Profile[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -134,7 +136,7 @@ export const BlockedUsersModal: React.FC<BlockedUsersModalProps> = ({
 
               <div className="space-y-1.5">
                 <h4 className="text-base font-bold text-neutral-900 dark:text-neutral-100">
-                  Unblock {userToUnblock.display_name || `@${userToUnblock.username}`}?
+                  {t('action.unblock')} {userToUnblock.display_name || `@${userToUnblock.username}`}?
                 </h4>
                 <p className="text-xs text-neutral-500 dark:text-neutral-400 leading-relaxed">
                   They will be able to find your profile and follow you again. Previous follow connections are not restored.
@@ -147,14 +149,14 @@ export const BlockedUsersModal: React.FC<BlockedUsersModalProps> = ({
                   onClick={() => setUserToUnblock(null)}
                   className="py-2.5 rounded-2xl bg-neutral-100 dark:bg-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-700 text-neutral-700 dark:text-neutral-300 font-semibold text-xs transition-colors cursor-pointer"
                 >
-                  Cancel
+                  {t('action.cancel')}
                 </button>
                 <button
                   type="button"
                   onClick={handleConfirmUnblock}
                   className="py-2.5 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs shadow-md shadow-blue-600/20 transition-all active:scale-95 cursor-pointer"
                 >
-                  Unblock
+                  {t('action.unblock')}
                 </button>
               </div>
             </div>
@@ -170,14 +172,14 @@ export const BlockedUsersModal: React.FC<BlockedUsersModalProps> = ({
             <div>
               <div className="flex items-center gap-2">
                 <h3 className="text-base md:text-lg font-extrabold text-neutral-900 dark:text-neutral-100">
-                  Blocked Accounts
+                  {t('title.blockedUsers')}
                 </h3>
                 <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-red-100 dark:bg-red-950/60 text-red-600 dark:text-red-400 border border-red-200 dark:border-red-900/50">
                   {blockedUsers.length}
                 </span>
               </div>
               <p className="text-xs text-neutral-500">
-                Blocked users cannot message or call you
+                {t('desc.blockedUsersSub')}
               </p>
             </div>
           </div>
@@ -185,7 +187,7 @@ export const BlockedUsersModal: React.FC<BlockedUsersModalProps> = ({
           <div className="flex items-center gap-1.5">
             <button
               onClick={fetchBlockedProfiles}
-              title="Refresh list"
+              title={t('action.refresh')}
               disabled={loading}
               className="p-2 rounded-xl text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors cursor-pointer"
             >
@@ -193,6 +195,7 @@ export const BlockedUsersModal: React.FC<BlockedUsersModalProps> = ({
             </button>
             <button
               onClick={onClose}
+              title={t('action.close')}
               className="p-2 rounded-xl text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors cursor-pointer"
             >
               <X className="w-5 h-5" />
@@ -204,13 +207,13 @@ export const BlockedUsersModal: React.FC<BlockedUsersModalProps> = ({
         {blockedUsers.length > 0 && (
           <div className="p-3 md:px-5 border-b border-neutral-100 dark:border-neutral-800/60 bg-neutral-50/50 dark:bg-neutral-800/20">
             <div className="relative">
-              <Search className="w-4 h-4 text-neutral-400 absolute left-3 top-1/2 -translate-y-1/2" />
+              <Search className="w-4 h-4 text-neutral-400 absolute start-3 top-1/2 -translate-y-1/2" />
               <input
                 type="text"
-                placeholder="Search blocked accounts..."
+                placeholder={t('desc.searchBlocked')}
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full pl-9 pr-3.5 py-2 text-base rounded-xl bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 text-neutral-900 dark:text-neutral-100 placeholder-neutral-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+                className="w-full ps-9 pe-3.5 py-2 text-base rounded-xl bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 text-neutral-900 dark:text-neutral-100 placeholder-neutral-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
               />
             </div>
           </div>
@@ -265,7 +268,7 @@ export const BlockedUsersModal: React.FC<BlockedUsersModalProps> = ({
                             {getInitials(user.display_name)}
                           </div>
                         )}
-                        <span className="absolute -bottom-0.5 -right-0.5 p-0.5 bg-red-600 rounded-full text-white">
+                        <span className="absolute -bottom-0.5 -end-0.5 p-0.5 bg-red-600 rounded-full text-white">
                           <UserX className="w-2.5 h-2.5" />
                         </span>
                       </div>
@@ -276,7 +279,7 @@ export const BlockedUsersModal: React.FC<BlockedUsersModalProps> = ({
                             {user.display_name || user.username}
                           </h4>
                           <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-red-50 dark:bg-red-950/40 text-red-600 dark:text-red-400 border border-red-200 dark:border-red-900/50">
-                            Blocked
+                            {t('action.blocked')}
                           </span>
                         </div>
                         <p className="text-xs text-neutral-500 font-mono truncate">
@@ -297,7 +300,7 @@ export const BlockedUsersModal: React.FC<BlockedUsersModalProps> = ({
                       ) : (
                         <>
                           <UserCheck className="w-3.5 h-3.5" />
-                          <span>Unblock</span>
+                          <span>{t('action.unblock')}</span>
                         </>
                       )}
                     </button>
@@ -312,7 +315,7 @@ export const BlockedUsersModal: React.FC<BlockedUsersModalProps> = ({
               </div>
               <div className="space-y-1">
                 <h4 className="text-base font-bold text-neutral-800 dark:text-neutral-200">
-                  {searchQuery ? 'No matching blocked accounts' : 'No Blocked Accounts'}
+                  {searchQuery ? t('desc.noUsersFound') : t('desc.noBlockedAccounts')}
                 </h4>
                 <p className="text-xs text-neutral-500 max-w-sm mx-auto leading-relaxed">
                   {searchQuery

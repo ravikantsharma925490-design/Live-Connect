@@ -3,6 +3,7 @@ import { Capacitor, registerPlugin } from '@capacitor/core';
 import { Mic, MicOff, PhoneOff, ShieldCheck, Volume2, Volume1, Sparkles, VolumeX } from 'lucide-react';
 import { ActiveCallState, ConnectionState } from '@/src/types';
 import { cn, formatDuration, getAvatarColor, getInitials } from '@/src/lib/utils';
+import { useLanguage } from '@/src/lib/LanguageContext';
 
 interface AudioRoutePlugin {
   setSpeakerphoneOn(options: { on: boolean }): Promise<{ success: boolean }>;
@@ -31,6 +32,7 @@ export const AudioCallScreen: React.FC<AudioCallScreenProps> = ({
   onToggleMic,
   onEndCall,
 }) => {
+  const { t } = useLanguage();
   const currentCallState = activeCallState || callState;
   const toggleMic = onToggleMicrophone || onToggleMic || (() => {});
 
@@ -218,7 +220,7 @@ export const AudioCallScreen: React.FC<AudioCallScreenProps> = ({
             />
             <span className="text-neutral-200">
               {isConnected
-                ? `Connected • ${formatDuration(durationSeconds)}`
+                ? `${t('status.connected')} • ${formatDuration(durationSeconds)}`
                 : isCaller
                 ? 'Ringing...'
                 : 'Connecting...'}
@@ -310,7 +312,7 @@ export const AudioCallScreen: React.FC<AudioCallScreenProps> = ({
                 toggleMic();
                 showFeedback(localAudioEnabled ? 'Microphone Muted' : 'Microphone Unmuted');
               }}
-              title={localAudioEnabled ? 'Mute Microphone' : 'Unmute Microphone'}
+              title={localAudioEnabled ? t('action.mute') : t('action.unmute')}
               className={cn(
                 'w-14 h-14 rounded-full flex items-center justify-center transition-all hover:scale-105 active:scale-95 shadow-lg',
                 localAudioEnabled
@@ -321,7 +323,7 @@ export const AudioCallScreen: React.FC<AudioCallScreenProps> = ({
               {localAudioEnabled ? <Mic className="w-6 h-6" /> : <MicOff className="w-6 h-6" />}
             </button>
             <span className={cn('text-[11px] font-medium', localAudioEnabled ? 'text-neutral-400' : 'text-red-400 font-semibold')}>
-              {localAudioEnabled ? 'Mute' : 'Muted'}
+              {localAudioEnabled ? t('action.mute') : t('action.unmute')}
             </span>
           </div>
 
@@ -357,13 +359,13 @@ export const AudioCallScreen: React.FC<AudioCallScreenProps> = ({
                 }
                 onEndCall();
               }}
-              title="End Call"
+              title={t('action.endCall')}
               className="w-16 h-16 rounded-full bg-red-600 hover:bg-red-700 text-white flex items-center justify-center shadow-lg shadow-red-600/30 transition-all hover:scale-110 active:scale-95"
             >
               <PhoneOff className="w-7 h-7" />
             </button>
             <span className="text-[11px] text-red-400 font-medium">
-              End Call
+              {t('action.endCall')}
             </span>
           </div>
         </div>

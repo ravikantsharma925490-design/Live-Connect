@@ -298,6 +298,12 @@ export type UserReportStatus = 'pending' | 'under_review' | 'resolved' | 'dismis
 
 export type UserReportSource = 'profile' | 'chat' | 'search' | 'call';
 
+export interface ReportedMessageContext {
+  id: string;
+  content: string;
+  createdAt?: string;
+}
+
 export interface UserReportRecord {
   id: string;
   reporter_id: string;

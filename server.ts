@@ -6,6 +6,7 @@ import fs from 'fs';
 import { spawn } from 'child_process';
 import nodemailer from 'nodemailer';
 import dns from 'dns';
+import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import {
   db,
   UPLOADS_DIR,
@@ -784,6 +785,21 @@ function buildConversationObject(convId: string, requestingUserId?: string) {
 
   const lastMessage = msgRow ? formatMessageRow(msgRow) : null;
 
+  let pinnedMessage: any = null;
+  if (convRow.pinned_message_id) {
+    const pinnedRow = db
+      .prepare(
+        `SELECT m.* FROM messages m
+         LEFT JOIN deleted_messages dm ON m.id = dm.message_id
+         WHERE m.id = ? AND m.conversation_id = ? AND dm.message_id IS NULL
+         LIMIT 1`
+      )
+      .get(convRow.pinned_message_id, convId) as any;
+    if (pinnedRow) {
+      pinnedMessage = formatMessageRow(pinnedRow);
+    }
+  }
+
   let unreadCount = 0;
   if (requestingUserId) {
     const unreadRow = db
@@ -825,6 +841,7 @@ function buildConversationObject(convId: string, requestingUserId?: string) {
     id: convRow.id,
     type: 'direct' as const,
     pinned_message_id: convRow.pinned_message_id || null,
+    pinned_message: pinnedMessage,
     member_ids: memberIds,
     members_meta: membersMeta,
     created_at: convRow.created_at,
@@ -4547,6 +4564,153 @@ app.post('/api/messages/clear', (req, res) => {
   }
 });
 
+// ====================================================================
+// MESSAGE TRANSLATION ENDPOINT (All 106+ Languages via Gemini)
+// ====================================================================
+const translationCache = new Map<string, { translatedText: string; detectedLanguage: string }>();
+const TRANSLATION_CACHE_MAX = 1500;
+
+let sharedGeminiClient: GoogleGenAI | null = null;
+function getGeminiTranslationClient(): GoogleGenAI {
+  const apiKey = process.env.GEMINI_API_KEY?.trim();
+  if (!apiKey) {
+    const err: any = new Error(
+      'Translation requires a Gemini API key. Please configure it in Settings > Secrets.'
+    );
+    err.statusCode = 503;
+    throw err;
+  }
+  if (!sharedGeminiClient) {
+    sharedGeminiClient = new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        },
+      },
+    });
+  }
+  return sharedGeminiClient;
+}
+
+app.post('/api/messages/translate', requireAuth, async (req, res) => {
+  try {
+    let body = req.body;
+    if (typeof body === 'string') {
+      try {
+        body = JSON.parse(body);
+      } catch {}
+    }
+
+    const { text, targetLangCode, targetLangName, targetNativeName } = body || {};
+    const cleanText = typeof text === 'string' ? text.trim() : '';
+    const cleanCode = typeof targetLangCode === 'string' ? targetLangCode.trim().slice(0, 24) : '';
+    const cleanName = typeof targetLangName === 'string' ? targetLangName.trim().slice(0, 80) : '';
+    const cleanNative =
+      typeof targetNativeName === 'string' ? targetNativeName.trim().slice(0, 80) : '';
+
+    if (!cleanText) {
+      return res.status(400).json({ error: 'Message text is required for translation.' });
+    }
+    if (cleanText.length > 4000) {
+      return res.status(400).json({ error: 'Message is too long to translate (max 4000 characters).' });
+    }
+    if (!cleanCode && !cleanName) {
+      return res.status(400).json({ error: 'Target language is required.' });
+    }
+
+    const cacheKey = `${cleanCode.toLowerCase() || cleanName.toLowerCase()}::${cleanText}`;
+    const cached = translationCache.get(cacheKey);
+    if (cached) {
+      return res.json({
+        success: true,
+        translatedText: cached.translatedText,
+        detectedLanguage: cached.detectedLanguage,
+        targetLangCode: cleanCode || cleanName,
+        cached: true,
+      });
+    }
+
+    const ai = getGeminiTranslationClient();
+    const targetDescriptor = [cleanName || cleanCode, cleanNative && cleanNative !== cleanName ? cleanNative : null]
+      .filter(Boolean)
+      .join(' / ');
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-4-hydrogen',
+      contents: `Target language: ${targetDescriptor} (code: ${cleanCode || 'auto'})\n\nMessage:\n${cleanText}`,
+      config: {
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        systemInstruction:
+          'You are an accurate real-time chat translator supporting all 106+ world languages, Hinglish/romanized text, casual chat slang, and formal speech. Translate the provided chat message naturally into the exact requested target language while preserving emojis, formatting, line breaks, @mentions, and URLs. If the message is already in the target language, return it cleanly as-is. Respond strictly with valid JSON matching the schema.',
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            translatedText: {
+              type: Type.STRING,
+              description: 'The translated chat message in the target language.',
+            },
+            detectedLanguage: {
+              type: Type.STRING,
+              description: 'The detected source language name in English.',
+            },
+          },
+          required: ['translatedText', 'detectedLanguage'],
+        },
+      },
+    });
+
+    const rawJson = (response.text ?? '{}').trim();
+    let parsed: { translatedText?: string; detectedLanguage?: string } = {};
+    try {
+      parsed = JSON.parse(rawJson);
+    } catch {
+      parsed = { translatedText: rawJson || cleanText, detectedLanguage: 'Detected' };
+    }
+
+    const translatedText =
+      typeof parsed.translatedText === 'string' && parsed.translatedText.trim()
+        ? parsed.translatedText.trim()
+        : cleanText;
+    const detectedLanguage =
+      typeof parsed.detectedLanguage === 'string' && parsed.detectedLanguage.trim()
+        ? parsed.detectedLanguage.trim()
+        : 'Auto';
+
+    if (translationCache.size >= TRANSLATION_CACHE_MAX) {
+      const oldestKey = translationCache.keys().next().value;
+      if (oldestKey !== undefined) translationCache.delete(oldestKey);
+    }
+    translationCache.set(cacheKey, { translatedText, detectedLanguage });
+
+    return res.json({
+      success: true,
+      translatedText,
+      detectedLanguage,
+      targetLangCode: cleanCode || cleanName,
+      cached: false,
+    });
+  } catch (err: any) {
+    const status = Number(err?.statusCode || err?.status || 500);
+    const msg = String(err?.message || 'Failed to translate message');
+    if (status === 503) {
+      return res.status(503).json({ error: msg });
+    }
+    if (status === 429 || msg.includes('RESOURCE_EXHAUSTED')) {
+      return res.status(429).json({
+        error: 'Translation quota limit reached. Please wait a moment or check your billing plan in Settings > Secrets.',
+      });
+    }
+    if (status === 400 || status === 403 || msg.includes('PERMISSION_DENIED') || msg.includes('API_KEY_INVALID')) {
+      return res.status(502).json({
+        error: 'Translation service API key error. Please check your Gemini API key in Settings > Secrets.',
+      });
+    }
+    return res.status(500).json({ error: msg });
+  }
+});
+
 app.post('/api/conversations/delete', (req, res) => {
   try {
     let body = req.body;
@@ -4568,6 +4732,56 @@ app.post('/api/conversations/delete', (req, res) => {
     return res.json({ success: true, conversationId });
   } catch {
     return res.status(500).json({ error: 'Failed to delete conversation' });
+  }
+});
+
+app.post('/api/conversations/pin', requireAuth, (req, res) => {
+  try {
+    const authUserId = (req as any).authUserId as string;
+    const { conversationId, messageId } = req.body || {};
+
+    if (!conversationId || typeof conversationId !== 'string') {
+      return res.status(400).json({ error: 'conversationId is required.' });
+    }
+
+    const memberRow = db
+      .prepare('SELECT 1 FROM conversation_members WHERE conversation_id = ? AND user_id = ? LIMIT 1')
+      .get(conversationId, authUserId);
+    if (!memberRow) {
+      return res.status(403).json({ error: 'You are not a member of this conversation.' });
+    }
+
+    const cleanMessageId =
+      typeof messageId === 'string' && messageId.trim() ? messageId.trim().slice(0, 128) : null;
+
+    if (cleanMessageId) {
+      const msgRow = db
+        .prepare(
+          `SELECT m.id FROM messages m
+           LEFT JOIN deleted_messages dm ON m.id = dm.message_id
+           WHERE m.id = ? AND m.conversation_id = ? AND dm.message_id IS NULL
+           LIMIT 1`
+        )
+        .get(cleanMessageId, conversationId);
+      if (!msgRow) {
+        return res.status(404).json({ error: 'Message not found in this conversation.' });
+      }
+    }
+
+    const nowIso = new Date().toISOString();
+    db.prepare('UPDATE conversations SET pinned_message_id = ?, updated_at = ? WHERE id = ?').run(
+      cleanMessageId,
+      nowIso,
+      conversationId
+    );
+
+    return res.json({
+      success: true,
+      conversationId,
+      pinnedMessageId: cleanMessageId,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to update pinned message' });
   }
 });
 
@@ -4607,6 +4821,7 @@ app.post('/api/reports/user', requireAuth, (req, res) => {
       source,
       conversationId,
       alsoBlocked,
+      reportedMessageId,
     } = req.body || {};
 
     if (!reportedUserId || typeof reportedUserId !== 'string') {
@@ -4619,17 +4834,35 @@ app.post('/api/reports/user', requireAuth, (req, res) => {
       return res.status(400).json({ error: 'Please select a valid report category.' });
     }
 
-    const existingPending = db
-      .prepare(
-        `SELECT id, created_at FROM user_reports
-         WHERE reporter_id = ? AND reported_user_id = ? AND status IN ('pending', 'under_review')
-         LIMIT 1`
-      )
-      .get(reporterId, reportedUserId) as { id: string; created_at: string } | undefined;
+    const cleanReportedMsgId =
+      typeof reportedMessageId === 'string' && reportedMessageId.trim()
+        ? reportedMessageId.trim().slice(0, 128)
+        : null;
+
+    const existingPending = cleanReportedMsgId
+      ? (db
+          .prepare(
+            `SELECT id, created_at FROM user_reports
+             WHERE reporter_id = ? AND reported_user_id = ? AND status IN ('pending', 'under_review')
+               AND details LIKE ?
+             LIMIT 1`
+          )
+          .get(reporterId, reportedUserId, `%[Reported Message ID: ${cleanReportedMsgId}]%`) as
+          | { id: string; created_at: string }
+          | undefined)
+      : (db
+          .prepare(
+            `SELECT id, created_at FROM user_reports
+             WHERE reporter_id = ? AND reported_user_id = ? AND status IN ('pending', 'under_review')
+             LIMIT 1`
+          )
+          .get(reporterId, reportedUserId) as { id: string; created_at: string } | undefined);
 
     if (existingPending && (!clientReportId || existingPending.id !== clientReportId)) {
       return res.status(409).json({
-        error: 'You already have an open report for this user. Our safety team is reviewing it.',
+        error: cleanReportedMsgId
+          ? 'You have already reported this message. Our safety team is reviewing it.'
+          : 'You already have an open report for this user. Our safety team is reviewing it.',
         reportId: existingPending.id,
         duplicate: true,
       });

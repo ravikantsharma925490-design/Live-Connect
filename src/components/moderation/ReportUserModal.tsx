@@ -7,15 +7,22 @@ import {
   ShieldAlert,
   Loader2,
   ShieldCheck,
+  MessageSquareWarning,
 } from 'lucide-react';
-import { Profile, UserReportCategory, UserReportSource } from '@/src/types';
-import { cn } from '@/src/lib/utils';
+import {
+  Profile,
+  ReportedMessageContext,
+  UserReportCategory,
+  UserReportSource,
+} from '@/src/types';
+import { cn, formatMessagePreview, formatTime } from '@/src/lib/utils';
 import { UserAvatar } from '@/src/components/ui/UserAvatar';
 import {
   USER_REPORT_CATEGORIES,
   getReportCategoryMeta,
   submitUserReport,
 } from '@/src/lib/reportCategories';
+import { useLanguage } from '@/src/lib/LanguageContext';
 
 interface ReportUserModalProps {
   isOpen: boolean;
@@ -23,6 +30,7 @@ interface ReportUserModalProps {
   targetUser: Profile | null;
   source?: UserReportSource;
   conversationId?: string | null;
+  reportedMessage?: ReportedMessageContext | null;
   isAlreadyBlocked?: boolean;
   onBlockUser?: (user: Profile) => Promise<boolean>;
   onClose: () => void;
@@ -34,10 +42,12 @@ export const ReportUserModal: React.FC<ReportUserModalProps> = ({
   targetUser,
   source = 'profile' as UserReportSource,
   conversationId,
+  reportedMessage = null,
   isAlreadyBlocked = false,
   onBlockUser,
   onClose,
 }) => {
+  const { t } = useLanguage();
   const [selectedCategory, setSelectedCategory] = useState<UserReportCategory | null>(null);
   const [details, setDetails] = useState('');
   const [alsoBlock, setAlsoBlock] = useState(false);
@@ -57,7 +67,7 @@ export const ReportUserModal: React.FC<ReportUserModalProps> = ({
       setError(null);
       setSubmittedResult(null);
     }
-  }, [isOpen, targetUser?.id]);
+  }, [isOpen, targetUser?.id, reportedMessage?.id]);
 
   if (!isOpen || !targetUser) return null;
 
@@ -67,7 +77,7 @@ export const ReportUserModal: React.FC<ReportUserModalProps> = ({
     e.preventDefault();
     if (!currentUserId || isSelf || submitting) return;
     if (!selectedCategory) {
-      setError('Please select a reason for reporting this user.');
+      setError('Please select a reason for reporting.');
       return;
     }
 
@@ -83,6 +93,7 @@ export const ReportUserModal: React.FC<ReportUserModalProps> = ({
         source,
         conversationId: conversationId || null,
         alsoBlocked: !isAlreadyBlocked && alsoBlock,
+        reportedMessage: reportedMessage || null,
       });
 
       let blockedNow = false;
@@ -116,10 +127,12 @@ export const ReportUserModal: React.FC<ReportUserModalProps> = ({
             </div>
             <div>
               <h3 className="font-bold text-sm text-neutral-900 dark:text-neutral-100">
-                Report User Account
+                {reportedMessage ? 'Report Message' : t('title.reportAccount')}
               </h3>
               <p className="text-[11px] text-neutral-500 dark:text-neutral-400">
-                Reports are confidential and reviewed by Trust & Safety
+                {reportedMessage
+                  ? 'This specific message will be included for Trust & Safety review'
+                  : 'Reports are confidential and reviewed by Trust & Safety'}
               </p>
             </div>
           </div>
@@ -127,7 +140,7 @@ export const ReportUserModal: React.FC<ReportUserModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            aria-label="Close Report Modal"
+            aria-label={t('action.close')}
             className="p-1.5 rounded-xl hover:bg-neutral-200 dark:hover:bg-neutral-800 text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 transition-colors cursor-pointer"
           >
             <X className="w-5 h-5" />
@@ -147,12 +160,16 @@ export const ReportUserModal: React.FC<ReportUserModalProps> = ({
               </h4>
               <p className="text-xs text-neutral-500 dark:text-neutral-400 max-w-sm mx-auto leading-relaxed">
                 {submittedResult.duplicate
-                  ? `You already have an open report against @${targetUser.username}. Our safety team is reviewing it.`
+                  ? reportedMessage
+                    ? `You have already reported this message from @${targetUser.username}. Our safety team is reviewing it.`
+                    : `You already have an open report against @${targetUser.username}. Our safety team is reviewing it.`
+                  : reportedMessage
+                  ? `Your message report against @${targetUser.username} has been received and added to our moderation queue.`
                   : `Your report against @${targetUser.username} has been received and added to our moderation queue.`}
               </p>
             </div>
 
-            <div className="p-3.5 rounded-2xl bg-neutral-100 dark:bg-neutral-800/70 border border-neutral-200 dark:border-neutral-700/70 text-left space-y-1.5 text-xs">
+            <div className="p-3.5 rounded-2xl bg-neutral-100 dark:bg-neutral-800/70 border border-neutral-200 dark:border-neutral-700/70 text-start space-y-1.5 text-xs">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-neutral-500 dark:text-neutral-400">Report Reference</span>
                 <span className="font-mono font-bold text-neutral-900 dark:text-neutral-100">
@@ -186,7 +203,7 @@ export const ReportUserModal: React.FC<ReportUserModalProps> = ({
               onClick={onClose}
               className="w-full py-2.5 px-5 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold shadow-md shadow-blue-500/20 transition-all cursor-pointer"
             >
-              Done
+              {t('action.done')}
             </button>
           </div>
         ) : (
@@ -210,6 +227,26 @@ export const ReportUserModal: React.FC<ReportUserModalProps> = ({
                 </div>
               </div>
 
+              {/* Reported Message Context Preview */}
+              {reportedMessage && (
+                <div className="p-3 rounded-2xl bg-rose-50/70 dark:bg-rose-950/25 border border-rose-200/80 dark:border-rose-900/50 space-y-1">
+                  <div className="flex items-center justify-between gap-2 text-[11px] font-bold text-rose-700 dark:text-rose-300">
+                    <span className="flex items-center gap-1.5">
+                      <MessageSquareWarning className="w-3.5 h-3.5 shrink-0" />
+                      <span>Reported Message</span>
+                    </span>
+                    {reportedMessage.createdAt && (
+                      <span className="font-normal opacity-75">
+                        {formatTime(reportedMessage.createdAt)}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-neutral-800 dark:text-neutral-200 line-clamp-3 break-words bg-white/80 dark:bg-neutral-900/70 px-2.5 py-2 rounded-xl border border-rose-200/50 dark:border-rose-900/40">
+                    {formatMessagePreview(reportedMessage.content) || 'Message content'}
+                  </p>
+                </div>
+              )}
+
               {error && (
                 <div className="p-3 rounded-2xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/50 flex items-center gap-2 text-xs text-rose-600 dark:text-rose-400">
                   <AlertTriangle className="w-4 h-4 shrink-0" />
@@ -220,7 +257,9 @@ export const ReportUserModal: React.FC<ReportUserModalProps> = ({
               {/* All Report Categories */}
               <div className="space-y-2">
                 <label className="block text-xs font-bold text-neutral-700 dark:text-neutral-300">
-                  Why are you reporting this account?
+                  {reportedMessage
+                    ? 'Why are you reporting this message?'
+                    : 'Why are you reporting this account?'}
                 </label>
 
                 <div className="space-y-1.5">
@@ -235,7 +274,7 @@ export const ReportUserModal: React.FC<ReportUserModalProps> = ({
                           setError(null);
                         }}
                         className={cn(
-                          'w-full text-left p-3 rounded-2xl border transition-all flex items-start gap-3 cursor-pointer',
+                          'w-full text-start p-3 rounded-2xl border transition-all flex items-start gap-3 cursor-pointer',
                           isSelected
                             ? 'border-rose-500 bg-rose-50/70 dark:bg-rose-950/30 shadow-xs'
                             : 'border-neutral-200 dark:border-neutral-800 hover:border-neutral-300 dark:hover:border-neutral-700 bg-white dark:bg-neutral-900'
@@ -330,7 +369,7 @@ export const ReportUserModal: React.FC<ReportUserModalProps> = ({
                 disabled={submitting}
                 className="px-4 py-2.5 text-xs font-semibold text-neutral-700 dark:text-neutral-300 hover:bg-neutral-200/70 dark:hover:bg-neutral-800 rounded-2xl transition-colors cursor-pointer"
               >
-                Cancel
+                {t('action.cancel')}
               </button>
               <button
                 type="submit"
@@ -340,12 +379,12 @@ export const ReportUserModal: React.FC<ReportUserModalProps> = ({
                 {submitting ? (
                   <>
                     <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    <span>Submitting...</span>
+                    <span>{t('action.sending')}</span>
                   </>
                 ) : (
                   <>
                     <Flag className="w-3.5 h-3.5" />
-                    <span>Submit Report</span>
+                    <span>{t('action.report')}</span>
                   </>
                 )}
               </button>
