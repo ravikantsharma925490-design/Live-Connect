@@ -107,16 +107,6 @@ function cleanAndDeduplicateMessages(msgs: ClientMessage[], convId: string | nul
       existingIdx = deduplicated.findIndex((prev) => prev.client_id === m.client_id);
     }
 
-    if (existingIdx === -1 && m.content?.startsWith('[CALL_LOG:')) {
-      existingIdx = deduplicated.findIndex((prev) => {
-        if (!prev.content?.startsWith('[CALL_LOG:')) return false;
-        const timeDiff = Math.abs(
-          new Date(prev.created_at || 0).getTime() - new Date(m.created_at || 0).getTime()
-        );
-        return timeDiff < 60000;
-      });
-    }
-
     if (existingIdx === -1 && m.sender_id && m.content) {
       const mPending = isMessagePending(m);
       existingIdx = deduplicated.findIndex((prev) => {
