@@ -8,6 +8,7 @@ import {
   Video,
   User,
   ShieldAlert,
+  Flag,
 } from 'lucide-react';
 import { Profile, CallType, UserRelationStatus } from '@/src/types';
 import { cn, getAvatarColor, getInitials } from '@/src/lib/utils';
@@ -25,6 +26,7 @@ interface SearchTabProps {
   getFollowStatus?: (userId: string) => FollowStatus;
   onFollow?: (target: Profile | string) => Promise<boolean | void>;
   onUnfollow?: (target: Profile | string) => Promise<boolean | void>;
+  onReportUser?: (profile: Profile) => void;
 }
 
 export const SearchTab: React.FC<SearchTabProps> = ({
@@ -38,6 +40,7 @@ export const SearchTab: React.FC<SearchTabProps> = ({
   getFollowStatus,
   onFollow,
   onUnfollow,
+  onReportUser,
 }) => {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<Profile[]>([]);
@@ -307,7 +310,7 @@ export const SearchTab: React.FC<SearchTabProps> = ({
 
                         {/* Communication Actions */}
                         <div className="pt-1.5 border-t border-neutral-100 dark:border-neutral-800">
-                          <div className="grid grid-cols-4 gap-1.5">
+                          <div className={cn('grid gap-1.5', !isSelf && onReportUser ? 'grid-cols-5' : 'grid-cols-4')}>
                             <button
                               onClick={() => {
                                 if (canCommunicate) onStartChat(user.id, user);
@@ -383,6 +386,17 @@ export const SearchTab: React.FC<SearchTabProps> = ({
                               <User className="w-3.5 h-3.5" />
                               <span className="hidden sm:inline">Info</span>
                             </button>
+
+                            {!isSelf && onReportUser && (
+                              <button
+                                onClick={() => onReportUser(user)}
+                                className="flex items-center justify-center gap-1 py-2 px-2 rounded-xl text-xs font-bold bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/40 dark:hover:bg-amber-900/50 text-amber-600 dark:text-amber-400 transition-colors cursor-pointer"
+                                title={`Report @${user.username}`}
+                              >
+                                <Flag className="w-3.5 h-3.5" />
+                                <span className="hidden sm:inline">Report</span>
+                              </button>
+                            )}
                           </div>
                         </div>
                       </div>

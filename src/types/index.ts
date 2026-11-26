@@ -280,3 +280,56 @@ export interface ActiveCallState {
   networkQuality?: 'excellent' | 'good' | 'poor';
 }
 
+export type UserReportCategory =
+  | 'spam'
+  | 'harassment'
+  | 'hate_speech'
+  | 'nudity_sexual'
+  | 'impersonation'
+  | 'scam_fraud'
+  | 'violence_threats'
+  | 'child_safety'
+  | 'underage'
+  | 'privacy_violation'
+  | 'abusive_calls'
+  | 'other';
+
+export type UserReportStatus = 'pending' | 'under_review' | 'resolved' | 'dismissed';
+
+export type UserReportSource = 'profile' | 'chat' | 'search' | 'call';
+
+export interface UserReportRecord {
+  id: string;
+  reporter_id: string;
+  reported_user_id: string;
+  reported_username?: string | null;
+  reported_display_name?: string | null;
+  category: UserReportCategory;
+  details?: string | null;
+  source: UserReportSource;
+  conversation_id?: string | null;
+  also_blocked?: boolean;
+  status: UserReportStatus;
+  admin_id?: string | null;
+  admin_note?: string | null;
+  reviewed_at?: string | null;
+  created_at: string;
+  updated_at: string;
+  reporter?: {
+    id: string;
+    username: string;
+    display_name: string;
+    avatar_url?: string | null;
+  };
+  reported_user?: {
+    id: string;
+    username: string;
+    display_name: string;
+    email?: string | null;
+    avatar_url?: string | null;
+    status?: AccountStatus;
+    strike_count?: number;
+  };
+}
+
+

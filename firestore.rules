@@ -312,6 +312,34 @@ service cloud.firestore {
              data.createdAt is timestamp;
     }
 
+    function isValidUserReport(data, reportId) {
+      return data.keys().hasAll(['id', 'reporterId', 'reportedUserId', 'category', 'source', 'status', 'createdAt', 'updatedAt']) &&
+             data.keys().hasOnly([
+               'id', 'reporterId', 'reportedUserId', 'reportedUsername', 'reportedDisplayName',
+               'category', 'details', 'source', 'conversationId', 'alsoBlocked',
+               'status', 'adminId', 'adminNote', 'createdAt', 'updatedAt'
+             ]) &&
+             data.id == reportId && isValidId(data.id) &&
+             isValidId(data.reporterId) && isValidId(data.reportedUserId) &&
+             data.reporterId != data.reportedUserId &&
+             isOptionalString(data, 'reportedUsername', 32) &&
+             isOptionalString(data, 'reportedDisplayName', 80) &&
+             data.category in [
+               'spam', 'harassment', 'hate_speech', 'nudity_sexual',
+               'impersonation', 'scam_fraud', 'violence_threats', 'child_safety',
+               'underage', 'privacy_violation', 'abusive_calls', 'other'
+             ] &&
+             isOptionalString(data, 'details', 1000) &&
+             data.source in ['profile', 'chat', 'search', 'call'] &&
+             isOptionalString(data, 'conversationId', 128) &&
+             (!('alsoBlocked' in data) || data.alsoBlocked is bool) &&
+             data.status in ['pending', 'under_review', 'resolved', 'dismissed'] &&
+             isOptionalString(data, 'adminId', 128) &&
+             isOptionalString(data, 'adminNote', 500) &&
+             data.createdAt is timestamp &&
+             data.updatedAt is timestamp;
+    }
+
     function isValidModerationBan(data, banId) {
       return data.keys().hasAll(['id', 'userId', 'adminId', 'actionType', 'statusApplied', 'reason', 'ruleBroken', 'strikeNumber', 'isActive', 'createdAt']) &&
              data.keys().hasOnly(['id', 'userId', 'adminId', 'actionType', 'statusApplied', 'reason', 'ruleBroken', 'strikeNumber', 'banUntil', 'isActive', 'createdAt']) &&
@@ -720,6 +748,33 @@ service cloud.firestore {
                        isValidProblemReport(incoming(), reportId) &&
                        incoming().diff(existing()).affectedKeys().hasOnly(['status']);
       allow delete: if isSignedIn() && isValidId(reportId) && existing().userId == request.auth.uid;
+    }
+
+    // User ID / profile abuse and safety reports
+    match /user_reports/{reportId} {
+      allow get: if isSignedIn() && isValidId(reportId) &&
+                    (existing().reporterId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() &&
+                     (resource.data.reporterId == request.auth.uid || isAdmin());
+      allow create: if isEmailVerified() && isValidId(reportId) &&
+                       isValidUserReport(incoming(), reportId) &&
+                       incoming().reporterId == request.auth.uid &&
+                       incoming().status == 'pending' &&
+                       !('adminId' in incoming()) &&
+                       !('adminNote' in incoming()) &&
+                       incoming().createdAt == request.time &&
+                       incoming().updatedAt == request.time &&
+                       exists(/databases/$(database)/documents/public_profiles/$(incoming().reportedUserId));
+      allow update: if isAdmin() && isValidId(reportId) &&
+                       isValidUserReport(incoming(), reportId) &&
+                       incoming().id == existing().id &&
+                       incoming().reporterId == existing().reporterId &&
+                       incoming().reportedUserId == existing().reportedUserId &&
+                       incoming().category == existing().category &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().updatedAt == request.time &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['status', 'adminId', 'adminNote', 'updatedAt']);
+      allow delete: if false;
     }
 
     // Account moderation ban & warning history

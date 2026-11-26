@@ -2214,9 +2214,30 @@ app.get('/api/admin/users/:userId', requireAuth, requireModeratorOrAdmin, (req, 
     const appeals = db
       .prepare('SELECT * FROM appeals WHERE user_id = ? ORDER BY created_at DESC LIMIT 20')
       .all(userId) as any[];
-    const reports = db
+    const problemReports = db
       .prepare('SELECT * FROM problem_reports WHERE user_id = ? ORDER BY created_at DESC LIMIT 20')
       .all(userId) as any[];
+    const incomingUserReports = db
+      .prepare(`
+        SELECT ur.*, p.username as reporter_username, p.display_name as reporter_display_name
+        FROM user_reports ur
+        LEFT JOIN profiles p ON p.id = ur.reporter_id
+        WHERE ur.reported_user_id = ?
+        ORDER BY ur.created_at DESC
+        LIMIT 30
+      `)
+      .all(userId) as any[];
+    const reports = [
+      ...incomingUserReports.map((r) => ({
+        ...r,
+        report_type: 'user_report',
+        description: r.details || `Reported from ${r.source} (${r.category})`,
+      })),
+      ...problemReports.map((r) => ({
+        ...r,
+        report_type: 'problem_report',
+      })),
+    ];
     const auditLogs = db
       .prepare('SELECT * FROM audit_logs WHERE target_user_id = ? ORDER BY created_at DESC LIMIT 50')
       .all(userId) as any[];
@@ -2458,6 +2479,146 @@ app.get('/api/admin/audit-logs', requireAuth, requireModeratorOrAdmin, (req, res
     return res.json({ logs: rows });
   } catch (err: any) {
     return res.status(500).json({ error: err.message || 'Failed to fetch audit logs' });
+  }
+});
+
+// ====================================================================
+// ADMIN USER REPORTS QUEUE ENDPOINTS
+// ====================================================================
+const VALID_USER_REPORT_CATEGORIES = new Set([
+  'spam',
+  'harassment',
+  'hate_speech',
+  'nudity_sexual',
+  'impersonation',
+  'scam_fraud',
+  'violence_threats',
+  'child_safety',
+  'underage',
+  'privacy_violation',
+  'abusive_calls',
+  'other',
+]);
+
+const VALID_USER_REPORT_SOURCES = new Set(['profile', 'chat', 'search', 'call']);
+const VALID_USER_REPORT_STATUSES = new Set(['pending', 'under_review', 'resolved', 'dismissed']);
+
+app.get('/api/admin/reports', requireAuth, requireModeratorOrAdmin, (req, res) => {
+  try {
+    const statusFilter = String(req.query.status || 'all').trim().toLowerCase();
+    const rows = db
+      .prepare(`
+        SELECT ur.*,
+               rp.username as reporter_username, rp.display_name as reporter_display_name, rp.avatar_url as reporter_avatar_url,
+               tp.username as target_username, tp.display_name as target_display_name, tp.avatar_url as target_avatar_url,
+               tu.email as target_email, tu.status as target_status, tu.strike_count as target_strike_count
+        FROM user_reports ur
+        LEFT JOIN profiles rp ON rp.id = ur.reporter_id
+        LEFT JOIN profiles tp ON tp.id = ur.reported_user_id
+        LEFT JOIN users tu ON tu.id = ur.reported_user_id
+        ORDER BY
+          CASE ur.status
+            WHEN 'pending' THEN 0
+            WHEN 'under_review' THEN 1
+            ELSE 2
+          END,
+          ur.created_at DESC
+        LIMIT 200
+      `)
+      .all() as any[];
+
+    const reports = rows
+      .filter((r) => statusFilter === 'all' || r.status === statusFilter)
+      .map((r) => ({
+        id: r.id,
+        reporter_id: r.reporter_id,
+        reported_user_id: r.reported_user_id,
+        reported_username: r.reported_username || r.target_username || null,
+        reported_display_name: r.reported_display_name || r.target_display_name || null,
+        category: r.category,
+        details: r.details || null,
+        source: r.source,
+        conversation_id: r.conversation_id || null,
+        also_blocked: Boolean(r.also_blocked),
+        status: r.status,
+        admin_id: r.admin_id || null,
+        admin_note: r.admin_note || null,
+        reviewed_at: r.reviewed_at || null,
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+        reporter: {
+          id: r.reporter_id,
+          username: r.reporter_username || 'user',
+          display_name: r.reporter_display_name || 'User',
+          avatar_url: r.reporter_avatar_url || null,
+        },
+        reported_user: {
+          id: r.reported_user_id,
+          username: r.target_username || r.reported_username || 'user',
+          display_name: r.target_display_name || r.reported_display_name || 'User',
+          email: r.target_email || null,
+          avatar_url: r.target_avatar_url || null,
+          status: r.target_status || 'active',
+          strike_count: Number(r.target_strike_count || 0),
+        },
+      }));
+
+    return res.json({ reports });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to load user reports queue' });
+  }
+});
+
+app.post('/api/admin/reports/:reportId/review', requireAuth, requireModeratorOrAdmin, async (req, res) => {
+  try {
+    const adminId = (req as any).authUserId as string;
+    const { reportId } = req.params;
+    const { status, note, moderationAction, ruleBroken, durationDays } = req.body || {};
+
+    if (!status || !VALID_USER_REPORT_STATUSES.has(String(status))) {
+      return res.status(400).json({ error: 'Valid status (pending, under_review, resolved, dismissed) is required' });
+    }
+
+    const report = db.prepare('SELECT * FROM user_reports WHERE id = ?').get(reportId) as any;
+    if (!report) return res.status(404).json({ error: 'Report not found' });
+
+    const nowIso = new Date().toISOString();
+    const adminNote = note ? String(note).trim().slice(0, 500) : null;
+    const reviewedAt = status === 'resolved' || status === 'dismissed' ? nowIso : report.reviewed_at || null;
+
+    db.prepare(
+      'UPDATE user_reports SET status = ?, admin_id = ?, admin_note = ?, reviewed_at = ?, updated_at = ? WHERE id = ?'
+    ).run(status, adminId, adminNote ?? report.admin_note ?? null, reviewedAt, nowIso, reportId);
+
+    let moderationResult: any = null;
+    if (moderationAction && ['warn', 'restrict', 'suspend', 'permanent_ban'].includes(String(moderationAction))) {
+      moderationResult = await executeModerationAction({
+        adminId,
+        targetUserId: report.reported_user_id,
+        action: moderationAction,
+        reason: adminNote || `Action taken following user report (${report.category})`,
+        ruleBroken: ruleBroken || 'community_guidelines',
+        durationDays: durationDays ? Number(durationDays) : 7,
+        onStatusUpdated: syncProfileCacheAfterModeration,
+      });
+    } else {
+      writeAuditLog({
+        adminId,
+        targetUserId: report.reported_user_id,
+        action: `report_${status}`,
+        reason: adminNote || `Marked user report (${report.category}) as ${status}`,
+        details: { reportId, category: report.category, reporterId: report.reporter_id },
+      });
+    }
+
+    const updated = db.prepare('SELECT * FROM user_reports WHERE id = ?').get(reportId);
+    return res.json({
+      success: true,
+      report: updated,
+      moderationApplied: moderationResult ? moderationResult.statusApplied : null,
+    });
+  } catch (err: any) {
+    return res.status(err?.statusCode || 500).json({ error: err.message || 'Failed to update report' });
   }
 });
 
@@ -4427,6 +4588,101 @@ app.post('/api/reports/create', (req, res) => {
     return res.json({ success: true, reportId: id });
   } catch {
     return res.status(500).json({ error: 'Failed to submit problem report' });
+  }
+});
+
+// ====================================================================
+// USER ID / PROFILE SAFETY REPORTS ENDPOINTS (SQLite Backed)
+// ====================================================================
+app.post('/api/reports/user', requireAuth, (req, res) => {
+  try {
+    const reporterId = (req as any).authUserId as string;
+    const {
+      reportId: clientReportId,
+      reportedUserId,
+      reportedUsername,
+      reportedDisplayName,
+      category,
+      details,
+      source,
+      conversationId,
+      alsoBlocked,
+    } = req.body || {};
+
+    if (!reportedUserId || typeof reportedUserId !== 'string') {
+      return res.status(400).json({ error: 'reportedUserId is required.' });
+    }
+    if (reportedUserId === reporterId) {
+      return res.status(400).json({ error: 'You cannot report your own account.' });
+    }
+    if (!category || !VALID_USER_REPORT_CATEGORIES.has(String(category))) {
+      return res.status(400).json({ error: 'Please select a valid report category.' });
+    }
+
+    const existingPending = db
+      .prepare(
+        `SELECT id, created_at FROM user_reports
+         WHERE reporter_id = ? AND reported_user_id = ? AND status IN ('pending', 'under_review')
+         LIMIT 1`
+      )
+      .get(reporterId, reportedUserId) as { id: string; created_at: string } | undefined;
+
+    if (existingPending && (!clientReportId || existingPending.id !== clientReportId)) {
+      return res.status(409).json({
+        error: 'You already have an open report for this user. Our safety team is reviewing it.',
+        reportId: existingPending.id,
+        duplicate: true,
+      });
+    }
+
+    const safeReportId =
+      typeof clientReportId === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(clientReportId)
+        ? clientReportId
+        : `urep_${generateUUID().replace(/-/g, '').slice(0, 20)}`;
+
+    const safeSource = VALID_USER_REPORT_SOURCES.has(String(source)) ? String(source) : 'profile';
+    const safeDetails = details ? String(details).trim().slice(0, 1000) : null;
+    const safeUsername = reportedUsername ? String(reportedUsername).trim().slice(0, 32) : null;
+    const safeDisplayName = reportedDisplayName ? String(reportedDisplayName).trim().slice(0, 80) : null;
+    const safeConvId = conversationId ? String(conversationId).trim().slice(0, 128) : null;
+    const nowIso = new Date().toISOString();
+
+    db.prepare(`
+      INSERT OR IGNORE INTO user_reports (
+        id, reporter_id, reported_user_id, reported_username, reported_display_name,
+        category, details, source, conversation_id, also_blocked,
+        status, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+    `).run(
+      safeReportId,
+      reporterId,
+      reportedUserId,
+      safeUsername,
+      safeDisplayName,
+      String(category),
+      safeDetails,
+      safeSource,
+      safeConvId,
+      alsoBlocked ? 1 : 0,
+      nowIso,
+      nowIso
+    );
+
+    return res.json({ success: true, reportId: safeReportId });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to submit user report' });
+  }
+});
+
+app.get('/api/reports/my-reports', requireAuth, (req, res) => {
+  try {
+    const reporterId = (req as any).authUserId as string;
+    const rows = db
+      .prepare('SELECT * FROM user_reports WHERE reporter_id = ? ORDER BY created_at DESC LIMIT 50')
+      .all(reporterId);
+    return res.json({ reports: rows });
+  } catch {
+    return res.status(500).json({ error: 'Failed to load your reports' });
   }
 });
 

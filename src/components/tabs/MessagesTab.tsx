@@ -22,6 +22,7 @@ interface MessagesTabProps {
   getRelationStatus?: (userId: string) => UserRelationStatus;
   onFollow?: (peer: Profile) => Promise<boolean>;
   onUnblock?: (peerId: string) => Promise<boolean>;
+  onReportUser?: (peer: Profile, conversationId?: string) => void;
 }
 
 export const MessagesTab: React.FC<MessagesTabProps> = ({
@@ -40,6 +41,7 @@ export const MessagesTab: React.FC<MessagesTabProps> = ({
   getRelationStatus,
   onFollow,
   onUnblock,
+  onReportUser,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [convToDelete, setConvToDelete] = useState<Conversation | null>(null);
@@ -209,6 +211,7 @@ export const MessagesTab: React.FC<MessagesTabProps> = ({
           relationStatus={activeRelationStatus}
           onFollow={onFollow}
           onUnblock={onUnblock}
+          onReportUser={onReportUser}
         />
       </div>
     </div>

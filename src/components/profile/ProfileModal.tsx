@@ -23,6 +23,7 @@ import {
   Camera,
   Upload,
   Trash2,
+  Flag,
 } from 'lucide-react';
 import { Profile, UserRelationStatus } from '@/src/types';
 import { cn, getAvatarColor, getInitials, formatJoinedYear } from '@/src/lib/utils';
@@ -57,6 +58,7 @@ interface ProfileModalProps {
   onStartChat?: (userId: string, profile?: Profile) => void;
   onStartAudioCall?: (user: Profile) => void;
   onStartVideoCall?: (user: Profile) => void;
+  onReportUser?: (user: Profile) => void;
   isUserOnline?: (profile?: Profile | null) => boolean;
 }
 
@@ -91,6 +93,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   onStartChat,
   onStartAudioCall,
   onStartVideoCall,
+  onReportUser,
   isUserOnline,
 }) => {
   const targetUser = viewingProfile || currentUser;
@@ -976,29 +979,45 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                   </div>
                 ) : (
                   <>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (relationStatus?.isBlockedByMe) {
-                          handleBlockToggle();
-                        } else {
-                          setShowBlockConfirm(true);
-                        }
-                      }}
-                      className="text-xs font-semibold text-rose-600 dark:text-rose-400 hover:underline flex items-center gap-1.5 cursor-pointer"
-                    >
-                      {relationStatus?.isBlockedByMe ? (
-                        <>
-                          <ShieldCheck className="w-4 h-4" />
-                          <span>Unblock User</span>
-                        </>
-                      ) : (
-                        <>
-                          <ShieldAlert className="w-4 h-4" />
-                          <span>Block User</span>
-                        </>
+                    <div className="flex items-center gap-4">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (relationStatus?.isBlockedByMe) {
+                            handleBlockToggle();
+                          } else {
+                            setShowBlockConfirm(true);
+                          }
+                        }}
+                        className="text-xs font-semibold text-rose-600 dark:text-rose-400 hover:underline flex items-center gap-1.5 cursor-pointer"
+                      >
+                        {relationStatus?.isBlockedByMe ? (
+                          <>
+                            <ShieldCheck className="w-4 h-4" />
+                            <span>Unblock User</span>
+                          </>
+                        ) : (
+                          <>
+                            <ShieldAlert className="w-4 h-4" />
+                            <span>Block User</span>
+                          </>
+                        )}
+                      </button>
+
+                      {onReportUser && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onClose();
+                            onReportUser(targetUser);
+                          }}
+                          className="text-xs font-semibold text-amber-600 dark:text-amber-400 hover:underline flex items-center gap-1.5 cursor-pointer"
+                        >
+                          <Flag className="w-3.5 h-3.5" />
+                          <span>Report User</span>
+                        </button>
                       )}
-                    </button>
+                    </div>
 
                     <button
                       type="button"

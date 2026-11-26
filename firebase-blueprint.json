@@ -274,6 +274,36 @@
       },
       "required": ["id", "userId", "category", "description", "status", "createdAt"]
     },
+    "UserReport": {
+      "title": "UserReport",
+      "description": "User ID / profile abuse and safety report submitted against another account.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "reporterId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "reportedUserId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "reportedUsername": { "type": "string", "maxLength": 32 },
+        "reportedDisplayName": { "type": "string", "maxLength": 80 },
+        "category": {
+          "type": "string",
+          "enum": [
+            "spam", "harassment", "hate_speech", "nudity_sexual",
+            "impersonation", "scam_fraud", "violence_threats", "child_safety",
+            "underage", "privacy_violation", "abusive_calls", "other"
+          ]
+        },
+        "details": { "type": "string", "maxLength": 1000 },
+        "source": { "type": "string", "enum": ["profile", "chat", "search", "call"] },
+        "conversationId": { "type": "string", "maxLength": 128 },
+        "alsoBlocked": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["pending", "under_review", "resolved", "dismissed"] },
+        "adminId": { "type": "string", "maxLength": 128 },
+        "adminNote": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "reporterId", "reportedUserId", "category", "source", "status", "createdAt", "updatedAt"]
+    },
     "ModerationBan": {
       "title": "ModerationBan",
       "description": "Account moderation action history (warn, restrict, suspend, permanent ban, restore).",
@@ -386,6 +416,10 @@
     "/problem_reports/{reportId}": {
       "schema": { "$ref": "#/entities/ProblemReport" },
       "description": "Support & problem reports."
+    },
+    "/user_reports/{reportId}": {
+      "schema": { "$ref": "#/entities/UserReport" },
+      "description": "User ID & profile safety/abuse reports."
     },
     "/bans/{banId}": {
       "schema": { "$ref": "#/entities/ModerationBan" },

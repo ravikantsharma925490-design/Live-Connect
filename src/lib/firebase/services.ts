@@ -1588,6 +1588,77 @@ export async function submitProblemReportFs(
   }
 }
 
+export async function submitUserReportFs(params: {
+  reportId?: string;
+  reporterId: string;
+  reportedUserId: string;
+  reportedUsername?: string | null;
+  reportedDisplayName?: string | null;
+  category: string;
+  details?: string | null;
+  source: 'profile' | 'chat' | 'search' | 'call';
+  conversationId?: string | null;
+  alsoBlocked?: boolean;
+}): Promise<{ reportId: string; skippedMissingPublicProfile?: boolean }> {
+  const reportId =
+    params.reportId && isValidFirestoreId(params.reportId)
+      ? params.reportId
+      : `urep_${generateUUID().replace(/-/g, '').slice(0, 20)}`;
+  const path = `user_reports/${reportId}`;
+
+  try {
+    // Check if target user's public profile exists in Firestore before enforcing exists() rule
+    const targetSnap = await getDoc(doc(db, 'public_profiles', params.reportedUserId)).catch(() => null);
+    if (!targetSnap || !targetSnap.exists()) {
+      return { reportId, skippedMissingPublicProfile: true };
+    }
+
+    const payload: Record<string, any> = {
+      id: reportId,
+      reporterId: params.reporterId,
+      reportedUserId: params.reportedUserId,
+      category: sanitizeStr(params.category, 64) || 'other',
+      source: params.source || 'profile',
+      alsoBlocked: Boolean(params.alsoBlocked),
+      status: 'pending',
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    };
+
+    const cleanUsername = sanitizeOptionalStr(params.reportedUsername, 32);
+    if (cleanUsername) payload.reportedUsername = cleanUsername;
+
+    const cleanDisplayName = sanitizeOptionalStr(params.reportedDisplayName, 80);
+    if (cleanDisplayName) payload.reportedDisplayName = cleanDisplayName;
+
+    const cleanDetails = sanitizeOptionalStr(params.details, 1000);
+    if (cleanDetails) payload.details = cleanDetails;
+
+    const cleanConvId = sanitizeOptionalStr(params.conversationId, 128);
+    if (cleanConvId) payload.conversationId = cleanConvId;
+
+    await setDoc(doc(db, 'user_reports', reportId), payload);
+    return { reportId };
+  } catch (err) {
+    handleFirestoreError(err, OperationType.CREATE, path);
+  }
+}
+
+export async function fetchMyUserReportsFs(reporterId: string): Promise<any[]> {
+  const path = 'user_reports';
+  try {
+    const q = query(
+      collection(db, 'user_reports'),
+      where('reporterId', '==', reporterId),
+      limit(50)
+    );
+    const snap = await getDocs(q);
+    return snap.docs.map((d) => ({ ...d.data(), id: d.id }));
+  } catch (err) {
+    handleFirestoreError(err, OperationType.LIST, path);
+  }
+}
+
 export async function deleteFirebaseAccountDataFs(userId: string): Promise<void> {
   const path = `public_profiles/${userId}`;
   try {

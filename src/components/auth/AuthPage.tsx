@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { MessageSquare, ExternalLink, ShieldCheck } from 'lucide-react';
+import { ExternalLink, ShieldCheck } from 'lucide-react';
 import { useLanguage } from '@/src/lib/LanguageContext';
 import { TermsAgreementModal } from '@/src/components/legal/TermsAgreementModal';
 import { LegalModal } from '@/src/components/legal/LegalModal';
@@ -70,8 +70,8 @@ export const AuthPage: React.FC<AuthPageProps> = ({
   return (
     <div className="min-h-screen-safe w-full flex items-center justify-center p-4 bg-neutral-950 relative overflow-hidden">
       {/* Background Ambience */}
-      <div className="absolute top-1/4 left-1/2 -translate-x-1/2 w-96 h-96 bg-blue-600/10 rounded-full blur-3xl pointer-events-none" />
-      <div className="absolute bottom-1/4 left-1/3 w-80 h-80 bg-indigo-600/10 rounded-full blur-3xl pointer-events-none" />
+      <div className="absolute top-1/4 left-1/2 -translate-x-1/2 w-96 h-96 bg-fuchsia-600/10 rounded-full blur-3xl pointer-events-none" />
+      <div className="absolute bottom-1/4 left-1/3 w-80 h-80 bg-cyan-500/10 rounded-full blur-3xl pointer-events-none" />
 
       {/* Language Selector Top Right */}
       <div className="absolute top-4 right-4 z-20">
@@ -87,12 +87,38 @@ export const AuthPage: React.FC<AuthPageProps> = ({
 
       <div className="w-full max-w-sm rounded-3xl bg-neutral-900/85 border border-neutral-800 backdrop-blur-xl p-7 shadow-2xl space-y-6 relative z-10 text-white animate-in fade-in duration-300">
         {/* App Logo & Title */}
-        <div className="text-center space-y-3">
-          <div className="w-16 h-16 rounded-2xl bg-gradient-to-tr from-blue-600 to-indigo-600 flex items-center justify-center mx-auto shadow-lg shadow-blue-500/25 border border-white/10">
-            <MessageSquare className="w-8 h-8 text-white" />
+        <div className="text-center space-y-3.5">
+          <div className="relative mx-auto w-24 h-24 flex items-center justify-center">
+            <div
+              className="absolute -inset-3 rounded-full blur-2xl opacity-75 pointer-events-none"
+              style={{
+                background:
+                  'radial-gradient(circle, rgba(217,70,239,0.42) 0%, rgba(59,130,246,0.34) 48%, rgba(34,211,238,0.28) 72%, transparent 85%)',
+              }}
+            />
+            <div
+              className="relative w-24 h-24 rounded-[22px] p-[1.5px] shadow-[0_0_28px_rgba(56,189,248,0.28),0_0_18px_rgba(192,38,211,0.22)]"
+              style={{
+                background:
+                  'linear-gradient(135deg, rgba(232,121,249,0.75) 0%, rgba(99,102,241,0.5) 50%, rgba(34,211,238,0.8) 100%)',
+              }}
+            >
+              <div className="w-full h-full rounded-[20.5px] overflow-hidden bg-[#050814]">
+                <img
+                  src="/assets/aistudio/Neon_LiveConnect_App_Icon_b1b5dd76.png"
+                  alt="LiveConnect Logo"
+                  className="w-full h-full object-cover select-none pointer-events-none"
+                />
+              </div>
+            </div>
           </div>
           <div>
-            <h1 className="text-2xl font-black tracking-tight text-white">LiveConnect</h1>
+            <h1 className="text-2xl font-black tracking-tight">
+              <span className="text-white">Live</span>
+              <span className="bg-gradient-to-r from-fuchsia-400 via-indigo-400 to-cyan-400 bg-clip-text text-transparent">
+                Connect
+              </span>
+            </h1>
             <p className="text-xs text-neutral-400 mt-1 font-medium">
               Free, Secure & Real-time HD Messaging & Calling
             </p>

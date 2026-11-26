@@ -12,6 +12,7 @@ import {
   Users,
   Pin,
   X,
+  Flag,
 } from 'lucide-react';
 import { Conversation, Profile, CallType, UserRelationStatus, Message } from '@/src/types';
 import { MessageBubble } from './MessageBubble';
@@ -41,6 +42,7 @@ interface ChatWindowProps {
   relationStatus?: UserRelationStatus;
   onFollow?: (peer: Profile) => Promise<boolean>;
   onUnblock?: (peerId: string) => Promise<boolean>;
+  onReportUser?: (peer: Profile, conversationId?: string) => void;
 }
 
 export const ChatWindow: React.FC<ChatWindowProps> = ({
@@ -55,6 +57,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   relationStatus,
   onFollow,
   onUnblock,
+  onReportUser,
 }) => {
   const [showOptionsDropdown, setShowOptionsDropdown] = useState(false);
   const [confirmAction, setConfirmAction] = useState<'clear' | 'delete' | null>(null);
@@ -636,12 +639,25 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                     <span>Clear Messages</span>
                   </button>
 
+                  {!isSelf && otherUser && onReportUser && (
+                    <button
+                      onClick={() => {
+                        setShowOptionsDropdown(false);
+                        onReportUser(otherUser, conversation.id);
+                      }}
+                      className="w-full px-3.5 py-2 text-left text-xs font-semibold text-amber-600 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/40 flex items-center gap-2 transition-colors border-t border-neutral-100 dark:border-neutral-800 cursor-pointer"
+                    >
+                      <Flag className="w-3.5 h-3.5" />
+                      <span>Report User</span>
+                    </button>
+                  )}
+
                   <button
                     onClick={() => {
                       setShowOptionsDropdown(false);
                       setConfirmAction('delete');
                     }}
-                    className="w-full px-3.5 py-2 text-left text-xs font-semibold text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 flex items-center gap-2 transition-colors border-t border-neutral-100 dark:border-neutral-800"
+                    className="w-full px-3.5 py-2 text-left text-xs font-semibold text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 flex items-center gap-2 transition-colors border-t border-neutral-100 dark:border-neutral-800 cursor-pointer"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
                     <span>Delete Conversation</span>

@@ -35,7 +35,8 @@ import { BannedScreen } from '@/src/components/auth/BannedScreen';
 import { AccountStatusModal } from '@/src/components/moderation/AccountStatusModal';
 import { AccountRestoredModal } from '@/src/components/moderation/AccountRestoredModal';
 import { AdminModerationPanel } from '@/src/components/moderation/AdminModerationPanel';
-import { Profile, Message } from '@/src/types';
+import { ReportUserModal } from '@/src/components/moderation/ReportUserModal';
+import { Profile, Message, UserReportSource } from '@/src/types';
 
 // Ensures the cinematic launch animation plays strictly once on cold app launch
 let launchSplashCompleted = false;
@@ -161,6 +162,11 @@ export default function App() {
   const [isAccountStatusOpen, setIsAccountStatusOpen] = useState(false);
   const [isAdminPanelOpen, setIsAdminPanelOpen] = useState(false);
   const [viewingProfile, setViewingProfile] = useState<Profile | null>(null);
+  const [reportingTarget, setReportingTarget] = useState<{
+    user: Profile;
+    source: UserReportSource;
+    conversationId?: string | null;
+  } | null>(null);
 
   // Two-way visibility: exclude blocked peers from conversations, unread badge, search, and calls
   const visibleConversations = useMemo(() => {
@@ -435,6 +441,9 @@ export default function App() {
             getRelationStatus={socialRelations.getRelationStatus}
             onFollow={socialRelations.followUser}
             onUnblock={socialRelations.unblockUser}
+            onReportUser={(peer, conversationId) => {
+              setReportingTarget({ user: peer, source: 'chat', conversationId });
+            }}
           />
         )}
 
@@ -460,6 +469,9 @@ export default function App() {
             getFollowStatus={socialRelations.getFollowStatus}
             onFollow={socialRelations.followUser}
             onUnfollow={socialRelations.unfollowUser}
+            onReportUser={(peer) => {
+              setReportingTarget({ user: peer, source: 'search' });
+            }}
           />
         )}
 
@@ -483,6 +495,9 @@ export default function App() {
             onClearAllHistory={clearAllHistory}
             onMarkHistoryAsViewed={markHistoryAsViewed}
             missedCallsCount={missedCallsCount}
+            onReportUser={(peer) => {
+              setReportingTarget({ user: peer, source: 'call' });
+            }}
             onStartChat={async (targetId, targetProfile) => {
               setActiveTab('messages');
               const convId = await safeStartConversation(targetId, targetProfile);
@@ -677,6 +692,24 @@ export default function App() {
         isUserOnline={isUserOnline}
         onBlock={socialRelations.blockUser}
         onUnblock={socialRelations.unblockUser}
+        onReportUser={(peer) => {
+          setReportingTarget({ user: peer, source: 'profile' });
+        }}
+      />
+
+      <ReportUserModal
+        isOpen={Boolean(reportingTarget)}
+        currentUserId={profile?.id}
+        targetUser={reportingTarget?.user || null}
+        source={reportingTarget?.source || 'profile'}
+        conversationId={reportingTarget?.conversationId || null}
+        isAlreadyBlocked={
+          reportingTarget?.user?.id
+            ? socialRelations.isBlocked(reportingTarget.user.id)
+            : false
+        }
+        onBlockUser={socialRelations.blockUser}
+        onClose={() => setReportingTarget(null)}
       />
 
       <ForwardMessageModal

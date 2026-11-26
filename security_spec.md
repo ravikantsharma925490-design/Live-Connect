@@ -10,6 +10,7 @@
 7. **Temporal Integrity**: All `createdAt` and `updatedAt` timestamps MUST equal `request.time`.
 8. **Terminal State Locking**: Once `/calls/{callId}` enters a terminal status (`ended`, `rejected`, `cancelled`, `missed`, `failed`), no further non-admin updates are permitted.
 9. **Zero-Cost List Queries**: Every `allow list` rule evaluates `resource.data` or path `{userId}` directly without calling `get()` or `exists()`.
+10. **User Report Integrity**: A user report in `/user_reports/{reportId}` must originate from `reporterId == request.auth.uid`, target a distinct existing `reportedUserId != reporterId`, start in `status == 'pending'`, forbid client-set `adminId`/`adminNote` on creation, and only allow verified admins to update review status.
 
 ## 2. The "Dirty Dozen" Attack Payloads (All Must Return `PERMISSION_DENIED`)
 1. **Unauthenticated Profile Read**: Anonymous client tries `getDoc('/public_profiles/u1')`.
@@ -24,3 +25,6 @@
 10. **Client Timestamp Forgery**: User A creates `/problem_reports/r1` with a backdated `createdAt` instead of `request.time`.
 11. **Terminal Call Re-opening**: User tries updating `/calls/c1` from `status: 'ended'` back to `status: 'connected'`.
 12. **Blanket Collection Scrape**: User A runs unconstrained `getDocs(collection(db, 'follows'))` without filtering `followerId == uid` or `followingId == uid`.
+13. **Self-Report / Fake Status Injection**: User A creates `/user_reports/ur1` with `reportedUserId: 'userA'` or `status: 'resolved'` or `adminNote: 'Ban now'`.
+14. **Cross-User Report Snooping**: User A attempts `getDoc('/user_reports/ur_other')` belonging to User B.
+

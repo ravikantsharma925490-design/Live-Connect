@@ -14,11 +14,22 @@ import {
   Loader2,
   AlertCircle,
   ExternalLink,
+  Flag,
+  Eye,
 } from 'lucide-react';
-import { AccountStatus, AppealRecord, AuditLogRecord, BanHistoryRecord } from '@/src/types';
+import {
+  AccountStatus,
+  AppealRecord,
+  AuditLogRecord,
+  BanHistoryRecord,
+  UserReportRecord,
+  UserReportStatus,
+} from '@/src/types';
 import { cn } from '@/src/lib/utils';
 import { UserAvatar } from '../ui/UserAvatar';
 import { ModerationTemplatesModal } from './ModerationTemplatesModal';
+import { getAuthHeaders } from '@/src/lib/authHeader';
+import { getReportCategoryMeta } from '@/src/lib/reportCategories';
 
 interface AdminModerationPanelProps {
   isOpen: boolean;
@@ -68,12 +79,15 @@ const RULE_OPTIONS = [
 const STATUS_FILTER_TABS = ['all', 'active', 'restricted', 'suspended', 'disabled', 'deactivated'] as const;
 
 export const AdminModerationPanel: React.FC<AdminModerationPanelProps> = ({ isOpen, onClose }) => {
-  const [activeTab, setActiveTab] = useState<'users' | 'appeals' | 'logs'>('users');
+  const [activeTab, setActiveTab] = useState<'users' | 'reports' | 'appeals' | 'logs'>('users');
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [users, setUsers] = useState<AdminUserRow[]>([]);
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
   const [userDetail, setUserDetail] = useState<AdminUserDetail | null>(null);
+  const [userReports, setUserReports] = useState<UserReportRecord[]>([]);
+  const [reportFilter, setReportFilter] = useState<string>('pending');
+  const [reportNotes, setReportNotes] = useState<Record<string, string>>({});
   const [appeals, setAppeals] = useState<any[]>([]);
   const [appealFilter, setAppealFilter] = useState<string>('pending');
   const [auditLogs, setAuditLogs] = useState<any[]>([]);
@@ -90,12 +104,9 @@ export const AdminModerationPanel: React.FC<AdminModerationPanelProps> = ({ isOp
   const [appealNotes, setAppealNotes] = useState<Record<string, string>>({});
   const [isTemplatesOpen, setIsTemplatesOpen] = useState(false);
 
-  const getToken = () =>
-    typeof window !== 'undefined' ? localStorage.getItem('liveconnect_session_token') || '' : '';
-
   const fetchUsers = useCallback(async () => {
-    const token = getToken();
-    if (!token) return;
+    const authHeaders = await getAuthHeaders();
+    if (!authHeaders.Authorization) return;
     setLoading(true);
     setError(null);
     try {
@@ -103,7 +114,7 @@ export const AdminModerationPanel: React.FC<AdminModerationPanelProps> = ({ isOp
       if (searchQuery.trim()) params.set('q', searchQuery.trim());
       if (statusFilter !== 'all') params.set('status', statusFilter);
       const res = await fetch(`/api/admin/users?${params.toString()}`, {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: authHeaders,
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || 'Failed to load users');
@@ -116,13 +127,13 @@ export const AdminModerationPanel: React.FC<AdminModerationPanelProps> = ({ isOp
   }, [searchQuery, statusFilter]);
 
   const fetchUserDetail = useCallback(async (userId: string) => {
-    const token = getToken();
-    if (!token) return;
+    const authHeaders = await getAuthHeaders();
+    if (!authHeaders.Authorization) return;
     setDetailLoading(true);
     setError(null);
     try {
       const res = await fetch(`/api/admin/users/${encodeURIComponent(userId)}`, {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: authHeaders,
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || 'Failed to load user details');
@@ -134,14 +145,33 @@ export const AdminModerationPanel: React.FC<AdminModerationPanelProps> = ({ isOp
     }
   }, []);
 
+  const fetchUserReports = useCallback(async () => {
+    const authHeaders = await getAuthHeaders();
+    if (!authHeaders.Authorization) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/admin/reports?status=${encodeURIComponent(reportFilter)}`, {
+        headers: authHeaders,
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || 'Failed to load user reports');
+      setUserReports(Array.isArray(json.reports) ? json.reports : []);
+    } catch (err: any) {
+      setError(err?.message || 'Unable to load user reports.');
+    } finally {
+      setLoading(false);
+    }
+  }, [reportFilter]);
+
   const fetchAppeals = useCallback(async () => {
-    const token = getToken();
-    if (!token) return;
+    const authHeaders = await getAuthHeaders();
+    if (!authHeaders.Authorization) return;
     setLoading(true);
     setError(null);
     try {
       const res = await fetch(`/api/admin/appeals?status=${encodeURIComponent(appealFilter)}`, {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: authHeaders,
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || 'Failed to load appeal queue');
@@ -154,13 +184,13 @@ export const AdminModerationPanel: React.FC<AdminModerationPanelProps> = ({ isOp
   }, [appealFilter]);
 
   const fetchAuditLogs = useCallback(async () => {
-    const token = getToken();
-    if (!token) return;
+    const authHeaders = await getAuthHeaders();
+    if (!authHeaders.Authorization) return;
     setLoading(true);
     setError(null);
     try {
       const res = await fetch('/api/admin/audit-logs?limit=100', {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: authHeaders,
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || 'Failed to load audit logs');
@@ -176,9 +206,10 @@ export const AdminModerationPanel: React.FC<AdminModerationPanelProps> = ({ isOp
     if (!isOpen) return;
     setFeedback(null);
     if (activeTab === 'users') void fetchUsers();
+    else if (activeTab === 'reports') void fetchUserReports();
     else if (activeTab === 'appeals') void fetchAppeals();
     else if (activeTab === 'logs') void fetchAuditLogs();
-  }, [isOpen, activeTab, fetchUsers, fetchAppeals, fetchAuditLogs]);
+  }, [isOpen, activeTab, fetchUsers, fetchUserReports, fetchAppeals, fetchAuditLogs]);
 
   if (!isOpen) return null;
 
@@ -186,8 +217,8 @@ export const AdminModerationPanel: React.FC<AdminModerationPanelProps> = ({ isOp
     action: 'warn' | 'restrict' | 'suspend' | 'permanent_ban' | 'restore'
   ) => {
     if (!selectedUserId) return;
-    const token = getToken();
-    if (!token) return;
+    const authHeaders = await getAuthHeaders();
+    if (!authHeaders.Authorization) return;
 
     setActionBusy(true);
     setError(null);
@@ -197,7 +228,7 @@ export const AdminModerationPanel: React.FC<AdminModerationPanelProps> = ({ isOp
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
+          ...authHeaders,
         },
         body: JSON.stringify({
           targetUserId: selectedUserId,
@@ -220,9 +251,52 @@ export const AdminModerationPanel: React.FC<AdminModerationPanelProps> = ({ isOp
     }
   };
 
+  const handleReviewUserReport = async (
+    reportId: string,
+    status: UserReportStatus,
+    moderationAction?: 'warn' | 'suspend'
+  ) => {
+    const authHeaders = await getAuthHeaders();
+    if (!authHeaders.Authorization) return;
+    setActionBusy(true);
+    setError(null);
+    setFeedback(null);
+    try {
+      const targetReport = userReports.find((r) => r.id === reportId);
+      const catMeta = targetReport ? getReportCategoryMeta(targetReport.category) : null;
+      const res = await fetch(`/api/admin/reports/${encodeURIComponent(reportId)}/review`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeaders,
+        },
+        body: JSON.stringify({
+          status,
+          note: reportNotes[reportId]?.trim() || undefined,
+          moderationAction,
+          ruleBroken: catMeta?.suggestedRule || 'community_guidelines',
+          durationDays: moderationAction === 'suspend' ? 7 : undefined,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || 'Failed to update report');
+
+      setFeedback(
+        moderationAction
+          ? `Report ${status} & ${moderationAction} applied to reported user.`
+          : `Report marked as ${status.replace('_', ' ')}.`
+      );
+      await fetchUserReports();
+    } catch (err: any) {
+      setError(err?.message || 'Failed to review report.');
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
   const handleReviewAppeal = async (appealId: string, decision: 'approved' | 'rejected') => {
-    const token = getToken();
-    if (!token) return;
+    const authHeaders = await getAuthHeaders();
+    if (!authHeaders.Authorization) return;
     setActionBusy(true);
     setError(null);
     setFeedback(null);
@@ -231,7 +305,7 @@ export const AdminModerationPanel: React.FC<AdminModerationPanelProps> = ({ isOp
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
+          ...authHeaders,
         },
         body: JSON.stringify({
           decision,
@@ -319,6 +393,19 @@ export const AdminModerationPanel: React.FC<AdminModerationPanelProps> = ({ isOp
             )}
           >
             Users & Strikes
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('reports')}
+            className={cn(
+              'min-h-[40px] px-4 py-1.5 rounded-xl text-xs font-bold transition-colors cursor-pointer shrink-0 flex items-center gap-1.5',
+              activeTab === 'reports'
+                ? 'bg-[#0095F6] text-white'
+                : 'bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 text-neutral-700 dark:text-neutral-300'
+            )}
+          >
+            <Flag className="w-3.5 h-3.5" />
+            <span>User Reports</span>
           </button>
           <button
             type="button"
@@ -640,15 +727,30 @@ export const AdminModerationPanel: React.FC<AdminModerationPanelProps> = ({ isOp
                     {userDetail.reports.length > 0 && (
                       <div className="space-y-1.5">
                         <h5 className="text-xs font-bold uppercase tracking-wider text-neutral-500">
-                          User Reports ({userDetail.reports.length})
+                          Incoming &amp; Filed Reports ({userDetail.reports.length})
                         </h5>
-                        <div className="space-y-1 max-h-28 overflow-y-auto">
+                        <div className="space-y-1.5 max-h-36 overflow-y-auto">
                           {userDetail.reports.map((r: any) => (
                             <div
                               key={r.id}
-                              className="p-2 rounded-lg bg-neutral-50 dark:bg-neutral-800/50 border border-neutral-200 dark:border-neutral-800 text-xs"
+                              className="p-2.5 rounded-lg bg-neutral-50 dark:bg-neutral-800/50 border border-neutral-200 dark:border-neutral-800 text-xs space-y-0.5"
                             >
-                              <span className="font-bold">{r.category}:</span> {r.description}
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="font-bold">
+                                  {r.report_type === 'user_report'
+                                    ? getReportCategoryMeta(r.category).label
+                                    : r.category}
+                                </span>
+                                <span className="px-1.5 py-0.5 rounded bg-neutral-200 dark:bg-neutral-700 text-[10px] font-bold uppercase">
+                                  {r.status}
+                                </span>
+                              </div>
+                              <p className="text-neutral-600 dark:text-neutral-300">{r.description}</p>
+                              {r.reporter_username && (
+                                <p className="text-[10px] text-neutral-400">
+                                  Reported by @{r.reporter_username} • {new Date(r.created_at).toLocaleString()}
+                                </p>
+                              )}
                             </div>
                           ))}
                         </div>
@@ -657,6 +759,172 @@ export const AdminModerationPanel: React.FC<AdminModerationPanelProps> = ({ isOp
                   </div>
                 ) : null}
               </div>
+            </div>
+          )}
+
+          {activeTab === 'reports' && (
+            <div className="space-y-4">
+              <div className="flex flex-wrap gap-2">
+                {(['pending', 'under_review', 'resolved', 'dismissed', 'all'] as const).map((st) => (
+                  <button
+                    key={st}
+                    type="button"
+                    onClick={() => setReportFilter(st)}
+                    className={cn(
+                      'px-3 py-1.5 rounded-lg text-xs font-bold capitalize cursor-pointer',
+                      reportFilter === st
+                        ? 'bg-[#0095F6] text-white'
+                        : 'bg-neutral-100 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300'
+                    )}
+                  >
+                    {st.replace('_', ' ')}
+                  </button>
+                ))}
+              </div>
+
+              {loading ? (
+                <div className="py-12 flex items-center justify-center gap-2 text-xs text-neutral-500">
+                  <Loader2 className="w-4 h-4 animate-spin text-[#0095F6]" />
+                  <span>Loading user reports queue...</span>
+                </div>
+              ) : userReports.length === 0 ? (
+                <div className="py-12 text-center border border-neutral-200 dark:border-neutral-800 rounded-xl text-xs text-neutral-500">
+                  No user ID reports matching filter &quot;{reportFilter.replace('_', ' ')}&quot;.
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {userReports.map((rep) => {
+                    const catMeta = getReportCategoryMeta(rep.category);
+                    return (
+                      <div
+                        key={rep.id}
+                        className="p-4 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-800/40 space-y-3"
+                      >
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <UserAvatar
+                              src={rep.reported_user?.avatar_url || null}
+                              name={rep.reported_user?.display_name || rep.reported_username || 'User'}
+                              id={rep.reported_user_id}
+                              className="w-9 h-9 rounded-full shrink-0"
+                            />
+                            <div className="min-w-0">
+                              <p className="text-xs font-bold truncate">
+                                Reported: {rep.reported_user?.display_name || rep.reported_display_name || 'User'} (@
+                                {rep.reported_user?.username || rep.reported_username || 'user'})
+                              </p>
+                              <p className="text-[11px] text-neutral-500 truncate">
+                                ID: <span className="font-mono">{rep.reported_user_id}</span> • By @
+                                {rep.reporter?.username || rep.reporter_id} • via {rep.source}
+                              </p>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-1.5 self-start sm:self-auto shrink-0">
+                            {catMeta.severity === 'critical' && (
+                              <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-red-100 text-red-700 dark:bg-red-950/60 dark:text-red-300">
+                                Zero Tolerance
+                              </span>
+                            )}
+                            <span
+                              className={cn(
+                                'px-2.5 py-1 rounded-md text-xs font-bold capitalize',
+                                rep.status === 'resolved'
+                                  ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300'
+                                  : rep.status === 'dismissed'
+                                  ? 'bg-neutral-200 text-neutral-700 dark:bg-neutral-800 dark:text-neutral-300'
+                                  : rep.status === 'under_review'
+                                  ? 'bg-blue-100 text-blue-700 dark:bg-blue-950/60 dark:text-blue-300'
+                                  : 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300'
+                              )}
+                            >
+                              {rep.status.replace('_', ' ')}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="p-3 rounded-lg bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-xs space-y-1">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-bold text-rose-600 dark:text-rose-400">
+                              {catMeta.label}
+                            </span>
+                            <span className="text-[10px] font-mono text-neutral-400">
+                              {rep.id} • {new Date(rep.created_at).toLocaleString()}
+                            </span>
+                          </div>
+                          <p className="text-neutral-600 dark:text-neutral-300 leading-relaxed">
+                            {rep.details || 'No extra details provided by reporter.'}
+                          </p>
+                        </div>
+
+                        <div className="flex flex-col sm:flex-row gap-2">
+                          <input
+                            type="text"
+                            value={reportNotes[rep.id] ?? rep.admin_note ?? ''}
+                            onChange={(e) =>
+                              setReportNotes((prev) => ({ ...prev, [rep.id]: e.target.value }))
+                            }
+                            placeholder="Optional moderator note..."
+                            className="flex-1 min-h-[38px] px-3 rounded-xl bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 text-xs"
+                          />
+                          <div className="flex flex-wrap gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setActiveTab('users');
+                                setSelectedUserId(rep.reported_user_id);
+                                void fetchUserDetail(rep.reported_user_id);
+                              }}
+                              className="min-h-[38px] px-3 py-1.5 rounded-xl bg-neutral-200 hover:bg-neutral-300 dark:bg-neutral-800 dark:hover:bg-neutral-700 text-neutral-800 dark:text-neutral-200 text-xs font-bold flex items-center gap-1 cursor-pointer"
+                            >
+                              <Eye className="w-3.5 h-3.5" />
+                              <span>Inspect</span>
+                            </button>
+                            {rep.status === 'pending' && (
+                              <button
+                                type="button"
+                                disabled={actionBusy}
+                                onClick={() => handleReviewUserReport(rep.id, 'under_review')}
+                                className="min-h-[38px] px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
+                              >
+                                Review
+                              </button>
+                            )}
+                            {(rep.status === 'pending' || rep.status === 'under_review') && (
+                              <>
+                                <button
+                                  type="button"
+                                  disabled={actionBusy}
+                                  onClick={() => handleReviewUserReport(rep.id, 'resolved', 'warn')}
+                                  className="min-h-[38px] px-3 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
+                                >
+                                  Warn &amp; Resolve
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={actionBusy}
+                                  onClick={() => handleReviewUserReport(rep.id, 'resolved')}
+                                  className="min-h-[38px] px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
+                                >
+                                  Resolve
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={actionBusy}
+                                  onClick={() => handleReviewUserReport(rep.id, 'dismissed')}
+                                  className="min-h-[38px] px-3 py-1.5 rounded-xl bg-neutral-600 hover:bg-neutral-700 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
+                                >
+                                  Dismiss
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
 

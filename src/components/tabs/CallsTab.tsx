@@ -12,6 +12,7 @@ import {
   PhoneOutgoing,
   PhoneMissed,
   PhoneOff,
+  Flag,
 } from 'lucide-react';
 import { Profile, CallType, Conversation } from '@/src/types';
 import { CallHistoryItem } from '@/src/hooks/useCallHistory';
@@ -34,6 +35,7 @@ export interface CallsTabProps {
   onClearAllHistory?: () => void;
   onMarkHistoryAsViewed?: () => void;
   missedCallsCount?: number;
+  onReportUser?: (peer: Profile) => void;
 }
 
 export const CallsTab: React.FC<CallsTabProps> = ({
@@ -51,6 +53,7 @@ export const CallsTab: React.FC<CallsTabProps> = ({
   onDeleteCall,
   onClearAllHistory,
   onMarkHistoryAsViewed,
+  onReportUser,
 }) => {
   const { t } = useLanguage();
 
@@ -401,6 +404,16 @@ export const CallsTab: React.FC<CallsTabProps> = ({
                       >
                         <Video className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
                       </button>
+
+                      {onReportUser && peer?.id && peer.id !== _currentUser?.id && (
+                        <button
+                          onClick={() => onReportUser(peer)}
+                          title={`Report ${peerName}`}
+                          className="p-2 sm:p-3 rounded-2xl opacity-100 md:opacity-0 md:group-hover:opacity-100 bg-neutral-100 hover:bg-amber-50 dark:bg-neutral-800 dark:hover:bg-amber-950/50 text-neutral-400 hover:text-amber-600 dark:hover:text-amber-400 transition-all hover:scale-105 active:scale-95 shadow-xs cursor-pointer"
+                        >
+                          <Flag className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+                        </button>
+                      )}
 
                       {onDeleteCall && (
                         <button
