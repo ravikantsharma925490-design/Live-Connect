@@ -312,6 +312,7 @@ export function useConversations(
               prev[i].id === c.id &&
               prev[i].unread_count === c.unread_count &&
               prev[i].last_message?.id === c.last_message?.id &&
+              Boolean(prev[i].last_message?.is_read) === Boolean(c.last_message?.is_read) &&
               prev[i].updated_at === c.updated_at &&
               (prev[i].member_ids?.length || 0) === (c.member_ids?.length || 0)
           );
@@ -540,19 +541,28 @@ export function useConversations(
             });
 
             const convDocs: Record<string, Record<string, any> | null> = {};
+            const lastMessageReadMap: Record<string, boolean> = {};
             const neededProfileIds = new Set<string>();
 
             await Promise.all(
               inboxEntries.map(async ({ id, data }) => {
                 if (data.otherMemberId) neededProfileIds.add(data.otherMemberId);
                 try {
-                  const cSnap = await getDoc(doc(db, 'conversations', id));
+                  const [cSnap, lmSnap] = await Promise.all([
+                    getDoc(doc(db, 'conversations', id)),
+                    data.lastMessageId && data.lastMessageSenderId === currentUserId
+                      ? getDoc(doc(db, 'users', currentUserId, 'inbox', id, 'messages', data.lastMessageId)).catch(() => null)
+                      : Promise.resolve(null),
+                  ]);
                   if (cSnap.exists()) {
                     const cData = cSnap.data();
                     convDocs[id] = cData;
                     Object.keys(cData.memberRoles || {}).forEach((uid) => neededProfileIds.add(uid));
                   } else {
                     convDocs[id] = null;
+                  }
+                  if (lmSnap && lmSnap.exists()) {
+                    lastMessageReadMap[id] = Boolean(lmSnap.data()?.isRead);
                   }
                 } catch {
                   convDocs[id] = null;
@@ -570,7 +580,13 @@ export function useConversations(
             const builtConvs: Conversation[] = inboxEntries
               .filter(({ id }) => convDocs[id]?.type !== 'group')
               .map(({ id, data }) =>
-                buildConversationFromDocs(id, data, convDocs[id], profileCacheRef.current)
+                buildConversationFromDocs(
+                  id,
+                  data,
+                  convDocs[id],
+                  profileCacheRef.current,
+                  lastMessageReadMap[id]
+                )
               );
 
             hydrateAndApplyConversations(builtConvs);
@@ -670,10 +686,25 @@ export function useConversations(
       };
       window.addEventListener('liveconnect_conversation_created', handleLocalConvCreated);
 
+      const handleLocalReadSync = (e: any) => {
+        const detail = e.detail;
+        if (!detail?.conversationId || !Array.isArray(detail?.messageIds)) return;
+        const readSet = new Set<string>(detail.messageIds);
+        updateConversationsState((prev) =>
+          prev.map((c) =>
+            c.id === detail.conversationId && c.last_message && readSet.has(c.last_message.id) && !c.last_message.is_read
+              ? { ...c, last_message: { ...c.last_message, is_read: true } }
+              : c
+          )
+        );
+      };
+      window.addEventListener('liveconnect_messages_read_sync', handleLocalReadSync);
+
       return () => {
         unsub();
         window.removeEventListener('liveconnect_conversation_message', handleLocalConvMessage);
         window.removeEventListener('liveconnect_conversation_created', handleLocalConvCreated);
+        window.removeEventListener('liveconnect_messages_read_sync', handleLocalReadSync);
       };
     }
 

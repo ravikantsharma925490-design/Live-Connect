@@ -1125,7 +1125,7 @@ const MessageBubbleComponent: React.FC<MessageBubbleProps> = ({
             {isMine && (
               <span className="inline-flex items-center ml-0.5">
                 {message.is_read ? (
-                  <CheckCheck className="w-3.5 h-3.5 text-blue-500" strokeWidth={2.5} />
+                  <CheckCheck className="w-3.5 h-3.5 text-green-500 dark:text-green-400" strokeWidth={2.5} />
                 ) : (
                   <Check className="w-3 h-3 text-neutral-400" strokeWidth={2} />
                 )}
@@ -1175,7 +1175,7 @@ const MessageBubbleComponent: React.FC<MessageBubbleProps> = ({
               {isMine && (
                 <span className="inline-flex items-center ml-0.5">
                   {message.is_read ? (
-                    <CheckCheck className="w-4 h-4 text-cyan-300" strokeWidth={2.5} />
+                    <CheckCheck className="w-4 h-4 text-green-300" strokeWidth={2.5} />
                   ) : (
                     <Check className="w-3.5 h-3.5 text-blue-200/70" strokeWidth={2} />
                   )}
@@ -1219,7 +1219,7 @@ const MessageBubbleComponent: React.FC<MessageBubbleProps> = ({
               {isMine && (
                 <span className="inline-flex items-center ml-0.5">
                   {message.is_read ? (
-                    <CheckCheck className="w-4 h-4 text-cyan-300" strokeWidth={2.5} />
+                    <CheckCheck className="w-4 h-4 text-green-300" strokeWidth={2.5} />
                   ) : (
                     <Check className="w-3.5 h-3.5 text-blue-200/70" strokeWidth={2} />
                   )}
@@ -1255,7 +1255,7 @@ const MessageBubbleComponent: React.FC<MessageBubbleProps> = ({
             {isMine && (
               <span className="inline-flex items-center ml-0.5">
                 {message.is_read ? (
-                  <CheckCheck className="w-4 h-4 text-cyan-300" strokeWidth={2.5} />
+                  <CheckCheck className="w-4 h-4 text-green-300" strokeWidth={2.5} />
                 ) : (
                   <Check className="w-3.5 h-3.5 text-blue-200/70" strokeWidth={2} />
                 )}
@@ -1339,9 +1339,9 @@ const MessageBubbleComponent: React.FC<MessageBubbleProps> = ({
                 {isMine && (
                   <span className="inline-flex items-center ml-0.5">
                     {message.is_read ? (
-                      <CheckCheck className="w-4 h-4 text-cyan-300" strokeWidth={2.5} title="Read (Seen)" />
+                      <CheckCheck className="w-4 h-4 text-green-300" strokeWidth={2.5} title="Read (Seen)" />
                     ) : (
-                      <Check className="w-3.5 h-3.5 text-blue-200/70" strokeWidth={2} title="Sent / Delivered" />
+                      <Check className="w-3.5 h-3.5 text-blue-200/70" strokeWidth={2} title="Sent" />
                     )}
                   </span>
                 )}

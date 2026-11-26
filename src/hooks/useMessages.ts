@@ -431,18 +431,12 @@ export function useMessages(
         ? json.messages.filter((m: any) => m?.id && !deletedSet.has(m.id))
         : [];
 
-      const isActivelyLooking =
-        isViewingChatRef.current && (typeof document === 'undefined' || !document.hidden);
-
       const formattedRemoteMessages: ClientMessage[] = rawMessages.map((m: any) => ({
         ...m,
         client_id: m.client_id || m.id,
         is_pending: false,
         should_animate: false,
-        is_read:
-          m.sender_id === currentUserId
-            ? Boolean(m.is_read)
-            : Boolean(m.is_read) || isActivelyLooking,
+        is_read: Boolean(m.is_read),
       }));
 
       formattedRemoteMessages.forEach((m) => knownMsgIdsRef.current.add(m.id));
@@ -623,8 +617,6 @@ export function useMessages(
         msgQuery,
         (snap) => {
           const deletedSet = loadDeletedMsgIds(conversationId);
-          const isActivelyLooking =
-            isViewingChatRef.current && (typeof document === 'undefined' || !document.hidden);
 
           const prevById = new Map<string, ClientMessage>(messagesRef.current.map((m) => [m.id, m]));
           const prevByClientId = new Map<string, ClientMessage>(
@@ -632,6 +624,7 @@ export function useMessages(
           );
           const wasInitialized = hasLoadedInitialRef.current;
           let receivedNewPeerMessage = false;
+          let newlyReadOwnMsgIds: string[] = [];
           let lastSnapTimeMs = 0;
 
           const remoteList: ClientMessage[] = [];
@@ -663,17 +656,26 @@ export function useMessages(
               receivedNewPeerMessage = true;
             }
 
+            if (mapped.sender_id === currentUserId && mapped.is_read && existing && !existing.is_read) {
+              newlyReadOwnMsgIds.push(mapped.id);
+            }
+
             remoteList.push({
               ...mapped,
               client_id: existing?.client_id || mapped.id,
               is_pending: false,
               should_animate: existing ? existing.should_animate : isBrandNew,
-              is_read:
-                mapped.sender_id === currentUserId
-                  ? Boolean(mapped.is_read)
-                  : Boolean(mapped.is_read) || isActivelyLooking,
+              is_read: Boolean(mapped.is_read),
             });
           });
+
+          if (newlyReadOwnMsgIds.length > 0 && typeof window !== 'undefined') {
+            window.dispatchEvent(
+              new CustomEvent('liveconnect_messages_read_sync', {
+                detail: { conversationId, messageIds: newlyReadOwnMsgIds },
+              })
+            );
+          }
 
           // Preserve any still-in-flight optimistic pending messages so they never vanish during pre-write checks
           const remoteIds = new Set(remoteList.map((m) => m.id));

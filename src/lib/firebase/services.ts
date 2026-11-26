@@ -96,7 +96,8 @@ export function buildConversationFromDocs(
   convId: string,
   inboxData: Record<string, any>,
   convData?: Record<string, any> | null,
-  memberProfiles?: Record<string, Profile>
+  memberProfiles?: Record<string, Profile>,
+  lastMessageIsRead?: boolean
 ): Conversation {
   const memberRoles: Record<string, 'admin' | 'member'> | undefined = convData?.memberRoles || undefined;
   const memberIds = memberRoles ? Object.keys(memberRoles) : undefined;
@@ -123,6 +124,10 @@ export function buildConversationFromDocs(
   let lastMessage: Message | undefined;
   if (inboxData.lastMessageId && inboxData.lastMessageContent) {
     const lmAt = tsToIso(inboxData.lastMessageAt, updatedAt);
+    const isLastFromOwner =
+      Boolean(inboxData.lastMessageSenderId) &&
+      Boolean(inboxData.ownerId) &&
+      inboxData.lastMessageSenderId === inboxData.ownerId;
     lastMessage = {
       id: inboxData.lastMessageId,
       conversation_id: convId,
@@ -130,7 +135,9 @@ export function buildConversationFromDocs(
       content: inboxData.lastMessageContent,
       created_at: lmAt,
       updated_at: lmAt,
-      is_read: (inboxData.unreadCount || 0) === 0,
+      is_read: isLastFromOwner
+        ? Boolean(lastMessageIsRead)
+        : (inboxData.unreadCount || 0) === 0,
     };
   }
 
@@ -1333,7 +1340,7 @@ export async function sendMessageToFirestoreFs(params: {
       cloudinaryPublicId: sanitizeOptionalStr(cloudinaryPublicId, 256),
       b2FileId: sanitizeOptionalStr(b2FileId, 256),
       b2FileName: sanitizeOptionalStr(b2FileName, 256),
-      isRead: mUid === senderId,
+      isRead: !isPeerChat && mUid === senderId,
     };
 
     msgBatch.set(doc(db, 'users', mUid, 'inbox', conversationId, 'messages', messageId), {
@@ -1528,22 +1535,28 @@ export async function markMessagesAsReadFs(conversationId: string, readerId: str
     const unreadFromPeers = snap.docs.filter((d) => d.data().senderId !== readerId);
     if (unreadFromPeers.length === 0) return;
 
-    const batch = writeBatch(db);
+    const readerBatch = writeBatch(db);
     const convSnap = await getDoc(doc(db, 'conversations', conversationId)).catch(() => null);
     const memberIds = convSnap?.exists() ? Object.keys(convSnap.data().memberRoles || {}) : [readerId];
+    const senderUpdates: Promise<unknown>[] = [];
 
     unreadFromPeers.slice(0, 150).forEach((d) => {
       const senderId = d.data().senderId;
-      batch.update(d.ref, { isRead: true, updatedAt: serverTimestamp() });
+      readerBatch.update(d.ref, { isRead: true, updatedAt: serverTimestamp() });
       if (senderId && senderId !== readerId && memberIds.includes(senderId)) {
-        batch.update(doc(db, 'users', senderId, 'inbox', conversationId, 'messages', d.id), {
-          isRead: true,
-          updatedAt: serverTimestamp(),
-        });
+        senderUpdates.push(
+          updateDoc(doc(db, 'users', senderId, 'inbox', conversationId, 'messages', d.id), {
+            isRead: true,
+            updatedAt: serverTimestamp(),
+          }).catch(() => {})
+        );
       }
     });
 
-    await batch.commit().catch(() => {});
+    await Promise.all([
+      readerBatch.commit().catch(() => {}),
+      ...senderUpdates,
+    ]);
   } catch {
     // Silent read-receipt update
   }

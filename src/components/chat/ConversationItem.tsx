@@ -281,7 +281,12 @@ export const ConversationItem: React.FC<ConversationItemProps> = ({
               {isLastMsgFromMe && !lastMsg?.content?.startsWith('[CALL_LOG:') && (
                 <span className="shrink-0 inline-flex items-center">
                   {lastMsg?.is_read ? (
-                    <CheckCheck className="w-3.5 h-3.5 text-blue-300" />
+                    <CheckCheck
+                      className={cn(
+                        'w-3.5 h-3.5',
+                        isSelected ? 'text-green-300' : 'text-green-500 dark:text-green-400'
+                      )}
+                    />
                   ) : (
                     <Check className="w-3.5 h-3.5 opacity-70" />
                   )}
