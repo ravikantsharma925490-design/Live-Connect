@@ -24,6 +24,7 @@ import {
   createOnboardingUserDocsFs,
   updateUserProfileDocsFs,
 } from '@/src/lib/firebase/services';
+import { restGetDocument } from '@/src/lib/firebase/restFallback';
 import { getClientDeviceId } from '@/src/lib/deviceId';
 
 export const SESSION_STORAGE_KEY = 'liveconnect_session_token';
@@ -231,6 +232,8 @@ export function useAuth() {
   const [suspensionInfo, setSuspensionInfo] = useState<SuspensionInfo | null>(null);
   const [restoredNoticePending, setRestoredNoticePending] = useState(false);
   const profileRef = useRef<Profile | null>(profile);
+  const suspensionInfoRef = useRef<SuspensionInfo | null>(suspensionInfo);
+  suspensionInfoRef.current = suspensionInfo;
 
   const updateProfileState = useCallback((newProf: Profile | null) => {
     profileRef.current = newProf;
@@ -454,10 +457,24 @@ export function useAuth() {
             setAuthError('Could not connect to LiveConnect servers. Please check your internet connection and try again.');
           }
         } else {
-          updateProfileState(null);
-          setNeedsOnboarding(true);
-          setOnboardingUser(mappedUser);
-          setAuthError(null);
+          // Verify via REST before dropping an already-loaded profile to onboarding on transient cache misses
+          let confirmedMissing = true;
+          if (hasSameUserProfile && profileRef.current) {
+            const restCheck = await restGetDocument(`public_profiles/${fbUser.uid}`).catch(() => null);
+            if (!restCheck || restCheck.exists) {
+              confirmedMissing = false;
+              updateProfileState(profileRef.current);
+              setNeedsOnboarding(false);
+              setOnboardingUser(null);
+              setAuthError(null);
+            }
+          }
+          if (confirmedMissing) {
+            updateProfileState(null);
+            setNeedsOnboarding(true);
+            setOnboardingUser(mappedUser);
+            setAuthError(null);
+          }
         }
       } catch (err: any) {
         console.warn('Error resolving Firebase user:', err?.message);
@@ -491,7 +508,9 @@ export function useAuth() {
         headers: buildAuthHeaders(token),
       });
       if (!res.ok) {
-        clearAuthState();
+        if (res.status === 401 || res.status === 403) {
+          clearAuthState();
+        }
         return;
       }
       const data = await res.json();
@@ -604,7 +623,7 @@ export function useAuth() {
 
         if (banStatus?.banned) {
           enterSuspensionState({ ...banStatus, appealToken: currentToken });
-        } else if (!banStatus?.banned && suspensionInfo) {
+        } else if (!banStatus?.banned && suspensionInfoRef.current) {
           // Account was restored (or ban expired) while sitting on BannedScreen!
           await refreshProfile();
         } else if (banStatus?.restoredNoticePending) {
@@ -618,7 +637,7 @@ export function useAuth() {
       clearInterval(banCheckInterval);
       unsubscribe();
     };
-  }, [clearAuthState, enterSuspensionState, refreshProfile, resolveFirebaseUser, suspensionInfo]);
+  }, [clearAuthState, enterSuspensionState, refreshProfile, resolveFirebaseUser]);
 
   const completeOnboarding = async (details: {
     username: string;

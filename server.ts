@@ -49,10 +49,10 @@ import {
 } from './server/cloudinaryService';
 import { createFamilyRouter } from './server/familyRoutes';
 
+dotenv.config();
 if (fs.existsSync(path.join(process.cwd(), '.env.example'))) {
   dotenv.config({ path: path.join(process.cwd(), '.env.example') });
 }
-dotenv.config();
 
 function generateUUID(): string {
   return generateId();
@@ -4571,32 +4571,270 @@ app.post('/api/messages/clear', (req, res) => {
 });
 
 // ====================================================================
-// MESSAGE TRANSLATION ENDPOINT (All 106+ Languages via Gemini)
+// MESSAGE TRANSLATION ENDPOINT (All 106+ Languages via Gemini + Auto Key Rotation & Recycling)
 // ====================================================================
 const translationCache = new Map<string, { translatedText: string; detectedLanguage: string }>();
 const TRANSLATION_CACHE_MAX = 1500;
 
-let sharedGeminiClient: GoogleGenAI | null = null;
-function getGeminiTranslationClient(): GoogleGenAI {
-  const apiKey = process.env.GEMINI_API_KEY?.trim();
-  if (!apiKey) {
+interface GeminiKeySlot {
+  index: number;
+  label: string;
+  apiKey: string;
+  client: GoogleGenAI;
+  cooldownUntil: number;
+  consecutiveFailures: number;
+  lastErrorStatus?: number;
+}
+
+const RATE_LIMIT_COOLDOWN_MS = 65_000;
+const TRANSIENT_COOLDOWN_MS = 20_000;
+const AUTH_ERROR_COOLDOWN_MS = 10 * 60_000;
+
+let geminiKeySlots: GeminiKeySlot[] | null = null;
+let activeGeminiKeyCursor = 0;
+
+function collectGeminiTranslationKeys(): string[] {
+  const rawKeys: string[] = [];
+
+  for (let i = 1; i <= 20; i++) {
+    const val = process.env[`GEMINI_API_KEY_${i}`]?.trim();
+    if (val) rawKeys.push(val);
+  }
+
+  const listEnv = process.env.GEMINI_API_KEYS?.trim();
+  if (listEnv) {
+    for (const part of listEnv.split(/[\s,;]+/)) {
+      const cleaned = part.trim();
+      if (cleaned) rawKeys.push(cleaned);
+    }
+  }
+
+  const singleKey = process.env.GEMINI_API_KEY?.trim();
+  if (singleKey) rawKeys.push(singleKey);
+
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const key of rawKeys) {
+    if (!seen.has(key)) {
+      seen.add(key);
+      unique.push(key);
+    }
+  }
+  return unique;
+}
+
+function getGeminiKeySlots(): GeminiKeySlot[] {
+  if (geminiKeySlots && geminiKeySlots.length > 0) {
+    return geminiKeySlots;
+  }
+
+  const keys = collectGeminiTranslationKeys();
+  if (keys.length === 0) {
     const err: any = new Error(
       'Translation requires a Gemini API key. Please configure it in Settings > Secrets.'
     );
     err.statusCode = 503;
     throw err;
   }
-  if (!sharedGeminiClient) {
-    sharedGeminiClient = new GoogleGenAI({
+
+  geminiKeySlots = keys.map((apiKey, idx) => ({
+    index: idx,
+    label: `Key#${idx + 1}(...${apiKey.slice(-4)})`,
+    apiKey,
+    client: new GoogleGenAI({
       apiKey,
       httpOptions: {
         headers: {
           'User-Agent': 'aistudio-build',
         },
       },
-    });
+    }),
+    cooldownUntil: 0,
+    consecutiveFailures: 0,
+  }));
+
+  return geminiKeySlots;
+}
+
+function parseRetryDelayMs(err: any): number | null {
+  const msg = String(err?.message || '');
+  const match = msg.match(/retry\s*(?:in|after|delay)?\s*[:=]?\s*(\d+(?:\.\d+)?)\s*s/i);
+  if (match) {
+    const secs = parseFloat(match[1]);
+    if (Number.isFinite(secs) && secs > 0) {
+      return Math.min(10 * 60_000, Math.max(15_000, Math.ceil(secs * 1000) + 1500));
+    }
   }
-  return sharedGeminiClient;
+  return null;
+}
+
+function classifyGeminiKeyError(err: any): {
+  rotatable: boolean;
+  isQuota: boolean;
+  isAuth: boolean;
+  status: number;
+  cooldownMs: number;
+} {
+  const status = Number(err?.statusCode || err?.status || 500);
+  const msg = String(err?.message || '');
+  const lower = msg.toLowerCase();
+
+  const isQuota =
+    status === 429 ||
+    msg.includes('RESOURCE_EXHAUSTED') ||
+    lower.includes('quota') ||
+    lower.includes('rate limit') ||
+    lower.includes('too many requests');
+
+  const isAuth =
+    status === 401 ||
+    status === 403 ||
+    msg.includes('API_KEY_INVALID') ||
+    msg.includes('PERMISSION_DENIED') ||
+    lower.includes('api key not valid') ||
+    lower.includes('invalid api key');
+
+  const isTransient =
+    status === 500 ||
+    status === 502 ||
+    status === 503 ||
+    status === 504 ||
+    msg.includes('UNAVAILABLE') ||
+    lower.includes('timeout') ||
+    lower.includes('fetch failed');
+
+  if (isQuota) {
+    return {
+      rotatable: true,
+      isQuota: true,
+      isAuth: false,
+      status: 429,
+      cooldownMs: parseRetryDelayMs(err) ?? RATE_LIMIT_COOLDOWN_MS,
+    };
+  }
+  if (isAuth) {
+    return {
+      rotatable: true,
+      isQuota: false,
+      isAuth: true,
+      status,
+      cooldownMs: AUTH_ERROR_COOLDOWN_MS,
+    };
+  }
+  if (isTransient) {
+    return {
+      rotatable: true,
+      isQuota: false,
+      isAuth: false,
+      status,
+      cooldownMs: TRANSIENT_COOLDOWN_MS,
+    };
+  }
+
+  return {
+    rotatable: false,
+    isQuota: false,
+    isAuth: false,
+    status,
+    cooldownMs: 0,
+  };
+}
+
+async function generateTranslationWithRotation(
+  targetDescriptor: string,
+  cleanCode: string,
+  cleanText: string
+) {
+  const slots = getGeminiKeySlots();
+  const total = slots.length;
+  const now = Date.now();
+
+  // Recycle any keys whose cooldown has finished
+  for (const slot of slots) {
+    if (slot.cooldownUntil > 0 && slot.cooldownUntil <= now) {
+      slot.cooldownUntil = 0;
+    }
+  }
+
+  // Build candidate order starting from current active cursor, prioritizing ready keys,
+  // then cooled-down keys ordered by earliest cooldownUntil (recycled fallback).
+  const orderedIndices: number[] = [];
+  for (let offset = 0; offset < total; offset++) {
+    orderedIndices.push((activeGeminiKeyCursor + offset) % total);
+  }
+  const readyIndices = orderedIndices.filter((idx) => slots[idx].cooldownUntil <= now);
+  const coolingIndices = orderedIndices
+    .filter((idx) => slots[idx].cooldownUntil > now)
+    .sort((a, b) => slots[a].cooldownUntil - slots[b].cooldownUntil);
+
+  const attemptOrder = readyIndices.length > 0 ? [...readyIndices, ...coolingIndices] : coolingIndices;
+  let lastError: any = null;
+
+  for (const idx of attemptOrder) {
+    const slot = slots[idx];
+    // Skip still-cooling keys unless every single key is in cooldown and wait is tiny
+    if (readyIndices.length > 0 && slot.cooldownUntil > Date.now()) {
+      continue;
+    }
+    if (readyIndices.length === 0 && slot.cooldownUntil > Date.now()) {
+      const waitMs = slot.cooldownUntil - Date.now();
+      // If earliest key cools down within 2.5s, wait briefly to recycle cleanly; otherwise allow one immediate probe if it's been waiting longest
+      if (waitMs > 0 && waitMs <= 2500) {
+        await new Promise((r) => setTimeout(r, waitMs));
+      }
+    }
+
+    try {
+      const response = await slot.client.models.generateContent({
+        model: 'gemini-4-hydrogen',
+        contents: `Target language: ${targetDescriptor} (code: ${cleanCode || 'auto'})\n\nMessage:\n${cleanText}`,
+        config: {
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          systemInstruction:
+            'You are an accurate real-time chat translator supporting all 106+ world languages, Hinglish/romanized text, casual chat slang, and formal speech. Translate the provided chat message naturally into the exact requested target language while preserving emojis, formatting, line breaks, @mentions, and URLs. If the message is already in the target language, return it cleanly as-is. Respond strictly with valid JSON matching the schema.',
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              translatedText: {
+                type: Type.STRING,
+                description: 'The translated chat message in the target language.',
+              },
+              detectedLanguage: {
+                type: Type.STRING,
+                description: 'The detected source language name in English.',
+              },
+            },
+            required: ['translatedText', 'detectedLanguage'],
+          },
+        },
+      });
+
+      // Success: stick to this healthy key and reset its failure counters
+      slot.cooldownUntil = 0;
+      slot.consecutiveFailures = 0;
+      slot.lastErrorStatus = undefined;
+      activeGeminiKeyCursor = idx;
+      return response;
+    } catch (err: any) {
+      lastError = err;
+      const info = classifyGeminiKeyError(err);
+      if (!info.rotatable) {
+        throw err;
+      }
+
+      slot.consecutiveFailures += 1;
+      slot.lastErrorStatus = info.status;
+      slot.cooldownUntil = Date.now() + info.cooldownMs;
+      activeGeminiKeyCursor = (idx + 1) % total;
+
+      console.warn(
+        `[Translation Key Rotate] ${slot.label} hit status=${info.status} (quota=${info.isQuota}). Switching to next key & recycling after ${Math.round(info.cooldownMs / 1000)}s.`
+      );
+    }
+  }
+
+  throw lastError || new Error('All Gemini translation API keys are temporarily unavailable.');
 }
 
 app.post('/api/messages/translate', requireAuth, async (req, res) => {
@@ -4637,35 +4875,11 @@ app.post('/api/messages/translate', requireAuth, async (req, res) => {
       });
     }
 
-    const ai = getGeminiTranslationClient();
     const targetDescriptor = [cleanName || cleanCode, cleanNative && cleanNative !== cleanName ? cleanNative : null]
       .filter(Boolean)
       .join(' / ');
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-4-hydrogen',
-      contents: `Target language: ${targetDescriptor} (code: ${cleanCode || 'auto'})\n\nMessage:\n${cleanText}`,
-      config: {
-        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-        systemInstruction:
-          'You are an accurate real-time chat translator supporting all 106+ world languages, Hinglish/romanized text, casual chat slang, and formal speech. Translate the provided chat message naturally into the exact requested target language while preserving emojis, formatting, line breaks, @mentions, and URLs. If the message is already in the target language, return it cleanly as-is. Respond strictly with valid JSON matching the schema.',
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            translatedText: {
-              type: Type.STRING,
-              description: 'The translated chat message in the target language.',
-            },
-            detectedLanguage: {
-              type: Type.STRING,
-              description: 'The detected source language name in English.',
-            },
-          },
-          required: ['translatedText', 'detectedLanguage'],
-        },
-      },
-    });
+    const response = await generateTranslationWithRotation(targetDescriptor, cleanCode, cleanText);
 
     const rawJson = (response.text ?? '{}').trim();
     let parsed: { translatedText?: string; detectedLanguage?: string } = {};
@@ -4705,12 +4919,12 @@ app.post('/api/messages/translate', requireAuth, async (req, res) => {
     }
     if (status === 429 || msg.includes('RESOURCE_EXHAUSTED')) {
       return res.status(429).json({
-        error: 'Translation quota limit reached. Please wait a moment or check your billing plan in Settings > Secrets.',
+        error: 'Translation quota limit reached across all configured keys. Please wait a moment and try again.',
       });
     }
     if (status === 400 || status === 403 || msg.includes('PERMISSION_DENIED') || msg.includes('API_KEY_INVALID')) {
       return res.status(502).json({
-        error: 'Translation service API key error. Please check your Gemini API key in Settings > Secrets.',
+        error: 'Translation service API key error. Please check your Gemini API keys.',
       });
     }
     return res.status(500).json({ error: msg });

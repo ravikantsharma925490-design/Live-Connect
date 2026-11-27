@@ -26,6 +26,10 @@ import {
   OperationType,
   tsToIso,
 } from '@/src/lib/firebase/client';
+import {
+  isOfflineOrUnavailableError,
+  restGetDocument,
+} from '@/src/lib/firebase/restFallback';
 import { generateUUID } from '@/src/lib/utils';
 import {
   computeMutedUntilIso,
@@ -69,6 +73,21 @@ async function apiJson<T>(url: string, options: RequestInit = {}): Promise<T> {
     throw err;
   }
   return data as T;
+}
+
+async function getDocDataWithRestFallback(
+  docPath: string,
+  ...pathSegments: [string, ...string[]]
+): Promise<{ exists: boolean; data?: Record<string, any> }> {
+  try {
+    const snap = await getDoc(doc(db, ...pathSegments));
+    return snap.exists() ? { exists: true, data: snap.data() } : { exists: false };
+  } catch (err) {
+    if (isOfflineOrUnavailableError(err)) {
+      return await restGetDocument(docPath);
+    }
+    throw err;
+  }
 }
 
 function makeCode(len = 12): string {
@@ -214,23 +233,36 @@ export async function listMyFamiliesAndInvites(userId: string): Promise<{
       ),
     ]);
 
+    if (memsSnap.metadata?.fromCache && memsSnap.empty && !memsSnap.metadata?.hasPendingWrites) {
+      throw new Error('Offline cache empty for family memberships');
+    }
+
     const memberships: FamilyMembership[] = [];
+    let hadTransientFamilyError = false;
 
     await Promise.all(
       memsSnap.docs.map(async (mDoc) => {
         const md = mDoc.data();
         const famId = md.familyId || mDoc.id;
-        const famSnap = await getDoc(doc(db, 'families', famId)).catch(() => null);
-        if (!famSnap || !famSnap.exists()) return;
-        const fd = famSnap.data();
+        let famRes: { exists: boolean; data?: Record<string, any> } | null = null;
+        try {
+          famRes = await getDocDataWithRestFallback(`families/${famId}`, 'families', famId);
+        } catch {
+          hadTransientFamilyError = true;
+          return;
+        }
+        if (!famRes.exists || !famRes.data) return;
+        const fd = famRes.data;
 
         const isPrivileged = md.status === 'active' && (md.role === 'owner' || md.role === 'admin');
-        let pendingRequestsCount = 0;
+        let pendingRequestsCount: number | undefined = isPrivileged ? undefined : 0;
         if (isPrivileged) {
           const reqCountSnap = await getCountFromServer(
             query(collection(db, 'families', famId, 'requests'), where('status', '==', 'pending'))
           ).catch(() => null);
-          pendingRequestsCount = reqCountSnap?.data().count || 0;
+          if (reqCountSnap) {
+            pendingRequestsCount = reqCountSnap.data().count || 0;
+          }
         }
 
         let unreadCount = 0;
@@ -251,6 +283,9 @@ export async function listMyFamiliesAndInvites(userId: string): Promise<{
               unreadCount = unreadSnap.docs.filter(
                 (msgDoc) => msgDoc.data().senderId !== userId && !msgDoc.data().isDeleted
               ).length;
+            } else {
+              // Sentinel for transient sub-query error; useFamilies preserves prior unreadCount
+              unreadCount = -1;
             }
           }
         }
@@ -272,6 +307,10 @@ export async function listMyFamiliesAndInvites(userId: string): Promise<{
         });
       })
     );
+
+    if (hadTransientFamilyError) {
+      throw new Error('Transient error loading one or more families');
+    }
 
     memberships.sort((a, b) => {
       const ta = a.family?.lastMessageAt || a.family?.updatedAt || a.updatedAt;
@@ -664,15 +703,15 @@ export async function getFamilyDetail(
   }
 
   try {
-    const [famSnap, memSnap, userMemSnap] = await Promise.all([
-      getDoc(doc(db, 'families', familyId)),
-      getDoc(doc(db, 'families', familyId, 'members', userId)),
-      getDoc(doc(db, 'users', userId, 'family_memberships', familyId)).catch(() => null),
+    const [famRes, memRes, userMemRes] = await Promise.all([
+      getDocDataWithRestFallback(`families/${familyId}`, 'families', familyId),
+      getDocDataWithRestFallback(`families/${familyId}/members/${userId}`, 'families', familyId, 'members', userId),
+      getDocDataWithRestFallback(`users/${userId}/family_memberships/${familyId}`, 'users', userId, 'family_memberships', familyId).catch(() => ({ exists: false, data: undefined })),
     ]);
-    if (!famSnap.exists()) throw new Error('Family not found.');
-    if (!memSnap.exists()) throw new Error('You are not a member of this Family.');
+    if (!famRes.exists || !famRes.data) throw new Error('Family not found.');
+    if (!memRes.exists || !memRes.data) throw new Error('You are not a member of this Family.');
 
-    const md = memSnap.data();
+    const md = memRes.data;
     if (md.status === 'removed') {
       const err = new Error('You were removed from this Family.') as Error & { code?: string };
       err.code = 'FAMILY_REMOVED';
@@ -680,16 +719,18 @@ export async function getFamilyDetail(
     }
 
     const isPrivileged = md.status === 'active' && (md.role === 'owner' || md.role === 'admin');
-    let pendingRequestsCount = 0;
+    let pendingRequestsCount: number | undefined = isPrivileged ? undefined : 0;
     if (isPrivileged) {
       const cntSnap = await getCountFromServer(
         query(collection(db, 'families', familyId, 'requests'), where('status', '==', 'pending'))
       ).catch(() => null);
-      pendingRequestsCount = cntSnap?.data().count || 0;
+      if (cntSnap) {
+        pendingRequestsCount = cntSnap.data().count || 0;
+      }
     }
 
-    const umd = userMemSnap?.exists() ? userMemSnap.data() : {};
-    const family = mapFsFamily(familyId, famSnap.data(), pendingRequestsCount);
+    const umd = userMemRes.exists && userMemRes.data ? userMemRes.data : {};
+    const family = mapFsFamily(familyId, famRes.data, pendingRequestsCount);
     const membership: FamilyMembership = {
       familyId,
       userId,
@@ -930,8 +971,24 @@ export async function listFamilyMembersPaged(params: {
       q = query(baseCol, ...constraints);
     }
 
-    const snap = await getDocs(q);
-    const members: FamilyMember[] = snap.docs.map((d) => {
+    let snap;
+    let usedFallbackQuery = false;
+    try {
+      snap = await getDocs(q);
+    } catch (queryErr: any) {
+      const code = String(queryErr?.code || '').toLowerCase();
+      const msg = String(queryErr?.message || '').toLowerCase();
+      if (code === 'failed-precondition' || msg.includes('index')) {
+        usedFallbackQuery = true;
+        snap = await getDocs(
+          query(baseCol, where('status', '==', targetStatus), limit(qStr ? 500 : pageSize))
+        );
+      } else {
+        throw queryErr;
+      }
+    }
+
+    let members: FamilyMember[] = snap.docs.map((d) => {
       const md = d.data() as Record<string, any>;
       return {
         userId: md.userId || d.id,
@@ -950,6 +1007,18 @@ export async function listFamilyMembersPaged(params: {
         removedBy: md.removedBy || null,
       };
     });
+
+    if (usedFallbackQuery) {
+      if (qStr) {
+        members = members.filter(
+          (m) =>
+            m.displayName.toLowerCase().includes(qStr) ||
+            m.username.toLowerCase().includes(qStr)
+        );
+      }
+      members.sort((a, b) => a.displayName.localeCompare(b.displayName));
+      members = members.slice(0, pageSize);
+    }
 
     // Hydrate online status ONLY when memberCount <= 50 and targetStatus == 'active'
     if (!hidePresence && targetStatus === 'active' && members.length > 0) {
@@ -1165,27 +1234,46 @@ export async function listFamilyJoinRequests(userId: string, familyId: string): 
   }
 
   try {
-    const snap = await getDocs(
-      query(
-        collection(db, 'families', familyId, 'requests'),
-        where('status', '==', 'pending'),
-        orderBy('createdAt', 'desc'),
-        limit(200)
-      )
-    );
-    return snap.docs.map((d) => {
-      const r = d.data();
-      return {
-        userId: r.userId || d.id,
-        familyId,
-        displayName: r.displayName || 'User',
-        username: r.username || 'user',
-        avatarUrl: r.avatarUrl || null,
-        status: r.status,
-        inviteCode: r.inviteCode || null,
-        createdAt: tsToIso(r.createdAt),
-      };
-    });
+    let snap;
+    try {
+      snap = await getDocs(
+        query(
+          collection(db, 'families', familyId, 'requests'),
+          where('status', '==', 'pending'),
+          orderBy('createdAt', 'desc'),
+          limit(200)
+        )
+      );
+    } catch (queryErr: any) {
+      const code = String(queryErr?.code || '').toLowerCase();
+      const msg = String(queryErr?.message || '').toLowerCase();
+      if (code === 'failed-precondition' || msg.includes('index')) {
+        snap = await getDocs(
+          query(
+            collection(db, 'families', familyId, 'requests'),
+            where('status', '==', 'pending'),
+            limit(200)
+          )
+        );
+      } else {
+        throw queryErr;
+      }
+    }
+    return snap.docs
+      .map((d) => {
+        const r = d.data();
+        return {
+          userId: r.userId || d.id,
+          familyId,
+          displayName: r.displayName || 'User',
+          username: r.username || 'user',
+          avatarUrl: r.avatarUrl || null,
+          status: r.status,
+          inviteCode: r.inviteCode || null,
+          createdAt: tsToIso(r.createdAt),
+        };
+      })
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   } catch (err) {
     handleFirestoreError(err, OperationType.LIST, `families/${familyId}/requests`);
   }
@@ -1619,13 +1707,24 @@ export function subscribeFamilyMessagesFs(
     orderBy('createdAt', 'desc'),
     limit(FAMILY_MESSAGES_PAGE_SIZE)
   );
-  return onSnapshot(q, (snap) => {
-    let list = snap.docs.map((d) => mapFsMessage(d.id, d.data())).reverse();
-    if (clearedAt) {
-      list = list.filter((m) => m.createdAt > clearedAt);
+  let hasEmitted = false;
+  return onSnapshot(
+    q,
+    (snap) => {
+      if (snap.metadata.fromCache && snap.empty && !snap.metadata.hasPendingWrites && hasEmitted) {
+        return;
+      }
+      hasEmitted = true;
+      let list = snap.docs.map((d) => mapFsMessage(d.id, d.data())).reverse();
+      if (clearedAt) {
+        list = list.filter((m) => m.createdAt > clearedAt);
+      }
+      onUpdate(list);
+    },
+    (err) => {
+      console.warn('Transient family messages listener error:', err?.message || err);
     }
-    onUpdate(list);
-  });
+  );
 }
 
 export async function sendFamilyMessage(params: {

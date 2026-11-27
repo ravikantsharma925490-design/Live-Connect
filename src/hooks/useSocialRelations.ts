@@ -15,10 +15,7 @@ import {
 } from '@/src/lib/social-cache';
 import {
   db,
-  auth,
   isFirebaseSessionActive,
-  OperationType,
-  handleFirestoreError,
 } from '@/src/lib/firebase/client';
 import {
   fetchRelationStatusFs,
@@ -29,6 +26,36 @@ import {
   fetchMultiplePublicProfilesFs,
 } from '@/src/lib/firebase/services';
 import { getAuthHeaders } from '@/src/lib/authHeader';
+
+const COUNTS_CACHE_PREFIX = 'liveconnect_social_counts_';
+
+function loadCachedCountsMap(
+  userId?: string
+): Record<string, { followers: number; following: number }> {
+  if (typeof window === 'undefined' || !userId) return {};
+  try {
+    const raw = localStorage.getItem(`${COUNTS_CACHE_PREFIX}${userId}`);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') return parsed;
+    }
+  } catch {
+    // ignore
+  }
+  return {};
+}
+
+function saveCachedCountsMap(
+  userId: string | undefined,
+  counts: Record<string, { followers: number; following: number }>
+) {
+  if (typeof window === 'undefined' || !userId) return;
+  try {
+    localStorage.setItem(`${COUNTS_CACHE_PREFIX}${userId}`, JSON.stringify(counts));
+  } catch {
+    // ignore
+  }
+}
 
 export function useSocialRelations(currentProfile?: Profile | null) {
   const currentUserId = currentProfile?.id;
@@ -45,12 +72,62 @@ export function useSocialRelations(currentProfile?: Profile | null) {
   const [followerSet, setFollowerSet] = useState<Set<string>>(() => new Set(initialLocal.followers));
   const [blockedByMeSet, setBlockedByMeSet] = useState<Set<string>>(new Set());
   const [blockedByThemSet, setBlockedByThemSet] = useState<Set<string>>(new Set());
-  const [countsMap, setCountsMap] = useState<Record<string, { followers: number; following: number }>>({});
+  const [countsMap, setCountsMap] = useState<Record<string, { followers: number; following: number }>>(
+    () => loadCachedCountsMap(currentUserId)
+  );
   const [loading, setLoading] = useState<boolean>(
     () => !(initialLocal.following.length > 0 || initialLocal.followers.length > 0)
   );
+
+  const followingSetRef = useRef(followingSet);
+  const followerSetRef = useRef(followerSet);
+  const blockedByMeSetRef = useRef(blockedByMeSet);
+  const blockedByThemSetRef = useRef(blockedByThemSet);
+  const countsMapRef = useRef(countsMap);
+  followingSetRef.current = followingSet;
+  followerSetRef.current = followerSet;
+  blockedByMeSetRef.current = blockedByMeSet;
+  blockedByThemSetRef.current = blockedByThemSet;
+  countsMapRef.current = countsMap;
+
   const inFlightRef = useRef<Set<string>>(new Set());
   const socialBusRef = useRef<BroadcastChannel | null>(null);
+  const prevHydratedUserRef = useRef<string | undefined>(currentUserId);
+
+  // Re-hydrate immediately when currentUserId transitions from undefined -> uid or switches user
+  useEffect(() => {
+    if (prevHydratedUserRef.current === currentUserId) return;
+    prevHydratedUserRef.current = currentUserId;
+
+    if (!currentUserId) {
+      setFollowingSet(new Set());
+      setFollowerSet(new Set());
+      setBlockedByMeSet(new Set());
+      setBlockedByThemSet(new Set());
+      setCountsMap({});
+      setLoading(false);
+      return;
+    }
+
+    const loc = loadLocalFollows(currentUserId);
+    const cachedFollowers = loadCachedFollowersList(currentUserId);
+    const cachedFollowing = loadCachedFollowingList(currentUserId);
+    const nextFollowing = new Set([...loc.following, ...cachedFollowing.map((p) => p.id)]);
+    const nextFollowers = new Set([...loc.followers, ...cachedFollowers.map((p) => p.id)]);
+    const cachedCounts = loadCachedCountsMap(currentUserId);
+
+    if (nextFollowing.size > 0 || nextFollowers.size > 0) {
+      cachedCounts[currentUserId] = {
+        followers: nextFollowers.size,
+        following: nextFollowing.size,
+      };
+    }
+
+    setFollowingSet(nextFollowing);
+    setFollowerSet(nextFollowers);
+    setCountsMap(cachedCounts);
+    setLoading(!(nextFollowing.size > 0 || nextFollowers.size > 0));
+  }, [currentUserId]);
 
   // Synchronize relations from SQLite backend when not in a Firebase session
   const fetchRelations = useCallback(async () => {
@@ -113,33 +190,45 @@ export function useSocialRelations(currentProfile?: Profile | null) {
         }
       }
 
+      let hasAllCountsUpdate = false;
       if (countsResult.status === 'fulfilled' && countsResult.value?.counts) {
+        hasAllCountsUpdate = true;
         Object.entries(countsResult.value.counts).forEach(([uId, c]: [string, any]) => {
           cMap[uId] = { followers: c.followers || 0, following: c.following || 0 };
         });
       }
 
-      if (!fetchedFromNetwork) {
-        const local = loadLocalFollows(currentUserId);
-        local.following.forEach((id) => nextFollowing.add(id));
-        local.followers.forEach((id) => nextFollowers.add(id));
-      } else {
+      if (fetchedFromNetwork) {
         saveLocalFollows(currentUserId, {
           following: Array.from(nextFollowing),
           followers: Array.from(nextFollowers),
         });
+        cMap[currentUserId] = {
+          followers: nextFollowers.size,
+          following: nextFollowing.size,
+        };
+        setFollowingSet(nextFollowing);
+        setFollowerSet(nextFollowers);
+        setBlockedByMeSet(nextBlockedByMe);
+        setBlockedByThemSet(nextBlockedByThem);
+      } else {
+        // Transient overview failure: keep existing state (or hydrate from localStorage if empty)
+        const local = loadLocalFollows(currentUserId);
+        if (followingSetRef.current.size === 0 && local.following.length > 0) {
+          setFollowingSet(new Set(local.following));
+        }
+        if (followerSetRef.current.size === 0 && local.followers.length > 0) {
+          setFollowerSet(new Set(local.followers));
+        }
       }
 
-      cMap[currentUserId] = {
-        followers: nextFollowers.size,
-        following: nextFollowing.size,
-      };
-
-      setFollowingSet(nextFollowing);
-      setFollowerSet(nextFollowers);
-      setBlockedByMeSet(nextBlockedByMe);
-      setBlockedByThemSet(nextBlockedByThem);
-      setCountsMap(cMap);
+      if (hasAllCountsUpdate || fetchedFromNetwork) {
+        setCountsMap((prev) => {
+          const merged = { ...prev, ...cMap };
+          saveCachedCountsMap(currentUserId, merged);
+          return merged;
+        });
+      }
     } catch (err: any) {
       console.warn('Notice loading social relations:', err.message);
     } finally {
@@ -157,54 +246,99 @@ export function useSocialRelations(currentProfile?: Profile | null) {
       const unsubFollowing = onSnapshot(
         query(collection(db, 'follows'), where('followerId', '==', currentUserId)),
         (snap) => {
+          // Ignore transient empty cache emissions while offline/reconnecting when we already have known relations
+          if (
+            snap.metadata.fromCache &&
+            snap.empty &&
+            !snap.metadata.hasPendingWrites &&
+            followingSetRef.current.size > 0
+          ) {
+            setLoading(false);
+            return;
+          }
           const next = new Set<string>();
           snap.forEach((d) => {
             const fid = d.data()?.followingId;
             if (fid) next.add(fid);
           });
+          followingSetRef.current = next;
           setFollowingSet(next);
-          setCountsMap((prev) => ({
-            ...prev,
-            [currentUserId]: {
-              followers: prev[currentUserId]?.followers || 0,
-              following: next.size,
-            },
-          }));
+          saveLocalFollows(currentUserId, {
+            following: Array.from(next),
+            followers: Array.from(followerSetRef.current),
+          });
+          setCountsMap((prev) => {
+            const updated = {
+              ...prev,
+              [currentUserId]: {
+                followers: prev[currentUserId]?.followers ?? followerSetRef.current.size,
+                following: next.size,
+              },
+            };
+            saveCachedCountsMap(currentUserId, updated);
+            return updated;
+          });
           setLoading(false);
         },
         (err) => {
-          if (!auth.currentUser) return;
-          handleFirestoreError(err, OperationType.LIST, 'follows');
+          console.warn('Transient follows (following) listener error:', err?.message || err);
+          setLoading(false);
         }
       );
 
       const unsubFollowers = onSnapshot(
         query(collection(db, 'follows'), where('followingId', '==', currentUserId)),
         (snap) => {
+          if (
+            snap.metadata.fromCache &&
+            snap.empty &&
+            !snap.metadata.hasPendingWrites &&
+            followerSetRef.current.size > 0
+          ) {
+            setLoading(false);
+            return;
+          }
           const next = new Set<string>();
           snap.forEach((d) => {
             const fid = d.data()?.followerId;
             if (fid) next.add(fid);
           });
+          followerSetRef.current = next;
           setFollowerSet(next);
-          setCountsMap((prev) => ({
-            ...prev,
-            [currentUserId]: {
-              followers: next.size,
-              following: prev[currentUserId]?.following || 0,
-            },
-          }));
+          saveLocalFollows(currentUserId, {
+            following: Array.from(followingSetRef.current),
+            followers: Array.from(next),
+          });
+          setCountsMap((prev) => {
+            const updated = {
+              ...prev,
+              [currentUserId]: {
+                followers: next.size,
+                following: prev[currentUserId]?.following ?? followingSetRef.current.size,
+              },
+            };
+            saveCachedCountsMap(currentUserId, updated);
+            return updated;
+          });
           setLoading(false);
         },
         (err) => {
-          if (!auth.currentUser) return;
-          handleFirestoreError(err, OperationType.LIST, 'follows');
+          console.warn('Transient follows (followers) listener error:', err?.message || err);
+          setLoading(false);
         }
       );
 
       const unsubBlockedByMe = onSnapshot(
         query(collection(db, 'blocks'), where('blockerId', '==', currentUserId)),
         (snap) => {
+          if (
+            snap.metadata.fromCache &&
+            snap.empty &&
+            !snap.metadata.hasPendingWrites &&
+            blockedByMeSetRef.current.size > 0
+          ) {
+            return;
+          }
           const next = new Set<string>();
           snap.forEach((d) => {
             const bid = d.data()?.blockedId;
@@ -213,14 +347,21 @@ export function useSocialRelations(currentProfile?: Profile | null) {
           setBlockedByMeSet(next);
         },
         (err) => {
-          if (!auth.currentUser) return;
-          handleFirestoreError(err, OperationType.LIST, 'blocks');
+          console.warn('Transient blocks (byMe) listener error:', err?.message || err);
         }
       );
 
       const unsubBlockedByThem = onSnapshot(
         query(collection(db, 'blocks'), where('blockedId', '==', currentUserId)),
         (snap) => {
+          if (
+            snap.metadata.fromCache &&
+            snap.empty &&
+            !snap.metadata.hasPendingWrites &&
+            blockedByThemSetRef.current.size > 0
+          ) {
+            return;
+          }
           const next = new Set<string>();
           snap.forEach((d) => {
             const bid = d.data()?.blockerId;
@@ -229,8 +370,7 @@ export function useSocialRelations(currentProfile?: Profile | null) {
           setBlockedByThemSet(next);
         },
         (err) => {
-          if (!auth.currentUser) return;
-          handleFirestoreError(err, OperationType.LIST, 'blocks');
+          console.warn('Transient blocks (byThem) listener error:', err?.message || err);
         }
       );
 
@@ -520,21 +660,27 @@ export function useSocialRelations(currentProfile?: Profile | null) {
       setFollowingSet((prev) => {
         const next = new Set<string>(prev);
         next.add(targetId);
+        followingSetRef.current = next;
         saveLocalFollows(currentUserId, {
           following: Array.from(next),
-          followers: Array.from(followerSet),
+          followers: Array.from(followerSetRef.current),
         });
         return next;
       });
 
       setCountsMap((prev) => {
         const curTarget = prev[targetId] || { followers: 0, following: 0 };
-        const curMe = prev[currentUserId] || { followers: followerSet.size, following: followingSet.size };
-        return {
+        const curMe = prev[currentUserId] || {
+          followers: followerSetRef.current.size,
+          following: followingSetRef.current.size,
+        };
+        const updated = {
           ...prev,
           [targetId]: { ...curTarget, followers: Math.max(1, curTarget.followers + 1) },
-          [currentUserId]: { ...curMe, following: curMe.following + 1 },
+          [currentUserId]: { ...curMe, following: Math.max(curMe.following + 1, followingSetRef.current.size) },
         };
+        saveCachedCountsMap(currentUserId, updated);
+        return updated;
       });
 
       try {
@@ -546,6 +692,11 @@ export function useSocialRelations(currentProfile?: Profile | null) {
             setFollowerSet((prev) => {
               const next = new Set<string>(prev);
               next.add(targetId);
+              followerSetRef.current = next;
+              saveLocalFollows(currentUserId, {
+                following: Array.from(followingSetRef.current),
+                followers: Array.from(next),
+              });
               return next;
             });
             if (typeof window !== 'undefined') {
@@ -582,8 +733,9 @@ export function useSocialRelations(currentProfile?: Profile | null) {
             setFollowerSet((prev: Set<string>) => {
               const next = new Set<string>(prev);
               next.add(targetId);
+              followerSetRef.current = next;
               saveLocalFollows(currentUserId, {
-                following: [...Array.from(followingSet), targetId],
+                following: Array.from(followingSetRef.current),
                 followers: Array.from(next),
               });
               return next;
@@ -636,27 +788,33 @@ export function useSocialRelations(currentProfile?: Profile | null) {
       }
       inFlightRef.current.add(targetUserId);
 
-      const previousFollowing = new Set(followingSet);
+      const previousFollowing = new Set<string>(followingSet);
       const previousCounts = { ...countsMap };
 
       setFollowingSet((prev) => {
         const next = new Set<string>(prev);
         next.delete(targetUserId);
+        followingSetRef.current = next;
         saveLocalFollows(currentUserId, {
           following: Array.from(next),
-          followers: Array.from(followerSet),
+          followers: Array.from(followerSetRef.current),
         });
         return next;
       });
 
       setCountsMap((prev) => {
         const curTarget = prev[targetUserId] || { followers: 1, following: 0 };
-        const curMe = prev[currentUserId] || { followers: followerSet.size, following: followingSet.size };
-        return {
+        const curMe = prev[currentUserId] || {
+          followers: followerSetRef.current.size,
+          following: followingSetRef.current.size,
+        };
+        const updated = {
           ...prev,
           [targetUserId]: { ...curTarget, followers: Math.max(0, curTarget.followers - 1) },
-          [currentUserId]: { ...curMe, following: Math.max(0, curMe.following - 1) },
+          [currentUserId]: { ...curMe, following: Math.min(curMe.following > 0 ? curMe.following - 1 : 0, followingSetRef.current.size) },
         };
+        saveCachedCountsMap(currentUserId, updated);
+        return updated;
       });
 
       try {
@@ -678,14 +836,20 @@ export function useSocialRelations(currentProfile?: Profile | null) {
         fetchRelations();
         return true;
       } catch {
+        followingSetRef.current = previousFollowing;
         setFollowingSet(previousFollowing);
         setCountsMap(previousCounts);
+        saveLocalFollows(currentUserId, {
+          following: Array.from(previousFollowing),
+          followers: Array.from(followerSetRef.current),
+        });
+        saveCachedCountsMap(currentUserId, previousCounts);
         return false;
       } finally {
         inFlightRef.current.delete(targetUserId);
       }
     },
-    [currentUserId, followerSet, followingSet, countsMap, fetchRelations]
+    [currentUserId, followingSet, countsMap, fetchRelations]
   );
 
   // 3. Fetch Followers list (excluding blocked users)
@@ -695,40 +859,50 @@ export function useSocialRelations(currentProfile?: Profile | null) {
 
       if (isFirebaseSessionActive(currentUserId)) {
         if (userId === currentUserId) {
-          const visibleIds = Array.from<string>(followerSet).filter((id) => !isBlocked(id));
+          const visibleIds = Array.from<string>(followerSetRef.current).filter((id) => !isBlocked(id));
+          if (visibleIds.length === 0) {
+            saveCachedFollowersList(userId, []);
+            return [];
+          }
           const profilesMap = await fetchMultiplePublicProfilesFs(visibleIds);
-          const list = Object.values(profilesMap).filter((u) => !isBlocked(u.id));
-          saveCachedFollowersList(userId, list);
-          saveMultipleCachedProfiles(list);
-          return list;
+          const cachedProfiles = loadCachedProfiles();
+          const prevListMap = new Map(loadCachedFollowersList(userId).map((p) => [p.id, p]));
+          const list: Profile[] = [];
+          for (const id of visibleIds) {
+            const p = profilesMap[id] || cachedProfiles[id] || prevListMap.get(id);
+            if (p && !isBlocked(p.id)) {
+              list.push(p);
+            }
+          }
+          if (list.length > 0) {
+            saveCachedFollowersList(userId, list);
+            saveMultipleCachedProfiles(list);
+            return list;
+          }
+          throw new Error('Could not resolve follower profiles right now');
         }
         return loadCachedFollowersList(userId).filter((u) => !isBlocked(u.id));
       }
 
-      const cachedList = loadCachedFollowersList(userId).filter((u) => !isBlocked(u.id));
-      try {
-        const authHeaders = await getAuthHeaders();
-        const sRes = await fetch('/api/relations/user-overview', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...authHeaders },
-          body: JSON.stringify({ userId }),
-        });
-        if (sRes.ok) {
-          const sData = await sRes.json();
-          if (Array.isArray(sData.followerProfiles)) {
-            const filtered = (sData.followerProfiles as Profile[]).filter((u) => !isBlocked(u.id));
-            saveCachedFollowersList(userId, filtered);
-            saveMultipleCachedProfiles(filtered);
-            return filtered;
-          }
-        }
-      } catch (err) {
-        console.warn('Error fetching followers list:', err);
+      const authHeaders = await getAuthHeaders();
+      const sRes = await fetch('/api/relations/user-overview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders },
+        body: JSON.stringify({ userId }),
+      });
+      if (!sRes.ok) {
+        throw new Error(`Failed to fetch followers (${sRes.status})`);
       }
-
-      return cachedList;
+      const sData = await sRes.json();
+      if (Array.isArray(sData.followerProfiles)) {
+        const filtered = (sData.followerProfiles as Profile[]).filter((u) => !isBlocked(u.id));
+        saveCachedFollowersList(userId, filtered);
+        saveMultipleCachedProfiles(filtered);
+        return filtered;
+      }
+      throw new Error('Invalid followerProfiles response');
     },
-    [currentUserId, followerSet, isBlocked]
+    [currentUserId, isBlocked]
   );
 
   // 4. Fetch Following list (excluding blocked users)
@@ -738,40 +912,50 @@ export function useSocialRelations(currentProfile?: Profile | null) {
 
       if (isFirebaseSessionActive(currentUserId)) {
         if (userId === currentUserId) {
-          const visibleIds = Array.from<string>(followingSet).filter((id) => !isBlocked(id));
+          const visibleIds = Array.from<string>(followingSetRef.current).filter((id) => !isBlocked(id));
+          if (visibleIds.length === 0) {
+            saveCachedFollowingList(userId, []);
+            return [];
+          }
           const profilesMap = await fetchMultiplePublicProfilesFs(visibleIds);
-          const list = Object.values(profilesMap).filter((u) => !isBlocked(u.id));
-          saveCachedFollowingList(userId, list);
-          saveMultipleCachedProfiles(list);
-          return list;
+          const cachedProfiles = loadCachedProfiles();
+          const prevListMap = new Map(loadCachedFollowingList(userId).map((p) => [p.id, p]));
+          const list: Profile[] = [];
+          for (const id of visibleIds) {
+            const p = profilesMap[id] || cachedProfiles[id] || prevListMap.get(id);
+            if (p && !isBlocked(p.id)) {
+              list.push(p);
+            }
+          }
+          if (list.length > 0) {
+            saveCachedFollowingList(userId, list);
+            saveMultipleCachedProfiles(list);
+            return list;
+          }
+          throw new Error('Could not resolve following profiles right now');
         }
         return loadCachedFollowingList(userId).filter((u) => !isBlocked(u.id));
       }
 
-      const cachedList = loadCachedFollowingList(userId).filter((u) => !isBlocked(u.id));
-      try {
-        const authHeaders = await getAuthHeaders();
-        const sRes = await fetch('/api/relations/user-overview', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...authHeaders },
-          body: JSON.stringify({ userId }),
-        });
-        if (sRes.ok) {
-          const sData = await sRes.json();
-          if (Array.isArray(sData.followingProfiles)) {
-            const filtered = (sData.followingProfiles as Profile[]).filter((u) => !isBlocked(u.id));
-            saveCachedFollowingList(userId, filtered);
-            saveMultipleCachedProfiles(filtered);
-            return filtered;
-          }
-        }
-      } catch (err) {
-        console.warn('Error fetching following list:', err);
+      const authHeaders = await getAuthHeaders();
+      const sRes = await fetch('/api/relations/user-overview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders },
+        body: JSON.stringify({ userId }),
+      });
+      if (!sRes.ok) {
+        throw new Error(`Failed to fetch following (${sRes.status})`);
       }
-
-      return cachedList;
+      const sData = await sRes.json();
+      if (Array.isArray(sData.followingProfiles)) {
+        const filtered = (sData.followingProfiles as Profile[]).filter((u) => !isBlocked(u.id));
+        saveCachedFollowingList(userId, filtered);
+        saveMultipleCachedProfiles(filtered);
+        return filtered;
+      }
+      throw new Error('Invalid followingProfiles response');
     },
-    [currentUserId, followingSet, isBlocked]
+    [currentUserId, isBlocked]
   );
 
   // 5. Block User (removes follows in both directions; sends zero notifications to target)
@@ -884,9 +1068,12 @@ export function useSocialRelations(currentProfile?: Profile | null) {
       if (userId === currentUserId) {
         return Array.from(followerSet).filter((id) => !isBlocked(id)).length;
       }
-      return countsMap[userId]?.followers || 0;
+      if (typeof countsMap[userId]?.followers === 'number') {
+        return countsMap[userId].followers;
+      }
+      return isFollowing(userId) ? 1 : 0;
     },
-    [currentUserId, followerSet, countsMap, isBlocked]
+    [currentUserId, followerSet, countsMap, isBlocked, isFollowing]
   );
 
   const getFollowingCount = useCallback(
@@ -895,9 +1082,12 @@ export function useSocialRelations(currentProfile?: Profile | null) {
       if (userId === currentUserId) {
         return Array.from(followingSet).filter((id) => !isBlocked(id)).length;
       }
-      return countsMap[userId]?.following || 0;
+      if (typeof countsMap[userId]?.following === 'number') {
+        return countsMap[userId].following;
+      }
+      return isFollowedBy(userId) ? 1 : 0;
     },
-    [currentUserId, followingSet, countsMap, isBlocked]
+    [currentUserId, followingSet, countsMap, isBlocked, isFollowedBy]
   );
 
   return {

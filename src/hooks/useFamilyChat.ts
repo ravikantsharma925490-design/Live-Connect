@@ -30,19 +30,28 @@ export function useFamilyChat(familyId: string | null, userProfile: Profile | nu
 
   const userId = userProfile?.id || null;
   const lastTypingPulseRef = useRef(0);
+  const hasLiveMessagesSubRef = useRef(false);
 
   const loadDetailAndMessages = useCallback(async () => {
     if (!familyId || !userId) return;
     try {
       const detail = await getFamilyDetail(userId, familyId);
-      setFamily(detail.family);
+      setFamily((prev) => ({
+        ...detail.family,
+        pendingRequestsCount:
+          detail.family.pendingRequestsCount === undefined
+            ? (prev?.pendingRequestsCount ?? 0)
+            : detail.family.pendingRequestsCount,
+      }));
       setMembership(detail.membership);
       setRemovedNotice(null);
 
       if (detail.membership.status === 'active') {
-        const msgRes = await fetchFamilyMessages(userId, familyId, detail.membership.clearedAt || null);
-        setMessages(msgRes.messages || []);
-        setHasMore(Boolean(msgRes.hasMore));
+        if (!isFirebaseSessionActive(userId) || !hasLiveMessagesSubRef.current) {
+          const msgRes = await fetchFamilyMessages(userId, familyId, detail.membership.clearedAt || null);
+          setMessages(msgRes.messages || []);
+          setHasMore(Boolean(msgRes.hasMore));
+        }
       } else {
         setMessages([]);
         setHasMore(false);
@@ -58,6 +67,7 @@ export function useFamilyChat(familyId: string | null, userProfile: Profile | nu
 
   useEffect(() => {
     if (!familyId || !userId) {
+      hasLiveMessagesSubRef.current = false;
       setFamily(null);
       setMembership(null);
       setMessages([]);
@@ -66,18 +76,25 @@ export function useFamilyChat(familyId: string | null, userProfile: Profile | nu
       return;
     }
 
+    hasLiveMessagesSubRef.current = false;
     setLoading(true);
     loadDetailAndMessages();
 
     let unsubFamily: (() => void) | null = null;
-    let unsubMessages: (() => void) | null = null;
     let pollTimer: number | null = null;
 
     if (isFirebaseSessionActive(userId)) {
       try {
-        unsubFamily = onSnapshot(doc(db, 'families', familyId), () => {
-          loadDetailAndMessages();
-        });
+        unsubFamily = onSnapshot(
+          doc(db, 'families', familyId),
+          (snap) => {
+            if (snap.metadata.fromCache && !snap.exists()) return;
+            loadDetailAndMessages();
+          },
+          (err) => {
+            console.warn('Transient family detail listener error:', err?.message || err);
+          }
+        );
       } catch {
         // Fallback handled by polling
       }
@@ -89,20 +106,26 @@ export function useFamilyChat(familyId: string | null, userProfile: Profile | nu
 
     return () => {
       if (unsubFamily) unsubFamily();
-      if (unsubMessages) unsubMessages();
       if (pollTimer) window.clearInterval(pollTimer);
     };
   }, [familyId, userId, loadDetailAndMessages]);
 
   // Separate real-time messages subscription for Firebase mode
   useEffect(() => {
-    if (!familyId || !userId || membership?.status !== 'active') return;
+    if (!familyId || !userId || membership?.status !== 'active') {
+      hasLiveMessagesSubRef.current = false;
+      return;
+    }
     if (!isFirebaseSessionActive(userId)) return;
 
+    hasLiveMessagesSubRef.current = true;
     const unsub = subscribeFamilyMessagesFs(familyId, membership?.clearedAt || null, (list) => {
       setMessages(list);
     });
-    return () => unsub();
+    return () => {
+      hasLiveMessagesSubRef.current = false;
+      unsub();
+    };
   }, [familyId, userId, membership?.status, membership?.clearedAt]);
 
   // Typing polling ONLY for Families <= 50 members

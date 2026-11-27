@@ -61,20 +61,30 @@ export const FollowsListModal: React.FC<FollowsListModalProps> = ({
       setLoading(true);
     }
     try {
-      const [fData, fgData] = await Promise.all([
-        fetchFollowers(userId).catch(() => []),
-        fetchFollowing(userId).catch(() => []),
+      const [fRes, fgRes] = await Promise.allSettled([
+        fetchFollowers(userId),
+        fetchFollowing(userId),
       ]);
 
-      if (Array.isArray(fData)) {
-        setFollowersList(fData);
-        setFollowersLoaded(true);
-        saveCachedFollowersList(userId, fData);
+      if (fRes.status === 'fulfilled' && Array.isArray(fRes.value)) {
+        const fData = fRes.value;
+        const isUnreadableNonSelfZero =
+          userId !== currentUserId && fData.length === 0 && followersCount > 0;
+        if (!isUnreadableNonSelfZero) {
+          setFollowersList(fData);
+          setFollowersLoaded(true);
+          saveCachedFollowersList(userId, fData);
+        }
       }
-      if (Array.isArray(fgData)) {
-        setFollowingList(fgData);
-        setFollowingLoaded(true);
-        saveCachedFollowingList(userId, fgData);
+      if (fgRes.status === 'fulfilled' && Array.isArray(fgRes.value)) {
+        const fgData = fgRes.value;
+        const isUnreadableNonSelfZero =
+          userId !== currentUserId && fgData.length === 0 && followingCount > 0;
+        if (!isUnreadableNonSelfZero) {
+          setFollowingList(fgData);
+          setFollowingLoaded(true);
+          saveCachedFollowingList(userId, fgData);
+        }
       }
     } catch (err) {
       console.error('Error fetching list:', err);
@@ -84,23 +94,19 @@ export const FollowsListModal: React.FC<FollowsListModalProps> = ({
         setLoading(false);
       }
     }
-  }, [isOpen, userId, fetchFollowers, fetchFollowing]);
+  }, [isOpen, userId, currentUserId, followersCount, followingCount, fetchFollowers, fetchFollowing]);
 
   useEffect(() => {
     if (isOpen) {
       setActiveTab(initialTab);
       setSearchQuery('');
-      // Hydrate from cache immediately for target userId
+      // Hydrate from cache immediately for target userId (and clear stale state from previous userId)
       const cachedFollowers = loadCachedFollowersList(userId);
       const cachedFollowing = loadCachedFollowingList(userId);
-      if (cachedFollowers.length > 0) {
-        setFollowersList(cachedFollowers);
-        setFollowersLoaded(true);
-      }
-      if (cachedFollowing.length > 0) {
-        setFollowingList(cachedFollowing);
-        setFollowingLoaded(true);
-      }
+      setFollowersList(cachedFollowers);
+      setFollowingList(cachedFollowing);
+      setFollowersLoaded(cachedFollowers.length > 0);
+      setFollowingLoaded(cachedFollowing.length > 0);
 
       const hasCached = cachedFollowers.length > 0 || cachedFollowing.length > 0;
       loadData(hasCached);
