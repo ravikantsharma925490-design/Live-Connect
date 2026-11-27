@@ -22,8 +22,13 @@ import {
   Languages,
   Globe,
   X,
+  ShieldCheck,
+  Crown,
+  Shield,
+  Eye,
 } from 'lucide-react';
 import { useLanguage } from '@/src/lib/LanguageContext';
+import { FAMILY_QUICK_REACTIONS } from '@/src/lib/family/constants';
 import { WorldLanguage } from '@/src/lib/worldData';
 import { getCachedTranslation, translateChatText } from '@/src/lib/messageTranslation';
 
@@ -559,6 +564,16 @@ interface MessageBubbleProps {
     onPicked: (lang: WorldLanguage) => void,
     title?: string
   ) => void;
+  // Optional Family Group extensions
+  currentUserId?: string;
+  isFamilyMode?: boolean;
+  senderRelationTag?: string | null;
+  senderRoleBadge?: 'owner' | 'admin' | 'member' | null;
+  isSystemMessage?: boolean;
+  isSafeCheckIn?: boolean;
+  isDeletedTombstone?: boolean;
+  seenCount?: number;
+  onShowSeenDetails?: (messageId: string) => void;
 }
 
 const SWIPE_REPLY_THRESHOLD = 52;
@@ -580,6 +595,7 @@ const MessageBubbleComponent: React.FC<MessageBubbleProps> = ({
   otherUser,
   onReplyMessage,
   onForwardMessage,
+  onReactMessage,
   onPinMessage,
   onReportMessage,
   resolveReplyMessage,
@@ -588,6 +604,15 @@ const MessageBubbleComponent: React.FC<MessageBubbleProps> = ({
   defaultTargetLang,
   autoTranslate = false,
   onOpenTranslatePicker,
+  currentUserId,
+  isFamilyMode = false,
+  senderRelationTag,
+  senderRoleBadge,
+  isSystemMessage = false,
+  isSafeCheckIn = false,
+  isDeletedTombstone = false,
+  seenCount = 0,
+  onShowSeenDetails,
 }) => {
   const { t, currentLanguage } = useLanguage();
   const resolvedTargetLang = defaultTargetLang || currentLanguage;
@@ -1455,19 +1480,125 @@ const MessageBubbleComponent: React.FC<MessageBubbleProps> = ({
     </div>
   );
 
+  const renderStatusTicksOrSeen = (onColoredBubble: boolean) => {
+    if (isFamilyMode) {
+      if (!isMine || seenCount <= 0) return null;
+      return (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onShowSeenDetails?.(message.id);
+          }}
+          className={cn(
+            'inline-flex items-center gap-1 ml-1 text-[10px] font-medium underline decoration-dotted cursor-pointer',
+            onColoredBubble ? 'text-blue-100 hover:text-white' : 'text-neutral-500 dark:text-neutral-400 hover:text-neutral-700'
+          )}
+          title="Seen count"
+        >
+          <Eye className="w-3 h-3" />
+          <span>Seen by {seenCount}</span>
+        </button>
+      );
+    }
+    if (!isMine) return null;
+    return (
+      <span className="inline-flex items-center ml-0.5">
+        {message.is_read ? (
+          <CheckCheck className="w-4 h-4 text-green-300" strokeWidth={2.5} />
+        ) : (
+          <Check className="w-3.5 h-3.5 text-blue-200/70" strokeWidth={2} />
+        )}
+      </span>
+    );
+  };
+
+  const reactionEntries = Object.entries(message.reactions || {}).filter(
+    (entry): entry is [string, string[]] => Array.isArray(entry[1]) && entry[1].length > 0
+  );
+
+  const renderReactionsBar = () => {
+    if (isDeletedTombstone || reactionEntries.length === 0) return null;
+    return (
+      <div className={cn('flex flex-wrap gap-1 mt-1', isMine ? 'justify-end' : 'justify-start')}>
+        {reactionEntries.map(([emoji, userIds]) => {
+          const reactedByMe = Boolean(currentUserId && userIds.includes(currentUserId));
+          return (
+            <button
+              key={emoji}
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onReactMessage?.(message.id, emoji);
+              }}
+              className={cn(
+                'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold border transition-all cursor-pointer',
+                reactedByMe
+                  ? 'bg-blue-50 dark:bg-blue-950/60 border-blue-400 text-blue-700 dark:text-blue-300'
+                  : 'bg-white dark:bg-neutral-800 border-neutral-200 dark:border-neutral-700 text-neutral-700 dark:text-neutral-200 hover:bg-neutral-50 dark:hover:bg-neutral-700'
+              )}
+            >
+              <span>{emoji}</span>
+              <span>{userIds.length}</span>
+            </button>
+          );
+        })}
+      </div>
+    );
+  };
+
+  const renderFamilySenderHeader = () => {
+    if (!isFamilyMode || isMine) return null;
+    const senderDisplay = message.sender?.display_name || message.sender?.username || 'Member';
+    return (
+      <div className="flex flex-wrap items-center gap-1.5 mb-1 px-1">
+        <span className="text-[11.5px] font-bold text-neutral-700 dark:text-neutral-200">
+          {senderDisplay}
+        </span>
+        {senderRelationTag && (
+          <span className="px-1.5 py-0.5 rounded-md bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border border-emerald-200/70 dark:border-emerald-800/60 text-[10px] font-semibold">
+            {senderRelationTag}
+          </span>
+        )}
+        {senderRoleBadge === 'owner' && (
+          <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md bg-amber-50 dark:bg-amber-950/50 text-amber-700 dark:text-amber-300 border border-amber-200/70 dark:border-amber-800/60 text-[10px] font-bold">
+            <Crown className="w-2.5 h-2.5" />
+            Owner
+          </span>
+        )}
+        {senderRoleBadge === 'admin' && (
+          <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 border border-indigo-200/70 dark:border-indigo-800/60 text-[10px] font-bold">
+            <Shield className="w-2.5 h-2.5" />
+            Admin
+          </span>
+        )}
+      </div>
+    );
+  };
+
+  if (isSystemMessage) {
+    return (
+      <div id={`msg-${message.id}`} className="flex justify-center my-2.5 px-4">
+        <span className="px-3 py-1 rounded-full bg-neutral-200/80 dark:bg-neutral-800/90 text-neutral-600 dark:text-neutral-300 text-[11.5px] font-medium text-center">
+          {message.content}
+        </span>
+      </div>
+    );
+  }
+
   return (
     <div
       ref={rowRef}
       id={`msg-${message.id}`}
-      onTouchStart={handleTouchStart}
-      onTouchMove={handleTouchMove}
-      onTouchEnd={handleTouchEndOrCancel}
-      onTouchCancel={handleTouchEndOrCancel}
-      onMouseDown={handleMouseDown}
-      onMouseMove={handleMouseMove}
-      onMouseUp={handleMouseUpOrLeave}
-      onMouseLeave={handleMouseUpOrLeave}
-      onContextMenu={handleContextMenu}
+      onTouchStart={isDeletedTombstone ? undefined : handleTouchStart}
+      onTouchMove={isDeletedTombstone ? undefined : handleTouchMove}
+      onTouchEnd={isDeletedTombstone ? undefined : handleTouchEndOrCancel}
+      onTouchCancel={isDeletedTombstone ? undefined : handleTouchEndOrCancel}
+      onMouseDown={isDeletedTombstone ? undefined : handleMouseDown}
+      onMouseMove={isDeletedTombstone ? undefined : handleMouseMove}
+      onMouseUp={isDeletedTombstone ? undefined : handleMouseUpOrLeave}
+      onMouseLeave={isDeletedTombstone ? undefined : handleMouseUpOrLeave}
+      onContextMenu={isDeletedTombstone ? undefined : handleContextMenu}
       className={cn(
         'flex items-end gap-1.5 my-1.5 group relative transition-colors rounded-2xl p-0.5 touch-pan-y select-none [-webkit-touch-callout:none]',
         shouldAnimateOnMount && 'animate-in fade-in duration-150',
@@ -1518,7 +1649,7 @@ const MessageBubbleComponent: React.FC<MessageBubbleProps> = ({
         )}
 
         {/* Options trigger for Sender (left of bubble) */}
-        {isMine && renderOptionsTrigger()}
+        {isMine && !isDeletedTombstone && renderOptionsTrigger()}
 
         {/* Main Content Bubble Wrapper (anchor for floating menu) */}
         <div
@@ -1534,7 +1665,32 @@ const MessageBubbleComponent: React.FC<MessageBubbleProps> = ({
             !isSticker && !isImage && !isVideo && !isVoice && 'max-w-[82%] md:max-w-[65%]'
           )}
         >
-          {isSticker ? (
+          {renderFamilySenderHeader()}
+
+          {isDeletedTombstone ? (
+            <div className="px-4 py-2 rounded-2xl bg-neutral-100 dark:bg-neutral-800/60 border border-dashed border-neutral-300 dark:border-neutral-700 text-neutral-500 dark:text-neutral-400 text-xs italic">
+              This message was deleted
+            </div>
+          ) : isSafeCheckIn ? (
+            <div
+              className={cn(
+                'px-4 py-3 rounded-2xl shadow-xs border text-sm select-none',
+                isMine
+                  ? 'bg-emerald-600 text-white border-emerald-500 rounded-br-xs'
+                  : 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-950 dark:text-emerald-100 border-emerald-300 dark:border-emerald-700/70 rounded-bl-xs'
+              )}
+            >
+              <div className="flex items-center gap-2 font-bold">
+                <ShieldCheck className={cn('w-4 h-4 shrink-0', isMine ? 'text-emerald-100' : 'text-emerald-600 dark:text-emerald-400')} />
+                <span>{textBody || "I'm safe"}</span>
+              </div>
+              <div className={cn('flex items-center justify-end gap-1 mt-1 text-[10px]', isMine ? 'text-emerald-100/90' : 'text-emerald-700/80 dark:text-emerald-300/80')}>
+                {renderPinnedPill(isMine)}
+                <span>{formatTime(message.created_at)}</span>
+                {renderStatusTicksOrSeen(isMine)}
+              </div>
+            </div>
+          ) : isSticker ? (
             /* Render Expressive Sticker */
             <div className="flex flex-col items-end group/stk select-none">
               <div className="text-6xl p-2 select-none filter drop-shadow-md hover:scale-110 transition-transform duration-200 cursor-default animate-in zoom-in-75">
@@ -1752,22 +1908,15 @@ const MessageBubbleComponent: React.FC<MessageBubbleProps> = ({
               >
                 {renderPinnedPill(isMine)}
                 <span>{formatTime(message.created_at)}</span>
-                {isMine && (
-                  <span className="inline-flex items-center ml-0.5">
-                    {message.is_read ? (
-                      <CheckCheck className="w-4 h-4 text-green-300" strokeWidth={2.5} title="Read (Seen)" />
-                    ) : (
-                      <Check className="w-3.5 h-3.5 text-blue-200/70" strokeWidth={2} title="Sent" />
-                    )}
-                  </span>
-                )}
+                {renderStatusTicksOrSeen(isMine)}
               </div>
             </div>
           )}
+          {renderReactionsBar()}
         </div>
 
         {/* Options trigger for Receiver (right of bubble) */}
-        {!isMine && renderOptionsTrigger()}
+        {!isMine && !isDeletedTombstone && renderOptionsTrigger()}
       </div>
 
       {/* Unified Floating Context Menu (1-sec Hold / Right-Click / Options Trigger) */}
@@ -1788,8 +1937,26 @@ const MessageBubbleComponent: React.FC<MessageBubbleProps> = ({
                 ? { top: `${menuCoords.top}px`, left: `${menuCoords.left}px` }
                 : undefined
             }
-            className="fixed z-50 min-w-[186px] py-1.5 px-1.5 rounded-[20px] bg-white dark:bg-neutral-900 border border-neutral-200/80 dark:border-neutral-700/80 shadow-[0_12px_36px_rgba(0,0,0,0.14)] dark:shadow-[0_12px_36px_rgba(0,0,0,0.5)] animate-in fade-in zoom-in-95 duration-120 space-y-0.5 select-none"
+            className="fixed z-50 min-w-[204px] py-1.5 px-1.5 rounded-[20px] bg-white dark:bg-neutral-900 border border-neutral-200/80 dark:border-neutral-700/80 shadow-[0_12px_36px_rgba(0,0,0,0.14)] dark:shadow-[0_12px_36px_rgba(0,0,0,0.5)] animate-in fade-in zoom-in-95 duration-120 space-y-0.5 select-none"
           >
+            {onReactMessage && !isDeletedTombstone && (
+              <div className="flex items-center justify-between gap-1 px-2 py-1.5 mb-1 border-b border-neutral-100 dark:border-neutral-800">
+                {FAMILY_QUICK_REACTIONS.slice(0, 6).map((emoji) => (
+                  <button
+                    key={emoji}
+                    type="button"
+                    onClick={() => {
+                      closeMenu();
+                      onReactMessage(message.id, emoji);
+                    }}
+                    className="w-7 h-7 rounded-full flex items-center justify-center text-base hover:bg-neutral-100 dark:hover:bg-neutral-800 hover:scale-120 transition-all cursor-pointer"
+                  >
+                    {emoji}
+                  </button>
+                ))}
+              </div>
+            )}
+
             {onReplyMessage && (
               <button
                 type="button"

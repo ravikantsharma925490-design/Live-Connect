@@ -17,6 +17,8 @@ import {
   Check,
   Languages,
   Loader2,
+  ShieldCheck,
+  Lock,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { uploadMediaToServer } from '@/src/lib/mediaUpload';
@@ -189,8 +191,16 @@ export const STICKER_PACKS = [
 
 import { Conversation, Message } from '@/src/types';
 
+export interface MentionCandidate {
+  id: string;
+  username: string;
+  display_name: string;
+  avatar_url?: string | null;
+  relationTag?: string | null;
+}
+
 interface ChatInputProps {
-  onSendMessage: (content: string) => Promise<boolean> | void;
+  onSendMessage: (content: string, mentions?: string[]) => Promise<boolean> | void;
   displayName: string;
   disabled?: boolean;
   sending?: boolean;
@@ -204,6 +214,9 @@ interface ChatInputProps {
     onPicked: (lang: WorldLanguage) => void,
     title?: string
   ) => void;
+  onSearchMentions?: (query: string) => Promise<MentionCandidate[]>;
+  onSendSafeCheckIn?: () => Promise<void> | void;
+  lockMessage?: string | null;
 }
 
 export const ChatInput: React.FC<ChatInputProps> = ({
@@ -217,6 +230,9 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   onCancelReply,
   defaultTargetLang,
   onOpenTranslatePicker,
+  onSearchMentions,
+  onSendSafeCheckIn,
+  lockMessage,
 }) => {
   const { t, currentLanguage } = useLanguage();
   const [inputText, setInputText] = useState('');
@@ -225,6 +241,10 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   const [activeCategory, setActiveCategory] = useState(0);
   const [isTranslatingDraft, setIsTranslatingDraft] = useState(false);
   const [draftTranslateError, setDraftTranslateError] = useState<string | null>(null);
+  const [mentionResults, setMentionResults] = useState<MentionCandidate[]>([]);
+  const [mentionQuery, setMentionQuery] = useState<string | null>(null);
+  const [sendingSafe, setSendingSafe] = useState(false);
+  const trackedMentionsRef = useRef<Map<string, string>>(new Map()); // username -> userId
 
   // Staged Image Attachment State
   const [stagedImage, setStagedImage] = useState<string | null>(null);
@@ -247,7 +267,34 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
   useEffect(() => {
     setDraftTranslateError(null);
-  }, [conversation?.id]);
+    setMentionQuery(null);
+    setMentionResults([]);
+    trackedMentionsRef.current.clear();
+  }, [conversation?.id, displayName]);
+
+  useEffect(() => {
+    if (!onSearchMentions || mentionQuery === null) {
+      setMentionResults([]);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
+      try {
+        const res = await onSearchMentions(mentionQuery);
+        if (!cancelled) {
+          setMentionResults(
+            res.filter((c) => c.username.toLowerCase() !== 'everyone')
+          );
+        }
+      } catch {
+        if (!cancelled) setMentionResults([]);
+      }
+    }, 150);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [mentionQuery, onSearchMentions]);
 
   // Auto-focus input when user initiates a reply (e.g. swipe-right or menu Reply)
   useEffect(() => {
@@ -403,6 +450,13 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     let text = inputText.trim();
     if (!text) return;
 
+    const extractedMentions: string[] = [];
+    trackedMentionsRef.current.forEach((uid, uname) => {
+      if (text.toLowerCase().includes(`@${uname.toLowerCase()}`)) {
+        extractedMentions.push(uid);
+      }
+    });
+
     isSubmittingRef.current = true;
     if (replyingToMessage) {
       text = `[REPLY:${replyingToMessage.id}] ${text}`;
@@ -410,11 +464,33 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     }
 
     setInputText('');
-    void onSendMessage(text);
+    setMentionQuery(null);
+    setMentionResults([]);
+    trackedMentionsRef.current.clear();
+    void onSendMessage(text, extractedMentions);
     inputRef.current?.focus();
     setTimeout(() => {
       isSubmittingRef.current = false;
     }, 20);
+  };
+
+  const handleSelectMention = (candidate: MentionCandidate) => {
+    const cleanText = inputText.replace(/(^|\s)@([A-Za-z0-9_]*)$/, `$1@${candidate.username} `);
+    trackedMentionsRef.current.set(candidate.username, candidate.id);
+    setInputText(cleanText);
+    setMentionQuery(null);
+    setMentionResults([]);
+    inputRef.current?.focus();
+  };
+
+  const handleSafeButtonClick = async () => {
+    if (!onSendSafeCheckIn || disabled || sendingSafe) return;
+    setSendingSafe(true);
+    try {
+      await onSendSafeCheckIn();
+    } finally {
+      setSendingSafe(false);
+    }
   };
 
 
@@ -843,7 +919,12 @@ export const ChatInput: React.FC<ChatInputProps> = ({
       </AnimatePresence>
 
       {/* Main Pill-Shaped Chat Input Capsule */}
-      {isRecording ? (
+      {lockMessage ? (
+        <div className="flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/60 text-xs font-semibold text-amber-800 dark:text-amber-300">
+          <Lock className="w-4 h-4 shrink-0" />
+          <span>{lockMessage}</span>
+        </div>
+      ) : isRecording ? (
         /* Active Voice Recording Bar State */
         <motion.div
           initial={{ opacity: 0, scale: 0.98 }}
@@ -889,131 +970,190 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           </div>
         </motion.div>
       ) : (
-        /* Modern Instagram / WhatsApp Capsule Bar */
-        <form
-          onSubmit={handleSend}
-          className="flex items-center gap-1.5 w-full px-2 py-1.5 rounded-full bg-neutral-100 dark:bg-[#1a1f26] border border-neutral-200/90 dark:border-neutral-700/80 focus-within:border-blue-500/80 focus-within:ring-2 focus-within:ring-blue-500/20 shadow-xs transition-all"
-        >
-          {/* Left Icon: Emoji Picker Button (Smile Icon) */}
-          <button
-            type="button"
-            onClick={() => {
-              setShowEmojiPicker(!showEmojiPicker);
-              setShowStickerPicker(false);
-            }}
-            className={`p-2 rounded-full transition-colors cursor-pointer shrink-0 ${
-              showEmojiPicker
-                ? 'text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-neutral-800'
-                : 'text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-200 hover:bg-neutral-200/60 dark:hover:bg-neutral-800'
-            }`}
-            title="Emoji"
+        <div className="relative">
+          {/* @mention Autocomplete Dropdown */}
+          {mentionResults.length > 0 && (
+            <div className="absolute bottom-full left-0 right-0 mb-2 z-40 rounded-2xl bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 shadow-2xl max-h-52 overflow-y-auto p-1.5">
+              {mentionResults.map((cand) => (
+                <button
+                  key={cand.id}
+                  type="button"
+                  onClick={() => handleSelectMention(cand)}
+                  className="w-full flex items-center justify-between gap-2 px-3 py-2 rounded-xl hover:bg-neutral-100 dark:hover:bg-neutral-800 text-left transition-colors cursor-pointer"
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="w-7 h-7 rounded-full bg-blue-600/15 text-blue-600 dark:text-blue-400 flex items-center justify-center text-xs font-bold shrink-0 overflow-hidden">
+                      {cand.avatar_url ? (
+                        <img src={cand.avatar_url} alt={cand.display_name} className="w-full h-full object-cover" />
+                      ) : (
+                        cand.display_name.slice(0, 1).toUpperCase()
+                      )}
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-xs font-bold text-neutral-900 dark:text-neutral-100 truncate">
+                        {cand.display_name}
+                      </p>
+                      <p className="text-[11px] text-neutral-500 truncate">@{cand.username}</p>
+                    </div>
+                  </div>
+                  {cand.relationTag && (
+                    <span className="px-2 py-0.5 rounded-md bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 text-[10px] font-semibold shrink-0">
+                      {cand.relationTag}
+                    </span>
+                  )}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Modern Instagram / WhatsApp Capsule Bar */}
+          <form
+            onSubmit={handleSend}
+            className="flex items-center gap-1.5 w-full px-2 py-1.5 rounded-full bg-neutral-100 dark:bg-[#1a1f26] border border-neutral-200/90 dark:border-neutral-700/80 focus-within:border-blue-500/80 focus-within:ring-2 focus-within:ring-blue-500/20 shadow-xs transition-all"
           >
-            <Smile className="w-5 h-5" strokeWidth={1.9} />
-          </button>
-
-          {/* Center: Text Input with 'Message...' Placeholder */}
-          <input
-            ref={inputRef}
-            type="text"
-            placeholder={
-              stagedImage
-                ? t('desc.addCaption', 'Add a caption...')
-                : displayName
-                ? t('desc.messageUser', `Message ${displayName}...`, { name: displayName })
-                : t('desc.typeMessage', 'Type a message...')
-            }
-            value={inputText}
-            onChange={(e) => {
-              setInputText(e.target.value);
-              if (draftTranslateError) setDraftTranslateError(null);
-              if (onTyping) {
-                const now = Date.now();
-                if (!lastTypingSentRef.current || now - lastTypingSentRef.current > 2000) {
-                  lastTypingSentRef.current = now;
-                  onTyping();
-                }
-              }
-            }}
-            disabled={disabled}
-            className="flex-1 min-w-0 bg-transparent text-base text-neutral-900 dark:text-neutral-100 placeholder-neutral-400 dark:placeholder-neutral-500 focus:outline-none px-2 py-1.5"
-          />
-
-          {/* Right Section: Action Icons */}
-          <div className="flex items-center gap-0.5 shrink-0 pr-1">
-            {/* 1. Voice Note Recording Button (Mic) */}
-            <button
-              type="button"
-              onClick={startVoiceRecording}
-              disabled={disabled}
-              className="p-2 rounded-full text-neutral-500 hover:text-blue-600 dark:text-neutral-400 dark:hover:text-blue-400 hover:bg-neutral-200/60 dark:hover:bg-neutral-800 transition-colors cursor-pointer"
-              title="Record Voice Message"
-            >
-              <Mic className="w-5 h-5" strokeWidth={1.9} />
-            </button>
-
-            {/* 2. Photo / Gallery Attachment Button (ImageIcon) */}
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={disabled}
-              className="p-2 rounded-full text-neutral-500 hover:text-blue-600 dark:text-neutral-400 dark:hover:text-blue-400 hover:bg-neutral-200/60 dark:hover:bg-neutral-800 transition-colors cursor-pointer"
-              title="Attach Photo (Max 5MB)"
-            >
-              <ImageIcon className="w-5 h-5" strokeWidth={1.9} />
-            </button>
-
-            {/* 3. Sticker / Reactions Button (Sticker Icon) */}
+            {/* Left Icon: Emoji Picker Button (Smile Icon) */}
             <button
               type="button"
               onClick={() => {
-                setShowStickerPicker(!showStickerPicker);
-                setShowEmojiPicker(false);
+                setShowEmojiPicker(!showEmojiPicker);
+                setShowStickerPicker(false);
               }}
-              disabled={disabled}
-              className={`p-2 rounded-full transition-colors cursor-pointer ${
-                showStickerPicker
+              className={`p-2 rounded-full transition-colors cursor-pointer shrink-0 ${
+                showEmojiPicker
                   ? 'text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-neutral-800'
-                  : 'text-neutral-500 hover:text-blue-600 dark:text-neutral-400 dark:hover:text-blue-400 hover:bg-neutral-200/60 dark:hover:bg-neutral-800'
+                  : 'text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-200 hover:bg-neutral-200/60 dark:hover:bg-neutral-800'
               }`}
-              title="Stickers & Reactions"
+              title="Emoji"
             >
-              <Sticker className="w-5 h-5" strokeWidth={1.9} />
+              <Smile className="w-5 h-5" strokeWidth={1.9} />
             </button>
 
-            {inputText.trim().length > 0 && (
+            {/* Center: Text Input */}
+            <input
+              ref={inputRef}
+              type="text"
+              placeholder={
+                stagedImage
+                  ? t('desc.addCaption', 'Add a caption...')
+                  : displayName
+                  ? t('desc.messageUser', `Message ${displayName}...`, { name: displayName })
+                  : t('desc.typeMessage', 'Type a message...')
+              }
+              value={inputText}
+              onChange={(e) => {
+                const val = e.target.value;
+                setInputText(val);
+                if (draftTranslateError) setDraftTranslateError(null);
+                if (onSearchMentions) {
+                  const m = val.match(/(?:^|\s)@([A-Za-z0-9_]*)$/);
+                  if (m) {
+                    setMentionQuery(m[1]);
+                  } else if (mentionQuery !== null) {
+                    setMentionQuery(null);
+                  }
+                }
+                if (onTyping) {
+                  const now = Date.now();
+                  if (!lastTypingSentRef.current || now - lastTypingSentRef.current > 2000) {
+                    lastTypingSentRef.current = now;
+                    onTyping();
+                  }
+                }
+              }}
+              disabled={disabled}
+              className="flex-1 min-w-0 bg-transparent text-base text-neutral-900 dark:text-neutral-100 placeholder-neutral-400 dark:placeholder-neutral-500 focus:outline-none px-2 py-1.5"
+            />
+
+            {/* Right Section: Action Icons */}
+            <div className="flex items-center gap-0.5 shrink-0 pr-1">
+              {onSendSafeCheckIn && !hasContent && (
+                <button
+                  type="button"
+                  onClick={handleSafeButtonClick}
+                  disabled={disabled || sendingSafe}
+                  className="px-2.5 py-1.5 rounded-full bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold flex items-center gap-1 shadow-xs transition-all cursor-pointer disabled:opacity-50 mr-0.5"
+                  title="Send I'm Safe check-in"
+                >
+                  <ShieldCheck className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">I&apos;m Safe</span>
+                </button>
+              )}
+
+              {/* 1. Voice Note Recording Button (Mic) */}
               <button
                 type="button"
-                onClick={handleTranslateDraft}
-                disabled={disabled || isTranslatingDraft}
-                className="p-2 rounded-full text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/60 transition-colors cursor-pointer disabled:opacity-50"
-                title={t('action.translateDraft', 'Translate message (106+ languages)')}
+                onClick={startVoiceRecording}
+                disabled={disabled}
+                className="p-2 rounded-full text-neutral-500 hover:text-blue-600 dark:text-neutral-400 dark:hover:text-blue-400 hover:bg-neutral-200/60 dark:hover:bg-neutral-800 transition-colors cursor-pointer"
+                title="Record Voice Message"
               >
-                {isTranslatingDraft ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <Languages className="w-4 h-4" />
-                )}
+                <Mic className="w-5 h-5" strokeWidth={1.9} />
               </button>
-            )}
 
-            {/* Dynamic Send Button (Shown when user has text or attachment) */}
-            <AnimatePresence>
-              {hasContent && (
-                <motion.button
-                  initial={{ opacity: 0, scale: 0.7 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  exit={{ opacity: 0, scale: 0.7 }}
-                  type="submit"
-                  disabled={disabled}
-                  className="ml-1 p-2 rounded-full bg-blue-600 hover:bg-blue-700 active:scale-95 text-white shadow-md shadow-blue-500/25 transition-all cursor-pointer flex items-center justify-center shrink-0 disabled:opacity-50"
-                  title="Send Message"
+              {/* 2. Photo / Gallery Attachment Button (ImageIcon) */}
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={disabled}
+                className="p-2 rounded-full text-neutral-500 hover:text-blue-600 dark:text-neutral-400 dark:hover:text-blue-400 hover:bg-neutral-200/60 dark:hover:bg-neutral-800 transition-colors cursor-pointer"
+                title="Attach Photo (Max 5MB)"
+              >
+                <ImageIcon className="w-5 h-5" strokeWidth={1.9} />
+              </button>
+
+              {/* 3. Sticker / Reactions Button (Sticker Icon) */}
+              <button
+                type="button"
+                onClick={() => {
+                  setShowStickerPicker(!showStickerPicker);
+                  setShowEmojiPicker(false);
+                }}
+                disabled={disabled}
+                className={`p-2 rounded-full transition-colors cursor-pointer ${
+                  showStickerPicker
+                    ? 'text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-neutral-800'
+                    : 'text-neutral-500 hover:text-blue-600 dark:text-neutral-400 dark:hover:text-blue-400 hover:bg-neutral-200/60 dark:hover:bg-neutral-800'
+                }`}
+                title="Stickers & Reactions"
+              >
+                <Sticker className="w-5 h-5" strokeWidth={1.9} />
+              </button>
+
+              {inputText.trim().length > 0 && (
+                <button
+                  type="button"
+                  onClick={handleTranslateDraft}
+                  disabled={disabled || isTranslatingDraft}
+                  className="p-2 rounded-full text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/60 transition-colors cursor-pointer disabled:opacity-50"
+                  title={t('action.translateDraft', 'Translate message (106+ languages)')}
                 >
-                  <Send className="w-4 h-4" />
-                </motion.button>
+                  {isTranslatingDraft ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Languages className="w-4 h-4" />
+                  )}
+                </button>
               )}
-            </AnimatePresence>
-          </div>
-        </form>
+
+              {/* Dynamic Send Button */}
+              <AnimatePresence>
+                {hasContent && (
+                  <motion.button
+                    initial={{ opacity: 0, scale: 0.7 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.7 }}
+                    type="submit"
+                    disabled={disabled}
+                    className="ml-1 p-2 rounded-full bg-blue-600 hover:bg-blue-700 active:scale-95 text-white shadow-md shadow-blue-500/25 transition-all cursor-pointer flex items-center justify-center shrink-0 disabled:opacity-50"
+                    title="Send Message"
+                  >
+                    <Send className="w-4 h-4" />
+                  </motion.button>
+                )}
+              </AnimatePresence>
+            </div>
+          </form>
+        </div>
       )}
     </div>
   );

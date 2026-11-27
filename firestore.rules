@@ -62,6 +62,29 @@ service cloud.firestore {
       );
     }
 
+    function isFamilyMember(familyId) {
+      return isSignedIn() &&
+             exists(/databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid)) &&
+             get(/databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid)).data.status == 'active';
+    }
+
+    function isFamilyAdminOrOwner(familyId) {
+      return isFamilyMember(familyId) && (
+        get(/databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid)).data.role in ['owner', 'admin'] ||
+        get(/databases/$(database)/documents/families/$(familyId)).data.ownerId == request.auth.uid
+      );
+    }
+
+    function isFamilyOwner(familyId) {
+      return isFamilyMember(familyId) &&
+             get(/databases/$(database)/documents/families/$(familyId)).data.ownerId == request.auth.uid;
+    }
+
+    function isValidFamilyMemberStatus(familyId) {
+      return isSignedIn() &&
+             exists(/databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid));
+    }
+
     // ====================================================================
     // ENTITY VALIDATION BLUEPRINTS
     // ====================================================================
@@ -293,7 +316,14 @@ service cloud.firestore {
              isOptionalString(data, 'actorDisplayName', 80) &&
              isOptionalString(data, 'actorUsername', 32) &&
              isOptionalString(data, 'actorAvatarUrl', 1024) &&
-             data.type in ['follow', 'follow_back', 'message', 'call_audio', 'call_video', 'account_warning', 'account_restricted', 'account_suspended', 'account_disabled', 'account_restored', 'appeal_update'] &&
+             data.type in [
+               'follow', 'follow_back', 'message', 'call_audio', 'call_video',
+               'account_warning', 'account_restricted', 'account_suspended',
+               'account_disabled', 'account_restored', 'appeal_update',
+               'family_invite', 'family_message', 'family_mention',
+               'family_join_request', 'family_join_approved', 'family_join_rejected',
+               'family_message_report', 'family_deleted'
+             ] &&
              data.title is string && data.title.size() >= 1 && data.title.size() <= 160 &&
              data.message is string && data.message.size() >= 1 && data.message.size() <= 1000 &&
              isOptionalString(data, 'referenceId', 128) &&
@@ -316,8 +346,9 @@ service cloud.firestore {
       return data.keys().hasAll(['id', 'reporterId', 'reportedUserId', 'category', 'source', 'status', 'createdAt', 'updatedAt']) &&
              data.keys().hasOnly([
                'id', 'reporterId', 'reportedUserId', 'reportedUsername', 'reportedDisplayName',
-               'category', 'details', 'source', 'conversationId', 'alsoBlocked',
-               'status', 'adminId', 'adminNote', 'createdAt', 'updatedAt'
+               'category', 'details', 'source', 'conversationId', 'familyId', 'familyName',
+               'reportedMessageId', 'reportedMessageContent', 'reportedMessageMediaUrl',
+               'alsoBlocked', 'status', 'adminId', 'adminNote', 'createdAt', 'updatedAt'
              ]) &&
              data.id == reportId && isValidId(data.id) &&
              isValidId(data.reporterId) && isValidId(data.reportedUserId) &&
@@ -330,8 +361,13 @@ service cloud.firestore {
                'underage', 'privacy_violation', 'abusive_calls', 'other'
              ] &&
              isOptionalString(data, 'details', 1000) &&
-             data.source in ['profile', 'chat', 'search', 'call'] &&
+             data.source in ['profile', 'chat', 'search', 'call', 'family_chat'] &&
              isOptionalString(data, 'conversationId', 128) &&
+             isOptionalString(data, 'familyId', 128) &&
+             isOptionalString(data, 'familyName', 120) &&
+             isOptionalString(data, 'reportedMessageId', 128) &&
+             isOptionalString(data, 'reportedMessageContent', 1500) &&
+             isOptionalString(data, 'reportedMessageMediaUrl', 1024) &&
              (!('alsoBlocked' in data) || data.alsoBlocked is bool) &&
              data.status in ['pending', 'under_review', 'resolved', 'dismissed'] &&
              isOptionalString(data, 'adminId', 128) &&
@@ -724,10 +760,12 @@ service cloud.firestore {
       allow get: if isOwner(userId) && isValidId(userId) && isValidId(notificationId);
       allow list: if isOwner(userId);
       allow create: if isEmailVerified() && isValidId(userId) && isValidId(notificationId) &&
-                       isValidNotification(incoming(), userId, notificationId) &&
-                       incoming().actorId == request.auth.uid &&
-                       incoming().createdAt == request.time &&
-                       !isBlockedPair(request.auth.uid, userId);
+                       isValidNotification(incoming(), userId, notificationId) && (
+                         (incoming().actorId == request.auth.uid && !isBlockedPair(request.auth.uid, userId)) ||
+                         (incoming().type == 'family_message_report' && incoming().actorId == 'system' &&
+                          !('actorDisplayName' in incoming()) && !('actorUsername' in incoming()) && !('actorAvatarUrl' in incoming()))
+                       ) &&
+                       incoming().createdAt == request.time;
       allow update: if isEmailVerified() && isOwner(userId) && isValidId(userId) && isValidId(notificationId) &&
                        isValidNotification(incoming(), userId, notificationId) &&
                        incoming().diff(existing()).affectedKeys().hasOnly(['isRead']);
@@ -824,6 +862,227 @@ service cloud.firestore {
                        incoming().adminId == request.auth.uid &&
                        incoming().createdAt == request.time;
       allow update, delete: if false;
+    }
+
+    // ====================================================================
+    // FAMILY GROUPS (SCALABLE UP TO 5,000 MEMBERS, 1 WRITE PER MESSAGE)
+    // ====================================================================
+
+    // Invite link lookup table (non-enumerable, read single code doc only)
+    match /family_invite_links/{inviteCode} {
+      allow get: if isSignedIn() && isValidId(inviteCode);
+      allow list: if false;
+      allow create, update: if isEmailVerified() && isValidId(inviteCode) &&
+                               incoming().code == inviteCode &&
+                               isValidId(incoming().familyId) &&
+                               incoming().familyName is string && incoming().familyName.size() >= 1 && incoming().familyName.size() <= 80 &&
+                               (isFamilyAdminOrOwner(incoming().familyId) ||
+                                getAfter(/databases/$(database)/documents/families/$(incoming().familyId)).data.ownerId == request.auth.uid);
+      allow delete: if isSignedIn() && isValidId(inviteCode) && isFamilyAdminOrOwner(existing().familyId);
+    }
+
+    // User-scoped Family Membership index (Zero get()/exists() in allow list)
+    match /users/{userId}/family_memberships/{familyId} {
+      allow get: if isOwner(userId) && isValidId(userId) && isValidId(familyId);
+      allow list: if isOwner(userId);
+      allow create: if isEmailVerified() && isValidId(userId) && isValidId(familyId) &&
+                       incoming().userId == userId && incoming().familyId == familyId && (
+                         isOwner(userId) ||
+                         isFamilyAdminOrOwner(familyId)
+                       );
+      allow update: if isEmailVerified() && isValidId(userId) && isValidId(familyId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().familyId == existing().familyId && (
+                         isOwner(userId) ||
+                         isFamilyAdminOrOwner(familyId)
+                       );
+      allow delete: if isSignedIn() && isValidId(userId) && isValidId(familyId) &&
+                       (isOwner(userId) || isFamilyAdminOrOwner(familyId));
+    }
+
+    // User-scoped Family Invitations
+    match /users/{userId}/family_invites/{inviteId} {
+      allow get: if isOwner(userId) && isValidId(userId) && isValidId(inviteId);
+      allow list: if isOwner(userId);
+      allow create: if isEmailVerified() && isValidId(userId) && isValidId(inviteId) &&
+                       incoming().id == inviteId &&
+                       incoming().inviteeId == userId &&
+                       incoming().inviterId == request.auth.uid &&
+                       incoming().status == 'pending' &&
+                       !isBlockedPair(request.auth.uid, userId) &&
+                       isFamilyAdminOrOwner(incoming().familyId);
+      allow update: if isEmailVerified() && isOwner(userId) && isValidId(userId) && isValidId(inviteId) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['status', 'respondedAt']) &&
+                       incoming().status in ['accepted', 'declined'];
+      allow delete: if isOwner(userId) && isValidId(userId) && isValidId(inviteId);
+    }
+
+    // Per-user daily invite counter (50 invites/day limit)
+    match /users/{userId}/family_daily_invites/{dayKey} {
+      allow get: if isOwner(userId) && isValidId(userId) && isValidId(dayKey);
+      allow list: if isOwner(userId);
+      allow create, update: if isEmailVerified() && isOwner(userId) && isValidId(userId) && isValidId(dayKey) &&
+                               incoming().count is int && incoming().count >= 0 && incoming().count <= 50;
+      allow delete: if isOwner(userId);
+    }
+
+    // Authoritative Family Group document
+    match /families/{familyId} {
+      allow get: if isSignedIn() && isValidId(familyId) && (
+                    isValidFamilyMemberStatus(familyId) ||
+                    (existing().inviteLinkEnabled == true)
+                  );
+      allow list: if false;
+      allow create: if isEmailVerified() && isValidId(familyId) &&
+                       incoming().id == familyId &&
+                       incoming().ownerId == request.auth.uid &&
+                       incoming().name is string && incoming().name.size() >= 1 && incoming().name.size() <= 80 &&
+                       incoming().memberCount == 1 &&
+                       incoming().maxMembers == 5000 &&
+                       incoming().pinnedMessages is list && incoming().pinnedMessages.size() == 0;
+      allow update: if isEmailVerified() && isValidId(familyId) &&
+                       incoming().id == existing().id &&
+                       incoming().maxMembers == existing().maxMembers &&
+                       incoming().memberCount is int && incoming().memberCount >= 0 && incoming().memberCount <= 5000 &&
+                       incoming().pinnedMessages is list && incoming().pinnedMessages.size() <= 3 && (
+                         // Owner full settings / transfer
+                         isFamilyOwner(familyId) ||
+                         // Admin settings, pins, memberCount, lastMessage (cannot change ownerId)
+                         (isFamilyAdminOrOwner(familyId) &&
+                          incoming().ownerId == existing().ownerId) ||
+                         // Active member updating lastMessage summary on send
+                         (isFamilyMember(familyId) &&
+                          incoming().ownerId == existing().ownerId &&
+                          incoming().name == existing().name &&
+                          incoming().joinApprovalRequired == existing().joinApprovalRequired &&
+                          incoming().onlyAdminsCanSend == existing().onlyAdminsCanSend &&
+                          incoming().inviteLinkEnabled == existing().inviteLinkEnabled &&
+                          incoming().diff(existing()).affectedKeys().hasOnly([
+                            'lastMessageId', 'lastMessageText', 'lastMessageSenderId', 'lastMessageSenderName', 'lastMessageAt', 'updatedAt'
+                          ])) ||
+                         // Joining/Leaving user adjusting memberCount (+/- 1)
+                         (isSignedIn() &&
+                          incoming().ownerId == existing().ownerId &&
+                          incoming().diff(existing()).affectedKeys().hasOnly([
+                            'memberCount', 'lastMessageId', 'lastMessageText', 'lastMessageSenderId', 'lastMessageSenderName', 'lastMessageAt', 'updatedAt'
+                          ]))
+                       );
+      allow delete: if isSignedIn() && isValidId(familyId) && isFamilyOwner(familyId);
+
+      // Members subcollection (paged + searchable; active members or invitees reading/updating)
+      match /members/{memberId} {
+        allow get: if isSignedIn() && isValidId(familyId) && isValidId(memberId) &&
+                      (isOwner(memberId) || isFamilyMember(familyId));
+        allow list: if isSignedIn() && isValidId(familyId) && (
+                       resource.data.userId == request.auth.uid ||
+                       isFamilyMember(familyId)
+                     );
+        allow create: if isEmailVerified() && isValidId(familyId) && isValidId(memberId) &&
+                         incoming().userId == memberId && incoming().familyId == familyId &&
+                         incoming().role in ['owner', 'admin', 'member'] &&
+                         incoming().status in ['active', 'pending'] && (
+                           // Creator adding self as owner
+                           (isOwner(memberId) && incoming().role == 'owner' &&
+                            getAfter(/databases/$(database)/documents/families/$(familyId)).data.ownerId == request.auth.uid) ||
+                           // Self joining via invite link or invite
+                           (isOwner(memberId) && incoming().role == 'member') ||
+                           // Owner/Admin adding or approving member
+                           isFamilyAdminOrOwner(familyId)
+                         );
+        allow update: if isEmailVerified() && isValidId(familyId) && isValidId(memberId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().familyId == existing().familyId && (
+                           // Owner can update roles, statuses, relationTag
+                           isFamilyOwner(familyId) ||
+                           // Admin can update normal member (not Owner, not other Admin)
+                           (isFamilyAdminOrOwner(familyId) &&
+                            existing().role == 'member' &&
+                            incoming().role == 'member') ||
+                           // Self can update own relationTag or leave (if not Owner) or rejoin from 'left'
+                           (isOwner(memberId) && (
+                             incoming().diff(existing()).affectedKeys().hasOnly(['relationTag', 'displayName', 'displayNameLower', 'username', 'avatarUrl', 'updatedAt']) ||
+                             (existing().role != 'owner' && incoming().role == 'member' && incoming().status in ['active', 'pending', 'left'] && existing().status != 'removed')
+                           ))
+                         );
+        allow delete: if isSignedIn() && isValidId(familyId) && isValidId(memberId) && isFamilyOwner(familyId);
+      }
+
+      // Shared messages subcollection (1 write per message regardless of member count)
+      match /messages/{messageId} {
+        allow get: if isSignedIn() && isValidId(familyId) && isValidId(messageId) && isFamilyMember(familyId);
+        allow list: if isSignedIn() && isValidId(familyId) && isFamilyMember(familyId);
+        allow create: if isEmailVerified() && isValidId(familyId) && isValidId(messageId) &&
+                         incoming().id == messageId && incoming().familyId == familyId && (
+                           // Active member sending message (enforcing onlyAdminsCanSend!)
+                           (isFamilyMember(familyId) &&
+                            incoming().senderId == request.auth.uid &&
+                            (get(/databases/$(database)/documents/families/$(familyId)).data.onlyAdminsCanSend == false ||
+                             isFamilyAdminOrOwner(familyId))) ||
+                           // System message from active member / joining user / creator
+                           (incoming().type == 'system' && incoming().senderId == 'system' &&
+                            (isFamilyMember(familyId) ||
+                             getAfter(/databases/$(database)/documents/families/$(familyId)).data.ownerId == request.auth.uid ||
+                             existsAfter(/databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid))))
+                         );
+        allow update: if isEmailVerified() && isValidId(familyId) && isValidId(messageId) &&
+                         incoming().id == existing().id &&
+                         incoming().familyId == existing().familyId &&
+                         incoming().senderId == existing().senderId && (
+                           // Any active member can update reactions
+                           (isFamilyMember(familyId) &&
+                            existing().isDeleted == false &&
+                            incoming().diff(existing()).affectedKeys().hasOnly(['reactions', 'updatedAt'])) ||
+                           // Sender soft-deletes own message
+                           (isFamilyMember(familyId) &&
+                            existing().senderId == request.auth.uid &&
+                            incoming().isDeleted == true &&
+                            incoming().isPinned == false &&
+                            incoming().diff(existing()).affectedKeys().hasOnly([
+                              'isDeleted', 'isPinned', 'content', 'mediaUrl', 'cloudinaryPublicId', 'b2FileId', 'b2FileName', 'reactions', 'deletedBy', 'deletedByRole', 'updatedAt'
+                            ])) ||
+                           // Owner or Admin pins/unpins or soft-deletes any message
+                           (isFamilyAdminOrOwner(familyId) &&
+                            incoming().diff(existing()).affectedKeys().hasOnly([
+                              'isPinned', 'isDeleted', 'content', 'mediaUrl', 'cloudinaryPublicId', 'b2FileId', 'b2FileName', 'reactions', 'deletedBy', 'deletedByRole', 'updatedAt'
+                            ]))
+                         );
+        allow delete: if isSignedIn() && isValidId(familyId) && isValidId(messageId) && isFamilyOwner(familyId);
+      }
+
+      // Join requests (pending approval)
+      match /requests/{userId} {
+        allow get: if isSignedIn() && isValidId(familyId) && isValidId(userId) &&
+                      (isOwner(userId) || isFamilyAdminOrOwner(familyId));
+        allow list: if isSignedIn() && isValidId(familyId) &&
+                       (resource.data.userId == request.auth.uid || isFamilyAdminOrOwner(familyId));
+        allow create: if isEmailVerified() && isValidId(familyId) && isValidId(userId) &&
+                         isOwner(userId) && incoming().userId == userId && incoming().familyId == familyId &&
+                         incoming().status == 'pending';
+        allow update: if isEmailVerified() && isValidId(familyId) && isValidId(userId) &&
+                         (isOwner(userId) || isFamilyAdminOrOwner(familyId));
+        allow delete: if isSignedIn() && isValidId(familyId) && isValidId(userId) &&
+                         (isOwner(userId) || isFamilyAdminOrOwner(familyId));
+      }
+
+      // Typing indicators (Families <= 50)
+      match /typing/{userId} {
+        allow get: if isSignedIn() && isValidId(familyId) && isValidId(userId) && isFamilyMember(familyId);
+        allow list: if isSignedIn() && isValidId(familyId) &&
+                       (resource.data.userId == request.auth.uid || isFamilyMember(familyId));
+        allow create, update: if isEmailVerified() && isOwner(userId) && isValidId(familyId) && isValidId(userId) &&
+                                 isFamilyMember(familyId);
+        allow delete: if isOwner(userId) && isValidId(familyId) && isValidId(userId);
+      }
+
+      // Read receipts
+      match /reads/{readId} {
+        allow get: if isSignedIn() && isValidId(familyId) && isFamilyMember(familyId);
+        allow list: if isSignedIn() && isValidId(familyId) && isFamilyMember(familyId);
+        allow create, update: if isEmailVerified() && isValidId(familyId) &&
+                                 incoming().userId == request.auth.uid &&
+                                 isFamilyMember(familyId);
+        allow delete: if isSignedIn() && isValidId(familyId) && isFamilyOwner(familyId);
+      }
     }
   }
 }

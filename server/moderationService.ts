@@ -9,6 +9,7 @@ import {
   recordBannedIdentifiers,
   clearBannedIdentifiersForUser,
   deleteAccountCompletely,
+  handleOwnerDepartureFromFamilies,
   DbUserRow,
 } from './db';
 
@@ -565,6 +566,7 @@ export async function executeModerationAction(params: {
         phone: target.phone || prof?.phone_number || null,
         deviceId: target.last_device_id || null,
       });
+      handleOwnerDepartureFromFamilies(target.id);
     }
 
     writeAuditLog({

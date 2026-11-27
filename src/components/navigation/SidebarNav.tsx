@@ -1,5 +1,5 @@
 import React from 'react';
-import { MessageSquare, Search, Phone, User, Radio, LogOut, Bell, Globe } from 'lucide-react';
+import { MessageSquare, Search, Phone, User, Users, Radio, LogOut, Bell, Globe } from 'lucide-react';
 import { cn, getAvatarColor, getInitials } from '@/src/lib/utils';
 import { Profile } from '@/src/types';
 import { UserAvatar } from '../ui/UserAvatar';
@@ -12,6 +12,7 @@ interface SidebarNavProps {
   currentUser: Profile | null;
   unreadCount?: number;
   missedCallsCount?: number;
+  familyBadgeCount?: number;
   unreadNotificationsCount?: number;
   onOpenNotifications?: () => void;
   onSignOut: () => void;
@@ -23,13 +24,14 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
   currentUser,
   unreadCount = 0,
   missedCallsCount = 0,
+  familyBadgeCount = 0,
   unreadNotificationsCount = 0,
   onOpenNotifications,
   onSignOut,
 }) => {
   const { currentLanguage, openLanguageModal, t } = useLanguage();
 
-  // Unified Tabs: 1. Messages, 2. Search ID, 3. Live Voice, 4. Calls, 5. Profile
+  // Unified Tabs: Messages, Search ID, Calls, Family, Profile
   const navItems: Array<{
     id: TabType;
     label: string;
@@ -53,6 +55,12 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
       label: t('nav.calls', 'Calls'),
       icon: Phone,
       badge: missedCallsCount,
+    },
+    {
+      id: 'family',
+      label: t('nav.family', 'Family'),
+      icon: Users,
+      badge: familyBadgeCount,
     },
     {
       id: 'profile',

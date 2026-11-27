@@ -47,6 +47,7 @@ import {
   validateCloudinaryFileSize,
   CloudinaryMediaCategory,
 } from './server/cloudinaryService';
+import { createFamilyRouter } from './server/familyRoutes';
 
 if (fs.existsSync(path.join(process.cwd(), '.env.example'))) {
   dotenv.config({ path: path.join(process.cwd(), '.env.example') });
@@ -2517,7 +2518,7 @@ const VALID_USER_REPORT_CATEGORIES = new Set([
   'other',
 ]);
 
-const VALID_USER_REPORT_SOURCES = new Set(['profile', 'chat', 'search', 'call']);
+const VALID_USER_REPORT_SOURCES = new Set(['profile', 'chat', 'search', 'call', 'family_chat']);
 const VALID_USER_REPORT_STATUSES = new Set(['pending', 'under_review', 'resolved', 'dismissed']);
 
 app.get('/api/admin/reports', requireAuth, requireModeratorOrAdmin, (req, res) => {
@@ -2556,6 +2557,11 @@ app.get('/api/admin/reports', requireAuth, requireModeratorOrAdmin, (req, res) =
         details: r.details || null,
         source: r.source,
         conversation_id: r.conversation_id || null,
+        family_id: r.family_id || null,
+        family_name: r.family_name || null,
+        reported_message_id: r.reported_message_id || null,
+        reported_message_content: r.reported_message_content || null,
+        reported_message_media_url: r.reported_message_media_url || null,
         also_blocked: Boolean(r.also_blocked),
         status: r.status,
         admin_id: r.admin_id || null,
@@ -4820,8 +4826,12 @@ app.post('/api/reports/user', requireAuth, (req, res) => {
       details,
       source,
       conversationId,
+      familyId,
+      familyName,
       alsoBlocked,
       reportedMessageId,
+      reportedMessageContent,
+      reportedMessageMediaUrl,
     } = req.body || {};
 
     if (!reportedUserId || typeof reportedUserId !== 'string') {
@@ -4844,10 +4854,10 @@ app.post('/api/reports/user', requireAuth, (req, res) => {
           .prepare(
             `SELECT id, created_at FROM user_reports
              WHERE reporter_id = ? AND reported_user_id = ? AND status IN ('pending', 'under_review')
-               AND details LIKE ?
+               AND (reported_message_id = ? OR details LIKE ?)
              LIMIT 1`
           )
-          .get(reporterId, reportedUserId, `%[Reported Message ID: ${cleanReportedMsgId}]%`) as
+          .get(reporterId, reportedUserId, cleanReportedMsgId, `%[Reported Message ID: ${cleanReportedMsgId}]%`) as
           | { id: string; created_at: string }
           | undefined)
       : (db
@@ -4878,14 +4888,25 @@ app.post('/api/reports/user', requireAuth, (req, res) => {
     const safeUsername = reportedUsername ? String(reportedUsername).trim().slice(0, 32) : null;
     const safeDisplayName = reportedDisplayName ? String(reportedDisplayName).trim().slice(0, 80) : null;
     const safeConvId = conversationId ? String(conversationId).trim().slice(0, 128) : null;
+    const safeFamilyId = typeof familyId === 'string' && familyId.trim() ? familyId.trim().slice(0, 128) : null;
+    const safeFamilyName = typeof familyName === 'string' && familyName.trim() ? familyName.trim().slice(0, 120) : null;
+    const safeMsgContent =
+      typeof reportedMessageContent === 'string' && reportedMessageContent.trim()
+        ? reportedMessageContent.trim().slice(0, 1500)
+        : null;
+    const safeMsgMediaUrl =
+      typeof reportedMessageMediaUrl === 'string' && reportedMessageMediaUrl.trim()
+        ? reportedMessageMediaUrl.trim().slice(0, 500)
+        : null;
     const nowIso = new Date().toISOString();
 
     db.prepare(`
       INSERT OR IGNORE INTO user_reports (
         id, reporter_id, reported_user_id, reported_username, reported_display_name,
-        category, details, source, conversation_id, also_blocked,
-        status, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+        category, details, source, conversation_id, family_id, family_name,
+        reported_message_id, reported_message_content, reported_message_media_url,
+        also_blocked, status, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
     `).run(
       safeReportId,
       reporterId,
@@ -4896,16 +4917,45 @@ app.post('/api/reports/user', requireAuth, (req, res) => {
       safeDetails,
       safeSource,
       safeConvId,
+      safeFamilyId,
+      safeFamilyName,
+      cleanReportedMsgId,
+      safeMsgContent,
+      safeMsgMediaUrl,
       alsoBlocked ? 1 : 0,
       nowIso,
       nowIso
     );
+
+    // Notify Family Owner & Admins anonymously when a Family message is reported (reporter hidden)
+    if (safeSource === 'family_chat' && safeFamilyId) {
+      const admins = db
+        .prepare("SELECT user_id FROM family_members WHERE family_id = ? AND status = 'active' AND role IN ('owner', 'admin')")
+        .all(safeFamilyId) as Array<{ user_id: string }>;
+      const targetLabel = safeDisplayName || safeUsername || 'a member';
+      for (const adm of admins) {
+        if (adm.user_id === reportedUserId) continue;
+        db.prepare(`
+          INSERT INTO notifications (id, user_id, actor_id, type, title, message, reference_id, is_read, created_at)
+          VALUES (?, ?, 'system', 'family_message_report', ?, ?, ?, 0, ?)
+        `).run(
+          generateUUID(),
+          adm.user_id,
+          `Message Reported in ${safeFamilyName || 'Family'}`,
+          `A member reported a message from ${targetLabel} (${String(category)}).`,
+          safeFamilyId,
+          nowIso
+        );
+      }
+    }
 
     return res.json({ success: true, reportId: safeReportId });
   } catch (err: any) {
     return res.status(500).json({ error: err?.message || 'Failed to submit user report' });
   }
 });
+
+app.use('/api/families', createFamilyRouter(requireAuth));
 
 app.get('/api/reports/my-reports', requireAuth, (req, res) => {
   try {

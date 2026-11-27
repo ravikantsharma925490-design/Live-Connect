@@ -1,8 +1,8 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   X,
   Bell,
-  UserPlus,
+  Users,
   MessageSquare,
   Phone,
   Video,
@@ -10,6 +10,8 @@ import {
   Clock,
   Trash2,
   CheckCheck,
+  Flag,
+  AtSign,
 } from 'lucide-react';
 import { AppNotification, Profile } from '@/src/types';
 import { cn, getAvatarColor, getInitials } from '@/src/lib/utils';
@@ -25,6 +27,8 @@ interface NotificationModalProps {
   onDeleteNotification: (id: string) => void;
   onSelectUser?: (user: Profile) => void;
   onOpenChat?: (userId: string, profile?: Profile) => void;
+  onOpenFamily?: (familyId?: string) => void;
+  onRespondFamilyInvite?: (inviteId: string, action: 'accept' | 'decline') => Promise<any>;
 }
 
 export const NotificationModal: React.FC<NotificationModalProps> = ({
@@ -37,8 +41,11 @@ export const NotificationModal: React.FC<NotificationModalProps> = ({
   onDeleteNotification,
   onSelectUser,
   onOpenChat,
+  onOpenFamily,
+  onRespondFamilyInvite,
 }) => {
   const { t } = useLanguage();
+  const [handledInvites, setHandledInvites] = useState<Record<string, 'accepted' | 'declined' | 'busy'>>({});
   if (!isOpen) return null;
 
   const getNotificationIcon = (type: AppNotification['type']) => {
@@ -49,6 +56,17 @@ export const NotificationModal: React.FC<NotificationModalProps> = ({
         return <Phone className="w-4 h-4 text-emerald-500" />;
       case 'call_video':
         return <Video className="w-4 h-4 text-indigo-500" />;
+      case 'family_invite':
+      case 'family_join_request':
+      case 'family_deleted':
+      case 'family_message':
+        return <Users className="w-4 h-4 text-blue-500" />;
+      case 'family_mention':
+        return <AtSign className="w-4 h-4 text-indigo-500" />;
+      case 'family_join_approved':
+        return <CheckCircle className="w-4 h-4 text-emerald-500" />;
+      case 'family_message_report':
+        return <Flag className="w-4 h-4 text-amber-500" />;
       default:
         return <Bell className="w-4 h-4 text-neutral-400" />;
     }
@@ -187,8 +205,86 @@ export const NotificationModal: React.FC<NotificationModalProps> = ({
                     </p>
 
                     {/* Interactive Action Buttons */}
-                    <div className="flex items-center gap-2 mt-2">
-                      {actor && onSelectUser && (
+                    <div className="flex flex-wrap items-center gap-2 mt-2">
+                      {notif.type === 'family_invite' && notif.reference_id && onRespondFamilyInvite && (
+                        handledInvites[notif.id] === 'accepted' || handledInvites[notif.id] === 'declined' ? (
+                          <span className="text-[11px] font-semibold text-neutral-500">
+                            {handledInvites[notif.id] === 'accepted' ? 'Joined Family' : 'Declined'}
+                          </span>
+                        ) : (
+                          <>
+                            <button
+                              type="button"
+                              disabled={handledInvites[notif.id] === 'busy'}
+                              onClick={async (e) => {
+                                e.stopPropagation();
+                                setHandledInvites((prev) => ({ ...prev, [notif.id]: 'busy' }));
+                                try {
+                                  await onRespondFamilyInvite(notif.reference_id!, 'accept');
+                                  setHandledInvites((prev) => ({ ...prev, [notif.id]: 'accepted' }));
+                                  onMarkAsRead(notif.id);
+                                  onOpenFamily?.();
+                                  onClose();
+                                } catch {
+                                  setHandledInvites((prev) => {
+                                    const copy = { ...prev };
+                                    delete copy[notif.id];
+                                    return copy;
+                                  });
+                                }
+                              }}
+                              className="px-2.5 py-1 text-[11px] font-bold rounded-xl bg-blue-600 hover:bg-blue-700 text-white transition-colors cursor-pointer"
+                            >
+                              Accept
+                            </button>
+                            <button
+                              type="button"
+                              disabled={handledInvites[notif.id] === 'busy'}
+                              onClick={async (e) => {
+                                e.stopPropagation();
+                                setHandledInvites((prev) => ({ ...prev, [notif.id]: 'busy' }));
+                                try {
+                                  await onRespondFamilyInvite(notif.reference_id!, 'decline');
+                                  setHandledInvites((prev) => ({ ...prev, [notif.id]: 'declined' }));
+                                  onMarkAsRead(notif.id);
+                                } catch {
+                                  setHandledInvites((prev) => {
+                                    const copy = { ...prev };
+                                    delete copy[notif.id];
+                                    return copy;
+                                  });
+                                }
+                              }}
+                              className="px-2.5 py-1 text-[11px] font-semibold rounded-xl bg-neutral-100 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300 hover:bg-neutral-200 dark:hover:bg-neutral-700 transition-colors cursor-pointer"
+                            >
+                              Decline
+                            </button>
+                          </>
+                        )
+                      )}
+
+                      {(notif.type === 'family_mention' ||
+                        notif.type === 'family_message' ||
+                        notif.type === 'family_join_request' ||
+                        notif.type === 'family_join_approved' ||
+                        notif.type === 'family_message_report') &&
+                        notif.reference_id &&
+                        onOpenFamily && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onOpenFamily(notif.reference_id!);
+                              onMarkAsRead(notif.id);
+                              onClose();
+                            }}
+                            className="px-2.5 py-1 text-[11px] font-bold rounded-xl bg-blue-600 hover:bg-blue-700 text-white transition-colors cursor-pointer"
+                          >
+                            Open Family
+                          </button>
+                        )}
+
+                      {actor && notif.actor_id !== 'system' && onSelectUser && !notif.type.startsWith('family_') && (
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
@@ -202,7 +298,7 @@ export const NotificationModal: React.FC<NotificationModalProps> = ({
                         </button>
                       )}
 
-                      {actor && onOpenChat && (
+                      {actor && notif.actor_id !== 'system' && onOpenChat && !notif.type.startsWith('family_') && (
                         <button
                           onClick={(e) => {
                             e.stopPropagation();

@@ -292,6 +292,138 @@ db.exec(`
     UNIQUE(identifier_type, identifier_value)
   );
   CREATE INDEX IF NOT EXISTS idx_banned_id_lookup ON banned_identifiers(identifier_type, identifier_value);
+
+  -- ==========================================
+  -- FAMILY GROUP TABLES
+  -- ==========================================
+  CREATE TABLE IF NOT EXISTS families (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    photo_url TEXT,
+    owner_id TEXT NOT NULL,
+    member_count INTEGER NOT NULL DEFAULT 1,
+    max_members INTEGER NOT NULL DEFAULT 5000,
+    join_approval_required INTEGER NOT NULL DEFAULT 1,
+    only_admins_can_send INTEGER NOT NULL DEFAULT 0,
+    invite_code TEXT,
+    invite_link_enabled INTEGER NOT NULL DEFAULT 1,
+    pinned_messages_json TEXT NOT NULL DEFAULT '[]',
+    last_message_id TEXT,
+    last_message_text TEXT,
+    last_message_sender_id TEXT,
+    last_message_sender_name TEXT,
+    last_message_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_families_invite_code ON families(invite_code);
+
+  CREATE TABLE IF NOT EXISTS family_members (
+    family_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'member',
+    status TEXT NOT NULL DEFAULT 'active',
+    relation_tag TEXT,
+    display_name TEXT NOT NULL DEFAULT '',
+    username TEXT NOT NULL DEFAULT '',
+    avatar_url TEXT,
+    muted_until TEXT,
+    is_muted_always INTEGER NOT NULL DEFAULT 0,
+    last_read_at TEXT,
+    cleared_at TEXT,
+    joined_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    removed_at TEXT,
+    removed_by TEXT,
+    PRIMARY KEY (family_id, user_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_family_members_family_status ON family_members(family_id, status, display_name);
+  CREATE INDEX IF NOT EXISTS idx_family_members_user_status ON family_members(user_id, status, updated_at);
+
+  CREATE TABLE IF NOT EXISTS family_requests (
+    family_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    display_name TEXT NOT NULL DEFAULT '',
+    username TEXT NOT NULL DEFAULT '',
+    avatar_url TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    invite_code TEXT,
+    created_at TEXT NOT NULL,
+    reviewed_at TEXT,
+    reviewed_by TEXT,
+    PRIMARY KEY (family_id, user_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_family_requests_family_status ON family_requests(family_id, status, created_at);
+
+  CREATE TABLE IF NOT EXISTS family_invites (
+    id TEXT PRIMARY KEY,
+    family_id TEXT NOT NULL,
+    family_name TEXT NOT NULL,
+    family_photo_url TEXT,
+    inviter_id TEXT NOT NULL,
+    inviter_name TEXT NOT NULL,
+    invitee_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL,
+    responded_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_family_invites_invitee ON family_invites(invitee_id, status, created_at);
+  CREATE INDEX IF NOT EXISTS idx_family_invites_family ON family_invites(family_id, status);
+
+  CREATE TABLE IF NOT EXISTS family_invite_daily_limits (
+    user_id TEXT NOT NULL,
+    day_key TEXT NOT NULL,
+    invite_count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (user_id, day_key)
+  );
+
+  CREATE TABLE IF NOT EXISTS family_messages (
+    id TEXT PRIMARY KEY,
+    family_id TEXT NOT NULL,
+    sender_id TEXT NOT NULL,
+    sender_name TEXT NOT NULL,
+    sender_username TEXT,
+    sender_avatar TEXT,
+    sender_role TEXT,
+    sender_relation_tag TEXT,
+    type TEXT NOT NULL DEFAULT 'text',
+    content TEXT NOT NULL,
+    media_url TEXT,
+    media_type TEXT,
+    cloudinary_public_id TEXT,
+    b2_file_id TEXT,
+    b2_file_name TEXT,
+    reply_to_message_id TEXT,
+    reply_to_json TEXT,
+    mentions_json TEXT NOT NULL DEFAULT '[]',
+    reactions_json TEXT NOT NULL DEFAULT '{}',
+    is_pinned INTEGER NOT NULL DEFAULT 0,
+    is_deleted INTEGER NOT NULL DEFAULT 0,
+    deleted_by TEXT,
+    deleted_by_role TEXT,
+    safe_checkin_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_family_messages_family_created ON family_messages(family_id, created_at);
+
+  CREATE TABLE IF NOT EXISTS family_message_reads (
+    message_id TEXT NOT NULL,
+    family_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    display_name TEXT,
+    read_at TEXT NOT NULL,
+    PRIMARY KEY (message_id, user_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_family_reads_family_msg ON family_message_reads(family_id, message_id);
+
+  CREATE TABLE IF NOT EXISTS family_typing_status (
+    family_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (family_id, user_id)
+  );
 `);
 
 // Safe idempotent column migrations for existing SQLite databases
@@ -316,6 +448,12 @@ ensureColumn('users', 'last_device_id', 'TEXT');
 
 ensureColumn('sessions', 'token_scope', "TEXT NOT NULL DEFAULT 'full'");
 ensureColumn('sessions', 'device_id', 'TEXT');
+
+ensureColumn('user_reports', 'family_id', 'TEXT');
+ensureColumn('user_reports', 'family_name', 'TEXT');
+ensureColumn('user_reports', 'reported_message_id', 'TEXT');
+ensureColumn('user_reports', 'reported_message_content', 'TEXT');
+ensureColumn('user_reports', 'reported_message_media_url', 'TEXT');
 
 db.exec(`
   CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
@@ -690,7 +828,107 @@ export function upsertProfile(data: {
   return getProfileById(data.id)!;
 }
 
+export function handleOwnerDepartureFromFamilies(userId: string) {
+  const ownedFamilies = db
+    .prepare('SELECT id, name, owner_id FROM families WHERE owner_id = ?')
+    .all(userId) as Array<{ id: string; name: string; owner_id: string }>;
+
+  const nowIso = new Date().toISOString();
+
+  for (const fam of ownedFamilies) {
+    // 1. Oldest active Admin (earliest joined_at)
+    let successor = db
+      .prepare(
+        `SELECT user_id, display_name, username FROM family_members
+         WHERE family_id = ? AND status = 'active' AND role = 'admin' AND user_id != ?
+         ORDER BY joined_at ASC LIMIT 1`
+      )
+      .get(fam.id, userId) as { user_id: string; display_name: string; username: string } | undefined;
+
+    // 2. Fallback: Oldest active Member (earliest joined_at)
+    if (!successor) {
+      successor = db
+        .prepare(
+          `SELECT user_id, display_name, username FROM family_members
+           WHERE family_id = ? AND status = 'active' AND role = 'member' AND user_id != ?
+           ORDER BY joined_at ASC LIMIT 1`
+        )
+        .get(fam.id, userId) as { user_id: string; display_name: string; username: string } | undefined;
+    }
+
+    if (successor) {
+      db.prepare("UPDATE family_members SET role = 'owner', updated_at = ? WHERE family_id = ? AND user_id = ?").run(
+        nowIso,
+        fam.id,
+        successor.user_id
+      );
+      db.prepare("UPDATE family_members SET status = 'left', role = 'member', updated_at = ? WHERE family_id = ? AND user_id = ?").run(
+        nowIso,
+        fam.id,
+        userId
+      );
+      const countRow = db
+        .prepare("SELECT COUNT(*) as cnt FROM family_members WHERE family_id = ? AND status = 'active'")
+        .get(fam.id) as { cnt: number };
+      const sysMsgId = `fmsg_${generateId().replace(/-/g, '').slice(0, 20)}`;
+      const successorName = successor.display_name || successor.username || 'Member';
+      const sysText = `Ownership transferred to ${successorName}`;
+      db.prepare(`
+        INSERT INTO family_messages (
+          id, family_id, sender_id, sender_name, type, content, mentions_json, reactions_json, is_pinned, is_deleted, created_at, updated_at
+        ) VALUES (?, ?, 'system', 'System', 'system', ?, '[]', '{}', 0, 0, ?, ?)
+      `).run(sysMsgId, fam.id, sysText, nowIso, nowIso);
+      db.prepare(`
+        UPDATE families SET
+          owner_id = ?,
+          member_count = ?,
+          last_message_id = ?,
+          last_message_text = ?,
+          last_message_sender_id = 'system',
+          last_message_sender_name = 'System',
+          last_message_at = ?,
+          updated_at = ?
+        WHERE id = ?
+      `).run(successor.user_id, Number(countRow?.cnt || 1), sysMsgId, sysText, nowIso, nowIso, fam.id);
+    } else {
+      // No active members left -> clean up empty Family
+      db.prepare('DELETE FROM family_message_reads WHERE family_id = ?').run(fam.id);
+      db.prepare('DELETE FROM family_typing_status WHERE family_id = ?').run(fam.id);
+      db.prepare('DELETE FROM family_messages WHERE family_id = ?').run(fam.id);
+      db.prepare('DELETE FROM family_requests WHERE family_id = ?').run(fam.id);
+      db.prepare('DELETE FROM family_invites WHERE family_id = ?').run(fam.id);
+      db.prepare('DELETE FROM family_members WHERE family_id = ?').run(fam.id);
+      db.prepare('DELETE FROM families WHERE id = ?').run(fam.id);
+    }
+  }
+}
+
 export function deleteAccountCompletely(userId: string, preserveBannedIdentifiers = false) {
+  handleOwnerDepartureFromFamilies(userId);
+
+  const memberFamilies = db
+    .prepare("SELECT family_id FROM family_members WHERE user_id = ? AND status = 'active'")
+    .all(userId) as Array<{ family_id: string }>;
+
+  db.prepare('DELETE FROM family_message_reads WHERE user_id = ?').run(userId);
+  db.prepare('DELETE FROM family_typing_status WHERE user_id = ?').run(userId);
+  db.prepare('DELETE FROM family_requests WHERE user_id = ?').run(userId);
+  db.prepare('DELETE FROM family_invites WHERE inviter_id = ? OR invitee_id = ?').run(userId, userId);
+  db.prepare('DELETE FROM family_members WHERE user_id = ?').run(userId);
+  db.prepare('DELETE FROM family_invite_daily_limits WHERE user_id = ?').run(userId);
+
+  const nowIso = new Date().toISOString();
+  for (const row of memberFamilies) {
+    const cnt = db
+      .prepare("SELECT COUNT(*) as cnt FROM family_members WHERE family_id = ? AND status = 'active'")
+      .get(row.family_id) as { cnt: number };
+    db.prepare('UPDATE families SET member_count = ?, updated_at = ? WHERE id = ?').run(
+      Number(cnt?.cnt || 0),
+      nowIso,
+      row.family_id
+    );
+  }
+
   db.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId);
   db.prepare('DELETE FROM follows WHERE follower_id = ? OR following_id = ?').run(userId, userId);
   db.prepare('DELETE FROM blocked_users WHERE blocker_id = ? OR blocked_id = ?').run(userId, userId);

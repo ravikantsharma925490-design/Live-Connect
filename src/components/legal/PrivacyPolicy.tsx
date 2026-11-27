@@ -18,6 +18,7 @@ import {
   ExternalLink,
   ChevronRight,
   Sparkles,
+  Users,
 } from 'lucide-react';
 import { cn } from '@/src/lib/utils';
 
@@ -49,7 +50,8 @@ export const PrivacyPolicy: React.FC<PrivacyPolicyProps> = ({
     { id: 'cookies-analytics', label: '13. Cookies & Local Storage', icon: Server },
     { id: 'third-party', label: '14. Third-Party Services', icon: ExternalLink },
     { id: 'changes-policy', label: '15. Changes to Privacy Policy', icon: FileText },
-    { id: 'contact-us', label: '16. Contact Us', icon: Mail },
+    { id: 'family-groups', label: '16. Family Groups Privacy', icon: Users },
+    { id: 'contact-us', label: '17. Contact Us', icon: Mail },
   ];
 
   const scrollToSection = (id: string) => {
@@ -532,12 +534,33 @@ export const PrivacyPolicy: React.FC<PrivacyPolicyProps> = ({
               </div>
             </section>
 
-            {/* Section 16: Contact Us */}
+            {/* Section 16: Family Groups Privacy */}
+            <section id="family-groups" className="p-6 rounded-3xl bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 shadow-xs space-y-3">
+              <div className="flex items-center gap-2.5 text-blue-600 dark:text-blue-400">
+                <Users className="w-5 h-5" />
+                <h3 className="text-base md:text-lg font-bold text-neutral-900 dark:text-neutral-100">
+                  16. Family Groups Privacy
+                </h3>
+              </div>
+              <div className="text-xs md:text-sm text-neutral-600 dark:text-neutral-300 leading-relaxed space-y-2.5">
+                <p>
+                  Family Groups allow up to 5,000 approved members to exchange text messages, media, reactions, pinned announcements, relation tags, and &quot;I&apos;m Safe&quot; check-ins inside a shared conversation space.
+                </p>
+                <ul className="space-y-1.5 list-disc list-inside pl-1 text-xs">
+                  <li><strong>Shared Message Storage:</strong> Each Family message is stored once inside the Family&apos;s shared collection and is accessible only to active members approved for that Family.</li>
+                  <li><strong>Large Group Presence Safeguard:</strong> When a Family exceeds 50 members, online/last-seen presence, live typing indicators, and individual message viewer lists are automatically hidden; only aggregate seen counts remain visible.</li>
+                  <li><strong>Anonymous Reporting:</strong> Reporting a Family message captures a moderation snapshot and alerts the Family Owner/Admins and app moderation team without revealing the reporter&apos;s identity to the sender.</li>
+                  <li><strong>Clear &amp; Delete Controls:</strong> Clearing chat hides messages only on your account. Deleting a message replaces it with a tombstone notice and removes its uploaded media.</li>
+                </ul>
+              </div>
+            </section>
+
+            {/* Section 17: Contact Us */}
             <section id="contact-us" className="p-6 md:p-8 rounded-3xl bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 shadow-xs space-y-4">
               <div className="flex items-center gap-2.5 text-blue-600 dark:text-blue-400">
                 <Mail className="w-5 h-5" />
                 <h3 className="text-base md:text-lg font-bold text-neutral-900 dark:text-neutral-100">
-                  16. Contact Us & Support
+                  17. Contact Us &amp; Support
                 </h3>
               </div>
               <div className="text-xs md:text-sm text-neutral-600 dark:text-neutral-300 leading-relaxed space-y-3">

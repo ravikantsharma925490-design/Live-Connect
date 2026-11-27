@@ -18,6 +18,7 @@ import {
   Shield,
   Trash2,
   FileText,
+  Users,
 } from 'lucide-react';
 import { cn } from '@/src/lib/utils';
 
@@ -52,7 +53,8 @@ export const TermsConditions: React.FC<TermsConditionsProps> = ({
     { id: 'limitation-liability', label: '16. Limitation of Liability', icon: Scale },
     { id: 'account-deletion', label: '17. Account Deletion', icon: Trash2 },
     { id: 'changes-terms', label: '18. Changes to Terms', icon: FileText },
-    { id: 'contact-us', label: '19. Contact Us', icon: Mail },
+    { id: 'family-group-rules', label: '19. Family Group Rules', icon: Users },
+    { id: 'contact-us', label: '20. Contact Us', icon: Mail },
   ];
 
   const scrollToSection = (id: string) => {
@@ -485,12 +487,33 @@ export const TermsConditions: React.FC<TermsConditionsProps> = ({
               </div>
             </section>
 
-            {/* Section 19: Contact Us */}
+            {/* Section 19: Family Group Rules */}
+            <section id="family-group-rules" className="p-6 rounded-3xl bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 shadow-xs space-y-3">
+              <div className="flex items-center gap-2.5 text-indigo-600 dark:text-indigo-400">
+                <Users className="w-5 h-5" />
+                <h3 className="text-base md:text-lg font-bold text-neutral-900 dark:text-neutral-100">
+                  19. Family Group Rules
+                </h3>
+              </div>
+              <div className="text-xs md:text-sm text-neutral-600 dark:text-neutral-300 leading-relaxed space-y-2.5">
+                <p>
+                  When creating, managing, or participating in a Family Group (up to 5,000 members), all participants agree to the following additional rules:
+                </p>
+                <ul className="space-y-1.5 list-disc list-inside pl-1 text-xs">
+                  <li><strong>Roles &amp; Ownership:</strong> Each Family has one Owner and optionally multiple Admins. If an Owner account is permanently banned or deleted, ownership automatically transfers to the oldest active Admin (or oldest active Member), or the Family is deleted if no active members remain.</li>
+                  <li><strong>Anti-Spam Invites &amp; Links:</strong> Direct invites are capped at 10 recipients per send and 50 per day. Family messages cannot be forwarded out of the Family chat. Removed members cannot rejoin until explicitly permitted by an Owner or Admin.</li>
+                  <li><strong>Calling Disabled:</strong> Audio and video calling are disabled inside Family Groups; calling remains exclusively one-to-one with mutually followed contacts.</li>
+                  <li><strong>Respectful Conduct:</strong> Harassment, impersonation, or abuse in Family Groups may be reported to Family Admins and platform moderators and may result in removal or account suspension.</li>
+                </ul>
+              </div>
+            </section>
+
+            {/* Section 20: Contact Us */}
             <section id="contact-us" className="p-6 md:p-8 rounded-3xl bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 shadow-xs space-y-4">
               <div className="flex items-center gap-2.5 text-indigo-600 dark:text-indigo-400">
                 <Mail className="w-5 h-5" />
                 <h3 className="text-base md:text-lg font-bold text-neutral-900 dark:text-neutral-100">
-                  19. Contact Us &amp; Inquiries
+                  20. Contact Us &amp; Inquiries
                 </h3>
               </div>
               <div className="text-xs md:text-sm text-neutral-600 dark:text-neutral-300 leading-relaxed space-y-3">

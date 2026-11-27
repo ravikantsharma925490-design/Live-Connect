@@ -251,7 +251,17 @@
         "actorDisplayName": { "type": "string", "maxLength": 80 },
         "actorUsername": { "type": "string", "maxLength": 32 },
         "actorAvatarUrl": { "type": "string", "maxLength": 1024 },
-        "type": { "type": "string", "enum": ["follow", "follow_back", "message", "call_audio", "call_video", "account_warning", "account_restricted", "account_suspended", "account_disabled", "account_restored", "appeal_update"] },
+        "type": {
+          "type": "string",
+          "enum": [
+            "follow", "follow_back", "message", "call_audio", "call_video",
+            "account_warning", "account_restricted", "account_suspended",
+            "account_disabled", "account_restored", "appeal_update",
+            "family_invite", "family_message", "family_mention",
+            "family_join_request", "family_join_approved", "family_join_rejected",
+            "family_message_report", "family_deleted"
+          ]
+        },
         "title": { "type": "string", "minLength": 1, "maxLength": 160 },
         "message": { "type": "string", "minLength": 1, "maxLength": 1000 },
         "referenceId": { "type": "string", "maxLength": 128 },
@@ -293,8 +303,13 @@
           ]
         },
         "details": { "type": "string", "maxLength": 1000 },
-        "source": { "type": "string", "enum": ["profile", "chat", "search", "call"] },
+        "source": { "type": "string", "enum": ["profile", "chat", "search", "call", "family_chat"] },
         "conversationId": { "type": "string", "maxLength": 128 },
+        "familyId": { "type": "string", "maxLength": 128 },
+        "familyName": { "type": "string", "maxLength": 120 },
+        "reportedMessageId": { "type": "string", "maxLength": 128 },
+        "reportedMessageContent": { "type": "string", "maxLength": 1500 },
+        "reportedMessageMediaUrl": { "type": "string", "maxLength": 1024 },
         "alsoBlocked": { "type": "boolean" },
         "status": { "type": "string", "enum": ["pending", "under_review", "resolved", "dismissed"] },
         "adminId": { "type": "string", "maxLength": 128 },
@@ -354,6 +369,186 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "adminId", "targetUserId", "action", "reason", "createdAt"]
+    },
+    "Family": {
+      "title": "Family",
+      "description": "Shared Family Group metadata supporting up to 5,000 members with a single message collection.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "photoUrl": { "type": "string", "maxLength": 1024 },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "memberCount": { "type": "number" },
+        "maxMembers": { "type": "number" },
+        "joinApprovalRequired": { "type": "boolean" },
+        "onlyAdminsCanSend": { "type": "boolean" },
+        "inviteCode": { "type": "string", "maxLength": 64 },
+        "inviteLinkEnabled": { "type": "boolean" },
+        "pinnedMessages": { "type": "array" },
+        "lastMessageId": { "type": "string", "maxLength": 128 },
+        "lastMessageText": { "type": "string", "maxLength": 500 },
+        "lastMessageSenderId": { "type": "string", "maxLength": 128 },
+        "lastMessageSenderName": { "type": "string", "maxLength": 80 },
+        "lastMessageAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "ownerId", "memberCount", "maxMembers", "joinApprovalRequired", "onlyAdminsCanSend", "inviteLinkEnabled", "pinnedMessages", "createdAt", "updatedAt"]
+    },
+    "FamilyMember": {
+      "title": "FamilyMember",
+      "description": "Member document in families/{familyId}/members enabling paginated and searchable member lists.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "familyId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "role": { "type": "string", "enum": ["owner", "admin", "member"] },
+        "status": { "type": "string", "enum": ["active", "pending", "removed", "left"] },
+        "relationTag": { "type": "string", "maxLength": 32 },
+        "displayName": { "type": "string", "maxLength": 80 },
+        "displayNameLower": { "type": "string", "maxLength": 80 },
+        "username": { "type": "string", "maxLength": 32 },
+        "avatarUrl": { "type": "string", "maxLength": 1024 },
+        "joinedAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "removedAt": { "type": "string", "format": "date-time" },
+        "removedBy": { "type": "string", "maxLength": 128 }
+      },
+      "required": ["userId", "familyId", "role", "status", "joinedAt", "updatedAt"]
+    },
+    "FamilyMembership": {
+      "title": "FamilyMembership",
+      "description": "Per-user Family membership reference and notification mute/read/clear settings.",
+      "type": "object",
+      "properties": {
+        "familyId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "role": { "type": "string", "enum": ["owner", "admin", "member"] },
+        "status": { "type": "string", "enum": ["active", "pending", "removed", "left"] },
+        "relationTag": { "type": "string", "maxLength": 32 },
+        "mutedUntil": { "type": "string", "format": "date-time" },
+        "isMutedAlways": { "type": "boolean" },
+        "lastReadAt": { "type": "string", "format": "date-time" },
+        "clearedAt": { "type": "string", "format": "date-time" },
+        "joinedAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["familyId", "userId", "role", "status", "isMutedAlways", "joinedAt", "updatedAt"]
+    },
+    "FamilyMessage": {
+      "title": "FamilyMessage",
+      "description": "Shared Family chat message (1 write per message regardless of member count).",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "familyId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "senderId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "senderName": { "type": "string", "maxLength": 80 },
+        "senderUsername": { "type": "string", "maxLength": 32 },
+        "senderAvatar": { "type": "string", "maxLength": 1024 },
+        "senderRole": { "type": "string", "enum": ["owner", "admin", "member"] },
+        "senderRelationTag": { "type": "string", "maxLength": 32 },
+        "type": { "type": "string", "enum": ["text", "image", "voice", "sticker", "system", "safe_checkin"] },
+        "content": { "type": "string", "maxLength": 8000 },
+        "mediaUrl": { "type": "string", "maxLength": 1024 },
+        "mediaType": { "type": "string", "maxLength": 32 },
+        "cloudinaryPublicId": { "type": "string", "maxLength": 256 },
+        "b2FileId": { "type": "string", "maxLength": 256 },
+        "b2FileName": { "type": "string", "maxLength": 256 },
+        "replyToMessageId": { "type": "string", "maxLength": 128 },
+        "replyToMessage": { "type": "object" },
+        "mentions": { "type": "array" },
+        "reactions": { "type": "object" },
+        "isPinned": { "type": "boolean" },
+        "isDeleted": { "type": "boolean" },
+        "deletedBy": { "type": "string", "maxLength": 128 },
+        "deletedByRole": { "type": "string", "maxLength": 16 },
+        "seenCount": { "type": "number" },
+        "safeCheckInAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "familyId", "senderId", "senderName", "type", "content", "isPinned", "isDeleted", "createdAt", "updatedAt"]
+    },
+    "FamilyJoinRequest": {
+      "title": "FamilyJoinRequest",
+      "description": "Pending invite-link join request waiting for Owner or Admin approval.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "familyId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "displayName": { "type": "string", "maxLength": 80 },
+        "username": { "type": "string", "maxLength": 32 },
+        "avatarUrl": { "type": "string", "maxLength": 1024 },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "inviteCode": { "type": "string", "maxLength": 64 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "reviewedAt": { "type": "string", "format": "date-time" },
+        "reviewedBy": { "type": "string", "maxLength": 128 }
+      },
+      "required": ["userId", "familyId", "status", "createdAt"]
+    },
+    "FamilyInvite": {
+      "title": "FamilyInvite",
+      "description": "Direct user-targeted Family invitation.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "familyId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "familyName": { "type": "string", "maxLength": 80 },
+        "familyPhotoUrl": { "type": "string", "maxLength": 1024 },
+        "inviterId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "inviterName": { "type": "string", "maxLength": 80 },
+        "inviteeId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "status": { "type": "string", "enum": ["pending", "accepted", "declined"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "respondedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "familyId", "familyName", "inviterId", "inviterName", "inviteeId", "status", "createdAt"]
+    },
+    "FamilyInviteLink": {
+      "title": "FamilyInviteLink",
+      "description": "Direct lookup index mapping an inviteCode to its Family.",
+      "type": "object",
+      "properties": {
+        "code": { "type": "string", "minLength": 4, "maxLength": 64 },
+        "familyId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "familyName": { "type": "string", "maxLength": 80 },
+        "photoUrl": { "type": "string", "maxLength": 1024 },
+        "memberCount": { "type": "number" },
+        "maxMembers": { "type": "number" },
+        "joinApprovalRequired": { "type": "boolean" },
+        "enabled": { "type": "boolean" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["code", "familyId", "familyName", "enabled", "updatedAt"]
+    },
+    "FamilyMessageRead": {
+      "title": "FamilyMessageRead",
+      "description": "Per-message read receipt record.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "messageId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "displayName": { "type": "string", "maxLength": 80 },
+        "readAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "messageId", "userId", "readAt"]
+    },
+    "FamilyTypingStatus": {
+      "title": "FamilyTypingStatus",
+      "description": "Ephemeral typing indicator document for Families with <= 50 members.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "familyId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "displayName": { "type": "string", "maxLength": 80 },
+        "expiresAt": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "familyId", "displayName", "expiresAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -432,6 +627,42 @@
     "/audit_logs/{logId}": {
       "schema": { "$ref": "#/entities/AuditLogEntry" },
       "description": "Admin and moderator audit trail."
+    },
+    "/families/{familyId}": {
+      "schema": { "$ref": "#/entities/Family" },
+      "description": "Shared Family Group metadata document."
+    },
+    "/families/{familyId}/members/{memberId}": {
+      "schema": { "$ref": "#/entities/FamilyMember" },
+      "description": "Paginated Family member roster."
+    },
+    "/families/{familyId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/FamilyMessage" },
+      "description": "Single shared message store for a Family Group (1 write per message)."
+    },
+    "/families/{familyId}/requests/{userId}": {
+      "schema": { "$ref": "#/entities/FamilyJoinRequest" },
+      "description": "Join approval requests for invite link joiners."
+    },
+    "/families/{familyId}/typing/{userId}": {
+      "schema": { "$ref": "#/entities/FamilyTypingStatus" },
+      "description": "Typing status for Families with <= 50 members."
+    },
+    "/families/{familyId}/reads/{readId}": {
+      "schema": { "$ref": "#/entities/FamilyMessageRead" },
+      "description": "Read receipts keyed by {messageId}_{userId}."
+    },
+    "/family_invite_links/{inviteCode}": {
+      "schema": { "$ref": "#/entities/FamilyInviteLink" },
+      "description": "Non-enumerable lookup table from invite code to Family metadata."
+    },
+    "/users/{userId}/family_memberships/{familyId}": {
+      "schema": { "$ref": "#/entities/FamilyMembership" },
+      "description": "Owner-scoped index of Families the user belongs to or requested to join."
+    },
+    "/users/{userId}/family_invites/{inviteId}": {
+      "schema": { "$ref": "#/entities/FamilyInvite" },
+      "description": "Owner-scoped incoming Family Group invitations."
     }
   }
 }

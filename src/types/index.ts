@@ -220,7 +220,15 @@ export type NotificationType =
   | 'account_suspended'
   | 'account_disabled'
   | 'account_restored'
-  | 'appeal_update';
+  | 'appeal_update'
+  | 'family_invite'
+  | 'family_message'
+  | 'family_mention'
+  | 'family_join_request'
+  | 'family_join_approved'
+  | 'family_join_rejected'
+  | 'family_message_report'
+  | 'family_deleted';
 
 export interface AppNotification {
   id: string;
@@ -296,12 +304,13 @@ export type UserReportCategory =
 
 export type UserReportStatus = 'pending' | 'under_review' | 'resolved' | 'dismissed';
 
-export type UserReportSource = 'profile' | 'chat' | 'search' | 'call';
+export type UserReportSource = 'profile' | 'chat' | 'search' | 'call' | 'family_chat';
 
 export interface ReportedMessageContext {
   id: string;
   content: string;
   createdAt?: string;
+  mediaUrl?: string | null;
 }
 
 export interface UserReportRecord {
@@ -314,6 +323,11 @@ export interface UserReportRecord {
   details?: string | null;
   source: UserReportSource;
   conversation_id?: string | null;
+  family_id?: string | null;
+  family_name?: string | null;
+  reported_message_id?: string | null;
+  reported_message_content?: string | null;
+  reported_message_media_url?: string | null;
   also_blocked?: boolean;
   status: UserReportStatus;
   admin_id?: string | null;
@@ -337,5 +351,141 @@ export interface UserReportRecord {
     strike_count?: number;
   };
 }
+
+// ==========================================
+// FAMILY GROUP TYPES
+// ==========================================
+
+export type FamilyRole = 'owner' | 'admin' | 'member';
+export type FamilyMemberStatus = 'active' | 'pending' | 'removed' | 'left';
+export type FamilyMuteDuration = '1h' | '8h' | '1w' | 'always' | 'off';
+
+export interface FamilyPinnedMessage {
+  messageId: string;
+  content: string;
+  senderId: string;
+  senderName: string;
+  pinnedById: string;
+  pinnedByName: string;
+  pinnedAt: string;
+}
+
+export interface Family {
+  id: string;
+  name: string;
+  photoUrl?: string | null;
+  ownerId: string;
+  memberCount: number;
+  maxMembers: number;
+  joinApprovalRequired: boolean;
+  onlyAdminsCanSend: boolean;
+  inviteCode?: string | null;
+  inviteLinkEnabled: boolean;
+  pinnedMessages: FamilyPinnedMessage[];
+  lastMessageId?: string | null;
+  lastMessageText?: string | null;
+  lastMessageSenderId?: string | null;
+  lastMessageSenderName?: string | null;
+  lastMessageAt?: string | null;
+  pendingRequestsCount?: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface FamilyMember {
+  userId: string;
+  familyId: string;
+  role: FamilyRole;
+  status: FamilyMemberStatus;
+  relationTag?: string | null;
+  displayName: string;
+  username: string;
+  avatarUrl?: string | null;
+  isOnline?: boolean;
+  lastSeen?: string | null;
+  joinedAt: string;
+  updatedAt: string;
+  removedAt?: string | null;
+  removedBy?: string | null;
+}
+
+export interface FamilyMembership {
+  familyId: string;
+  userId: string;
+  role: FamilyRole;
+  status: FamilyMemberStatus;
+  relationTag?: string | null;
+  mutedUntil?: string | null;
+  isMutedAlways: boolean;
+  lastReadAt?: string | null;
+  clearedAt?: string | null;
+  unreadCount: number;
+  joinedAt: string;
+  updatedAt: string;
+  family?: Family;
+}
+
+export type FamilyMessageType = 'text' | 'image' | 'voice' | 'sticker' | 'system' | 'safe_checkin';
+
+export interface FamilyMessage {
+  id: string;
+  familyId: string;
+  senderId: string;
+  senderName: string;
+  senderUsername?: string | null;
+  senderAvatar?: string | null;
+  senderRole?: FamilyRole;
+  senderRelationTag?: string | null;
+  type: FamilyMessageType;
+  content: string;
+  mediaUrl?: string | null;
+  mediaType?: 'image' | 'voice' | null;
+  cloudinaryPublicId?: string | null;
+  b2FileId?: string | null;
+  b2FileName?: string | null;
+  replyToMessageId?: string | null;
+  replyToMessage?: {
+    id: string;
+    senderId: string;
+    senderName: string;
+    content: string;
+  } | null;
+  mentions: string[];
+  reactions: Record<string, string[]>;
+  isPinned: boolean;
+  isDeleted: boolean;
+  deletedBy?: string | null;
+  deletedByRole?: FamilyRole | null;
+  safeCheckInAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface FamilyJoinRequest {
+  userId: string;
+  familyId: string;
+  displayName: string;
+  username: string;
+  avatarUrl?: string | null;
+  status: 'pending' | 'approved' | 'rejected';
+  inviteCode?: string | null;
+  createdAt: string;
+  reviewedAt?: string | null;
+  reviewedBy?: string | null;
+}
+
+export interface FamilyInvite {
+  id: string;
+  familyId: string;
+  familyName: string;
+  familyPhotoUrl?: string | null;
+  inviterId: string;
+  inviterName: string;
+  inviteeId: string;
+  status: 'pending' | 'accepted' | 'declined';
+  createdAt: string;
+  respondedAt?: string | null;
+}
+
 
 

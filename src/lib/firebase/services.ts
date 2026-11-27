@@ -1630,8 +1630,13 @@ export async function submitUserReportFs(params: {
   reportedDisplayName?: string | null;
   category: string;
   details?: string | null;
-  source: 'profile' | 'chat' | 'search' | 'call';
+  source: 'profile' | 'chat' | 'search' | 'call' | 'family_chat';
   conversationId?: string | null;
+  familyId?: string | null;
+  familyName?: string | null;
+  reportedMessageId?: string | null;
+  reportedMessageContent?: string | null;
+  reportedMessageMediaUrl?: string | null;
   alsoBlocked?: boolean;
 }): Promise<{ reportId: string; skippedMissingPublicProfile?: boolean }> {
   const reportId =
@@ -1670,6 +1675,21 @@ export async function submitUserReportFs(params: {
 
     const cleanConvId = sanitizeOptionalStr(params.conversationId, 128);
     if (cleanConvId) payload.conversationId = cleanConvId;
+
+    const cleanFamilyId = sanitizeOptionalStr(params.familyId, 128);
+    if (cleanFamilyId) payload.familyId = cleanFamilyId;
+
+    const cleanFamilyName = sanitizeOptionalStr(params.familyName, 120);
+    if (cleanFamilyName) payload.familyName = cleanFamilyName;
+
+    const cleanReportedMsgId = sanitizeOptionalStr(params.reportedMessageId, 128);
+    if (cleanReportedMsgId) payload.reportedMessageId = cleanReportedMsgId;
+
+    const cleanReportedMsgContent = sanitizeOptionalStr(params.reportedMessageContent, 1500);
+    if (cleanReportedMsgContent) payload.reportedMessageContent = cleanReportedMsgContent;
+
+    const cleanReportedMsgMediaUrl = sanitizeOptionalStr(params.reportedMessageMediaUrl, 1024);
+    if (cleanReportedMsgMediaUrl) payload.reportedMessageMediaUrl = cleanReportedMsgMediaUrl;
 
     await setDoc(doc(db, 'user_reports', reportId), payload);
     return { reportId };

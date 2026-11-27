@@ -7,6 +7,7 @@ import { useCall } from '@/src/hooks/useCall';
 import { useCallHistory } from '@/src/hooks/useCallHistory';
 import { useSocialRelations } from '@/src/hooks/useSocialRelations';
 import { useNotifications } from '@/src/hooks/useNotifications';
+import { useFamilies } from '@/src/hooks/useFamilies';
 import { AuthPage } from '@/src/components/auth/AuthPage';
 import { BottomNav, TabType } from '@/src/components/navigation/BottomNav';
 import { SidebarNav } from '@/src/components/navigation/SidebarNav';
@@ -15,6 +16,8 @@ import { MessagesTab } from '@/src/components/tabs/MessagesTab';
 import { SearchTab } from '@/src/components/tabs/SearchTab';
 import { CallsTab } from '@/src/components/tabs/CallsTab';
 import { ProfileTab } from '@/src/components/tabs/ProfileTab';
+import { FamilyTab } from '@/src/components/family/FamilyTab';
+import { JoinFamilyModal } from '@/src/components/family/JoinFamilyModal';
 import { UserSearchModal } from '@/src/components/chat/UserSearchModal';
 import { ForwardMessageModal } from '@/src/components/chat/ForwardMessageModal';
 import { IncomingCallModal } from '@/src/components/calls/IncomingCallModal';
@@ -36,6 +39,10 @@ import { AccountStatusModal } from '@/src/components/moderation/AccountStatusMod
 import { AccountRestoredModal } from '@/src/components/moderation/AccountRestoredModal';
 import { AdminModerationPanel } from '@/src/components/moderation/AdminModerationPanel';
 import { ReportUserModal } from '@/src/components/moderation/ReportUserModal';
+import { isFirebaseSessionActive } from '@/src/lib/firebase/client';
+import { sendMessageToFirestoreFs } from '@/src/lib/firebase/services';
+import { getAuthHeaders } from '@/src/lib/authHeader';
+import { isFamilyMembershipMuted } from '@/src/lib/family/constants';
 import { Profile, Message, UserReportSource } from '@/src/types';
 
 // Ensures the cinematic launch animation plays strictly once on cold app launch
@@ -109,7 +116,28 @@ export default function App() {
 
   const [isNotificationOpen, setIsNotificationOpen] = useState(false);
 
-  // Active Tab: 1. Messages (Default landing), 2. Search ID, 3. Calls, 4. Call History, 5. Profile
+  // Family Groups State & Realtime Hook
+  const {
+    memberships: familyMemberships,
+    invites: familyInvites,
+    activeFamilyId,
+    setActiveFamilyId,
+    familyBadgeCount: rawFamilyBadgeCount,
+    loading: familiesLoading,
+    refreshFamilies,
+    createNewFamily,
+    respondInvite: respondFamilyInvite,
+    joinByInviteCode,
+  } = useFamilies(readyProfile);
+
+  // Detect ?joinFamily=<code> URL invite link parameter
+  const [urlJoinFamilyCode, setUrlJoinFamilyCode] = useState<string | null>(() => {
+    if (typeof window === 'undefined') return null;
+    const params = new URLSearchParams(window.location.search);
+    return params.get('joinFamily')?.trim() || null;
+  });
+
+  // Active Tab: 1. Messages, 2. Search ID, 3. Calls, 4. Family, 5. Profile
   const [activeTab, setActiveTab] = useState<TabType>('messages');
 
   const {
@@ -220,6 +248,59 @@ export default function App() {
     }, 0);
   }, [visibleConversations, activeConversationId, activeTab]);
 
+  const adjustedFamilyBadgeCount = useMemo(() => {
+    if (!activeFamilyId || activeTab !== 'family') return rawFamilyBadgeCount;
+    const isHidden = typeof document !== 'undefined' && document.hidden;
+    if (isHidden) return rawFamilyBadgeCount;
+    const openMem = familyMemberships.find((m) => m.familyId === activeFamilyId);
+    if (!openMem || openMem.status !== 'active' || isFamilyMembershipMuted(openMem)) {
+      return rawFamilyBadgeCount;
+    }
+    return Math.max(0, rawFamilyBadgeCount - (openMem.unreadCount || 0));
+  }, [rawFamilyBadgeCount, activeFamilyId, activeTab, familyMemberships]);
+
+  const handleShareInviteToDm = useCallback(
+    async (conversationId: string, inviteText: string) => {
+      if (!readyProfile) return;
+      const targetConv = visibleConversations.find((c) => c.id === conversationId);
+      if (!targetConv || !targetConv.other_member?.id) {
+        throw new Error('Conversation not found.');
+      }
+      if (isFirebaseSessionActive(readyProfile.id)) {
+        await sendMessageToFirestoreFs({
+          conversationId: targetConv.id,
+          content: inviteText,
+          senderProfile: readyProfile,
+          receiverId: targetConv.other_member.id,
+          receiverProfile: targetConv.other_member,
+        });
+      } else {
+        const authHeaders = await getAuthHeaders();
+        const res = await fetch('/api/messages/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders },
+          body: JSON.stringify({
+            message: {
+              id: `fshare-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+              conversation_id: targetConv.id,
+              sender_id: readyProfile.id,
+              content: inviteText,
+              created_at: new Date().toISOString(),
+            },
+            recipientId: targetConv.other_member.id,
+            senderProfile: readyProfile,
+          }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => null);
+          throw new Error(err?.error || 'Could not share invite link.');
+        }
+      }
+      fetchConversations();
+    },
+    [readyProfile, visibleConversations, fetchConversations]
+  );
+
   // Sync browser path simulation for routing consistency
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -232,6 +313,8 @@ export default function App() {
       } else if (path === '/app/calls' || path === '/app/call-history') {
         setActiveTab('calls');
         markHistoryAsViewed();
+      } else if (path === '/app/family') {
+        setActiveTab('family');
       } else if (path === '/app/profile' || path.startsWith('/app/help') || path === '/app/subscription') {
         setActiveTab('profile');
       }
@@ -398,13 +481,14 @@ export default function App() {
 
   return (
     <div className="h-screen-safe w-screen flex flex-col md:flex-row bg-neutral-100 dark:bg-neutral-950 text-neutral-900 dark:text-neutral-100 overflow-hidden font-sans">
-      {/* 1. Desktop Left Navigation Rail (Shows exact 6 tabs in order) */}
+      {/* 1. Desktop Left Navigation Rail */}
       <SidebarNav
         activeTab={activeTab}
         onChangeTab={handleTabChange}
         currentUser={profile}
         unreadCount={totalUnreadCount}
         missedCallsCount={missedCallsCount}
+        familyBadgeCount={adjustedFamilyBadgeCount}
         unreadNotificationsCount={unreadNotificationsCount}
         onOpenNotifications={() => setIsNotificationOpen(true)}
         onSignOut={signOut}
@@ -417,7 +501,8 @@ export default function App() {
           onOpenNotifications={() => setIsNotificationOpen(true)}
           hide={
             isCallActive ||
-            (activeTab === 'messages' && Boolean(activeConversationId))
+            (activeTab === 'messages' && Boolean(activeConversationId)) ||
+            (activeTab === 'family' && Boolean(activeFamilyId))
           }
         />
 
@@ -514,6 +599,25 @@ export default function App() {
           />
         )}
 
+        {/* Tab 4: Family Groups (👨‍👩‍👧‍👦) */}
+        {activeTab === 'family' && (
+          <FamilyTab
+            currentUser={profile}
+            memberships={familyMemberships}
+            invites={familyInvites}
+            activeFamilyId={activeFamilyId}
+            loading={familiesLoading}
+            dmConversations={visibleConversations}
+            onSelectFamily={(fid) => setActiveFamilyId(fid)}
+            onCreateFamily={createNewFamily}
+            onRespondInvite={respondFamilyInvite}
+            onJoinByCode={joinByInviteCode}
+            onSearchUsers={filteredSearchUsers}
+            onShareInviteToDm={handleShareInviteToDm}
+            onRefreshFamilies={refreshFamilies}
+          />
+        )}
+
         {/* Tab 5: Profile (👤) */}
         {activeTab === 'profile' && (
           <ProfileTab
@@ -551,9 +655,11 @@ export default function App() {
         onChangeTab={handleTabChange}
         unreadCount={totalUnreadCount}
         missedCallsCount={missedCallsCount}
+        familyBadgeCount={adjustedFamilyBadgeCount}
         hide={
           isCallActive ||
-          (activeTab === 'messages' && Boolean(activeConversationId))
+          (activeTab === 'messages' && Boolean(activeConversationId)) ||
+          (activeTab === 'family' && Boolean(activeFamilyId))
         }
       />
 
@@ -618,6 +724,34 @@ export default function App() {
           if (convId) {
             setActiveConversationId(convId);
           }
+        }}
+        onOpenFamily={(familyId) => {
+          setIsNotificationOpen(false);
+          handleTabChange('family');
+          if (familyId) {
+            setActiveFamilyId(familyId);
+          }
+        }}
+        onRespondFamilyInvite={respondFamilyInvite}
+      />
+
+      {/* Deep-Link ?joinFamily=<code> Invite Confirmation Modal */}
+      <JoinFamilyModal
+        isOpen={Boolean(urlJoinFamilyCode && readyProfile)}
+        currentUser={profile}
+        initialInviteCode={urlJoinFamilyCode}
+        onClose={() => {
+          setUrlJoinFamilyCode(null);
+          if (typeof window !== 'undefined' && window.history?.replaceState) {
+            const url = new URL(window.location.href);
+            url.searchParams.delete('joinFamily');
+            window.history.replaceState({}, '', url.toString());
+          }
+        }}
+        onConfirmJoin={joinByInviteCode}
+        onOpenFamily={(fid) => {
+          handleTabChange('family');
+          setActiveFamilyId(fid);
         }}
       />
 

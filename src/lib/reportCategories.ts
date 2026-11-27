@@ -118,6 +118,8 @@ export async function submitUserReport(params: {
   details?: string;
   source: UserReportSource;
   conversationId?: string | null;
+  familyId?: string | null;
+  familyName?: string | null;
   reportedMessage?: ReportedMessageContext | null;
   alsoBlocked?: boolean;
 }): Promise<{ reportId: string; duplicate?: boolean }> {
@@ -149,8 +151,12 @@ export async function submitUserReport(params: {
       details: cleanDetails,
       source: params.source,
       conversationId: params.conversationId || null,
+      familyId: params.familyId || null,
+      familyName: params.familyName || null,
       reportedMessageId: params.reportedMessage?.id || null,
       reportedMessagePreview: reportedMessagePreview || null,
+      reportedMessageContent: params.reportedMessage?.content?.slice(0, 1500) || null,
+      reportedMessageMediaUrl: params.reportedMessage?.mediaUrl || null,
       alsoBlocked: Boolean(params.alsoBlocked),
     }),
   });
@@ -183,6 +189,11 @@ export async function submitUserReport(params: {
         details: cleanDetails || null,
         source: params.source,
         conversationId: params.conversationId || null,
+        familyId: params.familyId || null,
+        familyName: params.familyName || null,
+        reportedMessageId: params.reportedMessage?.id || null,
+        reportedMessageContent: params.reportedMessage?.content?.slice(0, 1500) || null,
+        reportedMessageMediaUrl: params.reportedMessage?.mediaUrl || null,
         alsoBlocked: Boolean(params.alsoBlocked),
       });
     } catch (fsErr) {

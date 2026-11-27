@@ -32,14 +32,15 @@ __export(server_exports, {
   default: () => server_default
 });
 module.exports = __toCommonJS(server_exports);
-var import_express = __toESM(require("express"), 1);
+var import_express2 = __toESM(require("express"), 1);
 var import_dotenv = __toESM(require("dotenv"), 1);
 var import_path3 = __toESM(require("path"), 1);
 var import_vite = require("vite");
 var import_fs3 = __toESM(require("fs"), 1);
 var import_child_process = require("child_process");
-var import_nodemailer = __toESM(require("nodemailer"), 1);
-var import_dns = __toESM(require("dns"), 1);
+var import_nodemailer2 = __toESM(require("nodemailer"), 1);
+var import_dns2 = __toESM(require("dns"), 1);
+var import_genai = require("@google/genai");
 
 // server/db.ts
 var import_node_sqlite = require("node:sqlite");
@@ -239,6 +240,28 @@ db.exec(`
     created_at TEXT NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS user_reports (
+    id TEXT PRIMARY KEY,
+    reporter_id TEXT NOT NULL,
+    reported_user_id TEXT NOT NULL,
+    reported_username TEXT,
+    reported_display_name TEXT,
+    category TEXT NOT NULL,
+    details TEXT,
+    source TEXT NOT NULL DEFAULT 'profile',
+    conversation_id TEXT,
+    also_blocked INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'pending',
+    admin_id TEXT,
+    admin_note TEXT,
+    reviewed_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_user_reports_reporter ON user_reports(reporter_id);
+  CREATE INDEX IF NOT EXISTS idx_user_reports_reported ON user_reports(reported_user_id);
+  CREATE INDEX IF NOT EXISTS idx_user_reports_status ON user_reports(status, created_at);
+
   CREATE TABLE IF NOT EXISTS media_files (
     id TEXT PRIMARY KEY,
     mime_type TEXT NOT NULL,
@@ -248,6 +271,229 @@ db.exec(`
     mp3_path TEXT,
     created_at TEXT NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS bans (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    admin_id TEXT,
+    action_type TEXT NOT NULL,
+    status_applied TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    rule_broken TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    strike_number INTEGER NOT NULL DEFAULT 0,
+    duration_days INTEGER,
+    ban_until TEXT,
+    scheduled_deletion_at TEXT,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_bans_user ON bans(user_id);
+  CREATE INDEX IF NOT EXISTS idx_bans_status ON bans(status_applied, is_active);
+
+  CREATE TABLE IF NOT EXISTS appeals (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    ban_id TEXT,
+    reason TEXT NOT NULL,
+    verification_doc_url TEXT,
+    verification_doc_name TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    admin_id TEXT,
+    admin_note TEXT,
+    decision_due_at TEXT NOT NULL,
+    reviewed_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_appeals_user ON appeals(user_id);
+  CREATE INDEX IF NOT EXISTS idx_appeals_status ON appeals(status);
+
+  CREATE TABLE IF NOT EXISTS audit_logs (
+    id TEXT PRIMARY KEY,
+    admin_id TEXT NOT NULL,
+    target_user_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    details_json TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_audit_target ON audit_logs(target_user_id);
+  CREATE INDEX IF NOT EXISTS idx_audit_admin ON audit_logs(admin_id);
+
+  CREATE TABLE IF NOT EXISTS banned_identifiers (
+    id TEXT PRIMARY KEY,
+    identifier_type TEXT NOT NULL,
+    identifier_value TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    ban_id TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE(identifier_type, identifier_value)
+  );
+  CREATE INDEX IF NOT EXISTS idx_banned_id_lookup ON banned_identifiers(identifier_type, identifier_value);
+
+  -- ==========================================
+  -- FAMILY GROUP TABLES
+  -- ==========================================
+  CREATE TABLE IF NOT EXISTS families (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    photo_url TEXT,
+    owner_id TEXT NOT NULL,
+    member_count INTEGER NOT NULL DEFAULT 1,
+    max_members INTEGER NOT NULL DEFAULT 5000,
+    join_approval_required INTEGER NOT NULL DEFAULT 1,
+    only_admins_can_send INTEGER NOT NULL DEFAULT 0,
+    invite_code TEXT,
+    invite_link_enabled INTEGER NOT NULL DEFAULT 1,
+    pinned_messages_json TEXT NOT NULL DEFAULT '[]',
+    last_message_id TEXT,
+    last_message_text TEXT,
+    last_message_sender_id TEXT,
+    last_message_sender_name TEXT,
+    last_message_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_families_invite_code ON families(invite_code);
+
+  CREATE TABLE IF NOT EXISTS family_members (
+    family_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'member',
+    status TEXT NOT NULL DEFAULT 'active',
+    relation_tag TEXT,
+    display_name TEXT NOT NULL DEFAULT '',
+    username TEXT NOT NULL DEFAULT '',
+    avatar_url TEXT,
+    muted_until TEXT,
+    is_muted_always INTEGER NOT NULL DEFAULT 0,
+    last_read_at TEXT,
+    cleared_at TEXT,
+    joined_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    removed_at TEXT,
+    removed_by TEXT,
+    PRIMARY KEY (family_id, user_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_family_members_family_status ON family_members(family_id, status, display_name);
+  CREATE INDEX IF NOT EXISTS idx_family_members_user_status ON family_members(user_id, status, updated_at);
+
+  CREATE TABLE IF NOT EXISTS family_requests (
+    family_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    display_name TEXT NOT NULL DEFAULT '',
+    username TEXT NOT NULL DEFAULT '',
+    avatar_url TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    invite_code TEXT,
+    created_at TEXT NOT NULL,
+    reviewed_at TEXT,
+    reviewed_by TEXT,
+    PRIMARY KEY (family_id, user_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_family_requests_family_status ON family_requests(family_id, status, created_at);
+
+  CREATE TABLE IF NOT EXISTS family_invites (
+    id TEXT PRIMARY KEY,
+    family_id TEXT NOT NULL,
+    family_name TEXT NOT NULL,
+    family_photo_url TEXT,
+    inviter_id TEXT NOT NULL,
+    inviter_name TEXT NOT NULL,
+    invitee_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL,
+    responded_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_family_invites_invitee ON family_invites(invitee_id, status, created_at);
+  CREATE INDEX IF NOT EXISTS idx_family_invites_family ON family_invites(family_id, status);
+
+  CREATE TABLE IF NOT EXISTS family_invite_daily_limits (
+    user_id TEXT NOT NULL,
+    day_key TEXT NOT NULL,
+    invite_count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (user_id, day_key)
+  );
+
+  CREATE TABLE IF NOT EXISTS family_messages (
+    id TEXT PRIMARY KEY,
+    family_id TEXT NOT NULL,
+    sender_id TEXT NOT NULL,
+    sender_name TEXT NOT NULL,
+    sender_username TEXT,
+    sender_avatar TEXT,
+    sender_role TEXT,
+    sender_relation_tag TEXT,
+    type TEXT NOT NULL DEFAULT 'text',
+    content TEXT NOT NULL,
+    media_url TEXT,
+    media_type TEXT,
+    cloudinary_public_id TEXT,
+    b2_file_id TEXT,
+    b2_file_name TEXT,
+    reply_to_message_id TEXT,
+    reply_to_json TEXT,
+    mentions_json TEXT NOT NULL DEFAULT '[]',
+    reactions_json TEXT NOT NULL DEFAULT '{}',
+    is_pinned INTEGER NOT NULL DEFAULT 0,
+    is_deleted INTEGER NOT NULL DEFAULT 0,
+    deleted_by TEXT,
+    deleted_by_role TEXT,
+    safe_checkin_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_family_messages_family_created ON family_messages(family_id, created_at);
+
+  CREATE TABLE IF NOT EXISTS family_message_reads (
+    message_id TEXT NOT NULL,
+    family_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    display_name TEXT,
+    read_at TEXT NOT NULL,
+    PRIMARY KEY (message_id, user_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_family_reads_family_msg ON family_message_reads(family_id, message_id);
+
+  CREATE TABLE IF NOT EXISTS family_typing_status (
+    family_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (family_id, user_id)
+  );
+`);
+function ensureColumn(tableName, columnName, definition) {
+  const cols = db.prepare(`PRAGMA table_info(${tableName})`).all();
+  if (!cols.some((c) => c.name === columnName)) {
+    db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
+  }
+}
+ensureColumn("users", "status", "TEXT NOT NULL DEFAULT 'active'");
+ensureColumn("users", "strike_count", "INTEGER NOT NULL DEFAULT 0");
+ensureColumn("users", "ban_reason", "TEXT");
+ensureColumn("users", "rule_broken", "TEXT");
+ensureColumn("users", "ban_until", "TEXT");
+ensureColumn("users", "restricted_until", "TEXT");
+ensureColumn("users", "scheduled_deletion_at", "TEXT");
+ensureColumn("users", "restored_at", "TEXT");
+ensureColumn("users", "restored_notice_pending", "INTEGER DEFAULT 0");
+ensureColumn("users", "role", "TEXT NOT NULL DEFAULT 'user'");
+ensureColumn("users", "last_device_id", "TEXT");
+ensureColumn("sessions", "token_scope", "TEXT NOT NULL DEFAULT 'full'");
+ensureColumn("sessions", "device_id", "TEXT");
+ensureColumn("user_reports", "family_id", "TEXT");
+ensureColumn("user_reports", "family_name", "TEXT");
+ensureColumn("user_reports", "reported_message_id", "TEXT");
+ensureColumn("user_reports", "reported_message_content", "TEXT");
+ensureColumn("user_reports", "reported_message_media_url", "TEXT");
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
+  CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
+  UPDATE users SET status = 'suspended', ban_until = COALESCE(ban_until, banned_until)
+    WHERE banned_until IS NOT NULL AND banned_until != '' AND status = 'active';
+  UPDATE users SET role = 'admin' WHERE LOWER(email) = 'ravikantsharma925490@gmail.com';
 `);
 function generateId() {
   if (typeof import_crypto.default.randomUUID === "function") {
@@ -273,6 +519,9 @@ function verifyPassword(password, storedHash) {
     return false;
   }
 }
+function isAccountHiddenStatus(status) {
+  return status === "suspended" || status === "disabled" || status === "deactivated";
+}
 function formatAuthUser(row) {
   let metadata = {};
   if (row.user_metadata) {
@@ -288,12 +537,23 @@ function formatAuthUser(row) {
     phone: row.phone || void 0,
     email_confirmed: Boolean(row.email_confirmed),
     user_metadata: metadata,
-    banned_until: row.banned_until || null,
+    status: row.status || "active",
+    strike_count: Number(row.strike_count || 0),
+    ban_reason: row.ban_reason || null,
+    rule_broken: row.rule_broken || null,
+    banned_until: row.ban_until || row.banned_until || null,
+    ban_until: row.ban_until || row.banned_until || null,
+    restricted_until: row.restricted_until || null,
+    scheduled_deletion_at: row.scheduled_deletion_at || null,
+    restored_at: row.restored_at || null,
+    restored_notice_pending: Boolean(row.restored_notice_pending),
+    role: row.role || "user",
     created_at: row.created_at
   };
 }
 function formatProfile(row) {
   if (!row) return null;
+  const userRow = db.prepare("SELECT status, strike_count, role FROM users WHERE id = ? LIMIT 1").get(row.id);
   return {
     id: row.id,
     username: row.username,
@@ -307,28 +567,39 @@ function formatProfile(row) {
     cloudinary_public_id: row.cloudinary_public_id || void 0,
     b2_file_id: row.b2_file_id || void 0,
     b2_file_name: row.b2_file_name || void 0,
-    is_online: Boolean(row.is_online),
+    status: userRow?.status || "active",
+    strike_count: Number(userRow?.strike_count || 0),
+    role: userRow?.role || "user",
+    is_online: isAccountHiddenStatus(userRow?.status) ? false : Boolean(row.is_online),
     last_seen: row.last_seen,
     created_at: row.created_at,
     updated_at: row.updated_at
   };
 }
-function createSessionForUser(userId, ttlDays = 30) {
+function createSessionForUser(userId, ttlDays = 30, tokenScope = "full", deviceId) {
   const token = `lc_${import_crypto.default.randomBytes(32).toString("hex")}`;
   const now = /* @__PURE__ */ new Date();
   const expiresAt = new Date(now.getTime() + ttlDays * 24 * 60 * 60 * 1e3).toISOString();
   db.prepare(
-    "INSERT INTO sessions (token, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)"
-  ).run(token, userId, expiresAt, now.toISOString());
+    "INSERT INTO sessions (token, user_id, expires_at, created_at, token_scope, device_id) VALUES (?, ?, ?, ?, ?, ?)"
+  ).run(token, userId, expiresAt, now.toISOString(), tokenScope, deviceId || null);
+  if (deviceId) {
+    db.prepare("UPDATE users SET last_device_id = ? WHERE id = ?").run(deviceId, userId);
+  }
   return {
     access_token: token,
     expires_at: expiresAt,
+    token_scope: tokenScope,
     user_id: userId
   };
 }
+function revokeAllSessionsForUser(userId) {
+  if (!userId) return;
+  db.prepare("DELETE FROM sessions WHERE user_id = ?").run(userId);
+}
 function getUserBySessionToken(token) {
   if (!token) return null;
-  const sess = db.prepare("SELECT token, user_id, expires_at FROM sessions WHERE token = ?").get(token);
+  const sess = db.prepare("SELECT token, user_id, expires_at, token_scope FROM sessions WHERE token = ?").get(token);
   if (!sess) return null;
   if (new Date(sess.expires_at).getTime() <= Date.now()) {
     db.prepare("DELETE FROM sessions WHERE token = ?").run(token);
@@ -337,7 +608,11 @@ function getUserBySessionToken(token) {
   const userRow = db.prepare("SELECT * FROM users WHERE id = ?").get(sess.user_id);
   if (!userRow) return null;
   return {
-    session: { access_token: sess.token, expires_at: sess.expires_at },
+    session: {
+      access_token: sess.token,
+      expires_at: sess.expires_at,
+      token_scope: sess.token_scope || "full"
+    },
     userRow,
     user: formatAuthUser(userRow)
   };
@@ -345,6 +620,43 @@ function getUserBySessionToken(token) {
 function deleteSessionToken(token) {
   if (!token) return;
   db.prepare("DELETE FROM sessions WHERE token = ?").run(token);
+}
+function recordBannedIdentifiers(userId, banId, identifiers) {
+  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+  const stmt = db.prepare(
+    "INSERT OR IGNORE INTO banned_identifiers (id, identifier_type, identifier_value, user_id, ban_id, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+  );
+  if (identifiers.email && identifiers.email.trim()) {
+    stmt.run(generateId(), "email", identifiers.email.trim().toLowerCase(), userId, banId, nowIso);
+  }
+  if (identifiers.phone && identifiers.phone.trim()) {
+    const cleanPhone = identifiers.phone.replace(/\s+/g, "").trim();
+    if (cleanPhone) stmt.run(generateId(), "phone", cleanPhone, userId, banId, nowIso);
+  }
+  if (identifiers.deviceId && identifiers.deviceId.trim()) {
+    stmt.run(generateId(), "device", identifiers.deviceId.trim(), userId, banId, nowIso);
+  }
+}
+function clearBannedIdentifiersForUser(userId) {
+  db.prepare("DELETE FROM banned_identifiers WHERE user_id = ?").run(userId);
+}
+function findPermanentBanByIdentifier(identifiers) {
+  if (identifiers.email && identifiers.email.trim()) {
+    const row = db.prepare("SELECT * FROM banned_identifiers WHERE identifier_type = 'email' AND identifier_value = ? LIMIT 1").get(identifiers.email.trim().toLowerCase());
+    if (row) return { type: "email", ...row };
+  }
+  if (identifiers.phone && identifiers.phone.trim()) {
+    const cleanPhone = identifiers.phone.replace(/\s+/g, "").trim();
+    if (cleanPhone) {
+      const row = db.prepare("SELECT * FROM banned_identifiers WHERE identifier_type = 'phone' AND identifier_value = ? LIMIT 1").get(cleanPhone);
+      if (row) return { type: "phone", ...row };
+    }
+  }
+  if (identifiers.deviceId && identifiers.deviceId.trim()) {
+    const row = db.prepare("SELECT * FROM banned_identifiers WHERE identifier_type = 'device' AND identifier_value = ? LIMIT 1").get(identifiers.deviceId.trim());
+    if (row) return { type: "device", ...row };
+  }
+  return null;
 }
 function findUserByEmail(email) {
   return db.prepare("SELECT * FROM users WHERE LOWER(email) = LOWER(?) LIMIT 1").get(email.trim());
@@ -427,7 +739,83 @@ function upsertProfile(data) {
   }
   return getProfileById(data.id);
 }
-function deleteAccountCompletely(userId) {
+function handleOwnerDepartureFromFamilies(userId) {
+  const ownedFamilies = db.prepare("SELECT id, name, owner_id FROM families WHERE owner_id = ?").all(userId);
+  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+  for (const fam of ownedFamilies) {
+    let successor = db.prepare(
+      `SELECT user_id, display_name, username FROM family_members
+         WHERE family_id = ? AND status = 'active' AND role = 'admin' AND user_id != ?
+         ORDER BY joined_at ASC LIMIT 1`
+    ).get(fam.id, userId);
+    if (!successor) {
+      successor = db.prepare(
+        `SELECT user_id, display_name, username FROM family_members
+           WHERE family_id = ? AND status = 'active' AND role = 'member' AND user_id != ?
+           ORDER BY joined_at ASC LIMIT 1`
+      ).get(fam.id, userId);
+    }
+    if (successor) {
+      db.prepare("UPDATE family_members SET role = 'owner', updated_at = ? WHERE family_id = ? AND user_id = ?").run(
+        nowIso,
+        fam.id,
+        successor.user_id
+      );
+      db.prepare("UPDATE family_members SET status = 'left', role = 'member', updated_at = ? WHERE family_id = ? AND user_id = ?").run(
+        nowIso,
+        fam.id,
+        userId
+      );
+      const countRow = db.prepare("SELECT COUNT(*) as cnt FROM family_members WHERE family_id = ? AND status = 'active'").get(fam.id);
+      const sysMsgId = `fmsg_${generateId().replace(/-/g, "").slice(0, 20)}`;
+      const successorName = successor.display_name || successor.username || "Member";
+      const sysText = `Ownership transferred to ${successorName}`;
+      db.prepare(`
+        INSERT INTO family_messages (
+          id, family_id, sender_id, sender_name, type, content, mentions_json, reactions_json, is_pinned, is_deleted, created_at, updated_at
+        ) VALUES (?, ?, 'system', 'System', 'system', ?, '[]', '{}', 0, 0, ?, ?)
+      `).run(sysMsgId, fam.id, sysText, nowIso, nowIso);
+      db.prepare(`
+        UPDATE families SET
+          owner_id = ?,
+          member_count = ?,
+          last_message_id = ?,
+          last_message_text = ?,
+          last_message_sender_id = 'system',
+          last_message_sender_name = 'System',
+          last_message_at = ?,
+          updated_at = ?
+        WHERE id = ?
+      `).run(successor.user_id, Number(countRow?.cnt || 1), sysMsgId, sysText, nowIso, nowIso, fam.id);
+    } else {
+      db.prepare("DELETE FROM family_message_reads WHERE family_id = ?").run(fam.id);
+      db.prepare("DELETE FROM family_typing_status WHERE family_id = ?").run(fam.id);
+      db.prepare("DELETE FROM family_messages WHERE family_id = ?").run(fam.id);
+      db.prepare("DELETE FROM family_requests WHERE family_id = ?").run(fam.id);
+      db.prepare("DELETE FROM family_invites WHERE family_id = ?").run(fam.id);
+      db.prepare("DELETE FROM family_members WHERE family_id = ?").run(fam.id);
+      db.prepare("DELETE FROM families WHERE id = ?").run(fam.id);
+    }
+  }
+}
+function deleteAccountCompletely(userId, preserveBannedIdentifiers = false) {
+  handleOwnerDepartureFromFamilies(userId);
+  const memberFamilies = db.prepare("SELECT family_id FROM family_members WHERE user_id = ? AND status = 'active'").all(userId);
+  db.prepare("DELETE FROM family_message_reads WHERE user_id = ?").run(userId);
+  db.prepare("DELETE FROM family_typing_status WHERE user_id = ?").run(userId);
+  db.prepare("DELETE FROM family_requests WHERE user_id = ?").run(userId);
+  db.prepare("DELETE FROM family_invites WHERE inviter_id = ? OR invitee_id = ?").run(userId, userId);
+  db.prepare("DELETE FROM family_members WHERE user_id = ?").run(userId);
+  db.prepare("DELETE FROM family_invite_daily_limits WHERE user_id = ?").run(userId);
+  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+  for (const row of memberFamilies) {
+    const cnt = db.prepare("SELECT COUNT(*) as cnt FROM family_members WHERE family_id = ? AND status = 'active'").get(row.family_id);
+    db.prepare("UPDATE families SET member_count = ?, updated_at = ? WHERE id = ?").run(
+      Number(cnt?.cnt || 0),
+      nowIso,
+      row.family_id
+    );
+  }
   db.prepare("DELETE FROM sessions WHERE user_id = ?").run(userId);
   db.prepare("DELETE FROM follows WHERE follower_id = ? OR following_id = ?").run(userId, userId);
   db.prepare("DELETE FROM blocked_users WHERE blocker_id = ? OR blocked_id = ?").run(userId, userId);
@@ -438,8 +826,574 @@ function deleteAccountCompletely(userId) {
   db.prepare("DELETE FROM conversation_members WHERE user_id = ?").run(userId);
   db.prepare("DELETE FROM deleted_conversations WHERE user_id = ?").run(userId);
   db.prepare("DELETE FROM messages WHERE sender_id = ?").run(userId);
+  db.prepare("DELETE FROM appeals WHERE user_id = ?").run(userId);
+  db.prepare("DELETE FROM bans WHERE user_id = ?").run(userId);
+  if (!preserveBannedIdentifiers) {
+    db.prepare("DELETE FROM banned_identifiers WHERE user_id = ?").run(userId);
+  }
   db.prepare("DELETE FROM profiles WHERE id = ?").run(userId);
   db.prepare("DELETE FROM users WHERE id = ?").run(userId);
+}
+
+// server/moderationService.ts
+var import_nodemailer = __toESM(require("nodemailer"), 1);
+var import_dns = __toESM(require("dns"), 1);
+var SERIOUS_VIOLATION_RULES = /* @__PURE__ */ new Set([
+  "child_abuse",
+  "terrorism",
+  "scam",
+  "threats"
+]);
+var RULE_LABELS = {
+  harassment: "Harassment or Bullying",
+  spam: "Spam & Unsolicited Messaging",
+  impersonation: "Impersonation or Fake Identity",
+  hate_speech: "Hate Speech or Discrimination",
+  nudity: "Nudity or Explicit Content",
+  misinformation: "Harmful Misinformation",
+  community_guidelines: "Community Guidelines Violation",
+  child_abuse: "Child Sexual Exploitation or Abuse (Zero Tolerance)",
+  terrorism: "Terrorism & Violent Extremism (Zero Tolerance)",
+  scam: "Financial Scam or Fraud (Zero Tolerance)",
+  threats: "Credible Threats of Violence (Zero Tolerance)"
+};
+function formatRuleLabel(ruleBroken) {
+  if (!ruleBroken) return RULE_LABELS.community_guidelines;
+  return RULE_LABELS[ruleBroken] || ruleBroken;
+}
+function createModerationTransporter() {
+  const targetHost = process.env.SMTP_HOST || "smtp.gmail.com";
+  const targetPort = parseInt(process.env.SMTP_PORT || "587", 10);
+  const targetUser = process.env.SMTP_USER || process.env.GMAIL_USER || "";
+  const targetPass = process.env.SMTP_PASS || process.env.GMAIL_PASS || "";
+  const isGmail = targetHost.includes("gmail.com") || targetUser.endsWith("@gmail.com");
+  const finalHost = isGmail ? "smtp.gmail.com" : targetHost;
+  const finalPort = isGmail ? 587 : targetPort;
+  const isSecure = finalPort === 465;
+  return import_nodemailer.default.createTransport({
+    host: finalHost,
+    port: finalPort,
+    secure: isSecure,
+    requireTLS: !isSecure,
+    auth: { user: targetUser, pass: targetPass },
+    lookup: (hostname, _options, callback) => {
+      import_dns.default.lookup(hostname, { family: 4 }, callback);
+    },
+    connectionTimeout: 7e3,
+    greetingTimeout: 5e3,
+    socketTimeout: 8e3,
+    tls: { rejectUnauthorized: false }
+  });
+}
+function buildModerationTemplate(params) {
+  const {
+    kind,
+    displayName,
+    username,
+    email,
+    reason,
+    ruleBroken,
+    strikeCount,
+    banUntil,
+    scheduledDeletionAt,
+    appealUrl = process.env.APP_URL || "http://localhost:3000/?action=appeal",
+    adminNote
+  } = params;
+  const ruleTitle = formatRuleLabel(ruleBroken);
+  const formattedEndDate = banUntil ? new Date(banUntil).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" }) : null;
+  const formattedDeletionDate = scheduledDeletionAt ? new Date(scheduledDeletionAt).toLocaleString("en-US", { dateStyle: "medium" }) : null;
+  let accent = "#0095F6";
+  let badgeLabel = "Account Notice";
+  let headline = "LiveConnect Account Update";
+  let bodyLead = "We noticed activity on your account that requires your attention.";
+  let subject = `Account Update (@${username}) - LiveConnect`;
+  let notificationTitle = "Account Status Update";
+  let notificationMessage = reason;
+  let notificationType = "account_warning";
+  let ctaLabel = "Review Account Status";
+  if (kind === "warning") {
+    accent = "#D97706";
+    badgeLabel = `Strike ${strikeCount} \xB7 Warning`;
+    headline = "Community Guidelines Warning";
+    bodyLead = "Your account received an official warning. Repeated violations can lead to messaging restrictions, temporary suspension, or permanent removal.";
+    subject = `Official Warning: LiveConnect (@${username})`;
+    notificationTitle = "Account Warning Issued";
+    notificationMessage = `Rule: ${ruleTitle}. Reason: ${reason}. Please review our Community Guidelines.`;
+    notificationType = "account_warning";
+  } else if (kind === "restricted") {
+    accent = "#EA580C";
+    badgeLabel = `Strike ${strikeCount} \xB7 Restricted`;
+    headline = "Account Temporarily Restricted";
+    bodyLead = "Some features such as sending new direct messages, starting calls, and following new users have been temporarily restricted.";
+    subject = `Account Restricted: LiveConnect (@${username})`;
+    notificationTitle = "Account Features Restricted";
+    notificationMessage = `Messaging & calling restricted${formattedEndDate ? ` until ${formattedEndDate}` : ""}. Reason: ${reason}`;
+    notificationType = "account_restricted";
+  } else if (kind === "suspend") {
+    accent = "#DC2626";
+    badgeLabel = `Strike ${strikeCount} \xB7 Temporary Suspension`;
+    headline = "Your account has been suspended";
+    bodyLead = "Your account is temporarily invisible to others and all active sessions have been signed out. Your data has been preserved safely.";
+    subject = `Your account has been suspended - LiveConnect (@${username})`;
+    notificationTitle = "Account Suspended";
+    notificationMessage = `Suspended${formattedEndDate ? ` until ${formattedEndDate}` : ""}. Rule: ${ruleTitle}. Request a review if you think this is a mistake.`;
+    notificationType = "account_suspended";
+    ctaLabel = "Request Review / Appeal";
+  } else if (kind === "permanent_ban") {
+    accent = "#991B1B";
+    badgeLabel = "Permanent Ban \xB7 Disabled";
+    headline = "Your account has been permanently disabled";
+    bodyLead = "Due to repeated or severe violations of our safety policies, your LiveConnect account has been permanently disabled and all active sessions revoked.";
+    subject = `Account Permanently Disabled - LiveConnect (@${username})`;
+    notificationTitle = "Account Permanently Disabled";
+    notificationMessage = `Rule: ${ruleTitle}. Data scheduled for deletion${formattedDeletionDate ? ` on ${formattedDeletionDate}` : " in 30 days"} unless an appeal is approved.`;
+    notificationType = "account_disabled";
+    ctaLabel = "Submit Final Appeal";
+  } else if (kind === "restore") {
+    accent = "#16A34A";
+    badgeLabel = "Active \xB7 Restored";
+    headline = "Your account has been restored";
+    bodyLead = "Good news \u2014 your LiveConnect account is active again. Your profile, followers, and conversation history are visible and ready to use.";
+    subject = `Your account has been restored - LiveConnect (@${username})`;
+    notificationTitle = "Your account has been restored";
+    notificationMessage = `${reason || "Your account access has been restored and is now active."}`;
+    notificationType = "account_restored";
+    ctaLabel = "Open LiveConnect";
+  } else {
+    accent = "#0095F6";
+    badgeLabel = "Appeal Update";
+    headline = "Update on Your Account Review Request";
+    bodyLead = adminNote || reason;
+    subject = `Appeal Update - LiveConnect (@${username})`;
+    notificationTitle = "Appeal Review Update";
+    notificationMessage = adminNote || reason;
+    notificationType = "appeal_update";
+    ctaLabel = "View Appeal Status";
+  }
+  const emailHtml = `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:24px;background-color:#f8fafc;font-family:'Plus Jakarta Sans',Arial,sans-serif;color:#0f172a;">
+  <div style="max-width:540px;margin:0 auto;background:#ffffff;border:1px solid #e2e8f0;border-radius:16px;overflow:hidden;">
+    <div style="padding:24px 28px;border-bottom:1px solid #f1f5f9;">
+      <div style="font-size:18px;font-weight:800;color:#0f172a;letter-spacing:-0.02em;">LiveConnect Safety</div>
+      <div style="margin-top:6px;font-size:12px;font-weight:700;color:${accent};text-transform:uppercase;letter-spacing:0.06em;">${badgeLabel}</div>
+    </div>
+    <div style="padding:28px;">
+      <h1 style="margin:0 0 10px 0;font-size:20px;font-weight:800;color:#0f172a;">${headline}</h1>
+      <p style="margin:0 0 18px 0;font-size:14px;line-height:1.6;color:#475569;">Hi <strong>${displayName || username}</strong> (@${username}), ${bodyLead}</p>
+      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:16px;margin-bottom:20px;">
+        <div style="font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:0.05em;">Policy & Details</div>
+        <div style="margin-top:6px;font-size:14px;font-weight:700;color:#0f172a;">${ruleTitle}</div>
+        <div style="margin-top:4px;font-size:13px;color:#334155;line-height:1.5;">${reason}</div>
+        ${formattedEndDate && (kind === "suspend" || kind === "restricted") ? `<div style="margin-top:10px;font-size:12px;color:#0f172a;"><strong>Restriction ends:</strong> ${formattedEndDate}</div>` : ""}
+        ${formattedDeletionDate && kind === "permanent_ban" ? `<div style="margin-top:10px;font-size:12px;color:#991b1b;"><strong>Scheduled data removal:</strong> ${formattedDeletionDate} (unless appeal approved)</div>` : ""}
+        ${adminNote ? `<div style="margin-top:10px;font-size:12px;color:#334155;"><strong>Reviewer Note:</strong> ${adminNote}</div>` : ""}
+      </div>
+      <a href="${appealUrl}" style="display:inline-block;padding:12px 22px;background-color:${kind === "restore" ? "#0095F6" : accent};color:#ffffff;text-decoration:none;font-size:13px;font-weight:700;border-radius:10px;">${ctaLabel}</a>
+      <p style="margin:20px 0 0 0;font-size:12px;color:#94a3b8;">Sent to ${email} \xB7 LiveConnect Trust &amp; Safety</p>
+    </div>
+  </div>
+</body>
+</html>`;
+  return {
+    kind,
+    subject,
+    notificationTitle,
+    notificationMessage,
+    notificationType,
+    emailHtml
+  };
+}
+async function sendModerationEmail(toEmail, template) {
+  if (!toEmail || !toEmail.includes("@")) return false;
+  const user = process.env.SMTP_USER || process.env.GMAIL_USER;
+  const pass = process.env.SMTP_PASS || process.env.GMAIL_PASS;
+  if (process.env.DISABLE_SMTP === "true" || !user || !pass) return false;
+  try {
+    const transporter = createModerationTransporter();
+    await transporter.sendMail({
+      from: `"LiveConnect Safety" <${user}>`,
+      to: toEmail,
+      subject: template.subject,
+      html: template.emailHtml
+    });
+    return true;
+  } catch (err) {
+    console.warn(`[Moderation Email] Notice skipped for ${toEmail}:`, err?.message || err);
+    return false;
+  }
+}
+function insertTargetUserSystemNotification(targetUserId, adminId, template, referenceId) {
+  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+  const notifId = `notif_mod_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const systemActor = {
+    id: adminId || "system_safety",
+    username: "liveconnect_safety",
+    display_name: "LiveConnect Safety",
+    avatar_url: null
+  };
+  db.prepare(`
+    INSERT INTO notifications (id, user_id, actor_id, type, title, message, reference_id, actor_json, is_read, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+  `).run(
+    notifId,
+    targetUserId,
+    adminId || "system_safety",
+    template.notificationType,
+    template.notificationTitle,
+    template.notificationMessage,
+    referenceId || null,
+    JSON.stringify(systemActor),
+    nowIso
+  );
+}
+function writeAuditLog(params) {
+  db.prepare(
+    "INSERT INTO audit_logs (id, admin_id, target_user_id, action, reason, details_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+  ).run(
+    generateId(),
+    params.adminId,
+    params.targetUserId,
+    params.action,
+    params.reason,
+    params.details ? JSON.stringify(params.details) : null,
+    (/* @__PURE__ */ new Date()).toISOString()
+  );
+}
+async function restoreUserAccount(params) {
+  const target = findUserById(params.targetUserId);
+  if (!target) {
+    throw Object.assign(new Error("Target user not found"), { statusCode: 404 });
+  }
+  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+  const nextStrikes = params.decrementStrike ? Math.max(0, Number(target.strike_count || 0) - 1) : Number(target.strike_count || 0);
+  const restoreReason = params.reason?.trim() || (params.isAuto ? "Your temporary suspension period has ended and your account is active again." : "Your account has been reviewed and restored by our moderation team.");
+  const banRecordId = generateId();
+  db.exec("BEGIN");
+  try {
+    db.prepare(`
+      UPDATE users SET
+        status = 'active',
+        strike_count = ?,
+        ban_reason = NULL,
+        rule_broken = NULL,
+        ban_until = NULL,
+        banned_until = NULL,
+        restricted_until = NULL,
+        scheduled_deletion_at = NULL,
+        restored_at = ?,
+        restored_notice_pending = 1,
+        updated_at = ?
+      WHERE id = ?
+    `).run(nextStrikes, nowIso, nowIso, target.id);
+    db.prepare("UPDATE bans SET is_active = 0 WHERE user_id = ? AND is_active = 1").run(target.id);
+    db.prepare(`
+      INSERT INTO bans (
+        id, user_id, admin_id, action_type, status_applied, reason, rule_broken,
+        severity, strike_number, duration_days, ban_until, scheduled_deletion_at, is_active, created_at
+      ) VALUES (?, ?, ?, ?, 'active', ?, 'account_restored', 'system', ?, NULL, NULL, NULL, 0, ?)
+    `).run(
+      banRecordId,
+      target.id,
+      params.adminId,
+      params.isAuto ? "auto_restore" : "restore",
+      restoreReason,
+      nextStrikes,
+      nowIso
+    );
+    clearBannedIdentifiersForUser(target.id);
+    writeAuditLog({
+      adminId: params.adminId,
+      targetUserId: target.id,
+      action: params.isAuto ? "auto_restore" : "restore",
+      reason: restoreReason,
+      details: { previousStatus: target.status, strikeCount: nextStrikes, decremented: Boolean(params.decrementStrike) }
+    });
+    db.exec("COMMIT");
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
+  params.onStatusUpdated?.(target.id, "active");
+  const prof = getProfileById(target.id);
+  const template = buildModerationTemplate({
+    kind: "restore",
+    displayName: prof?.display_name || target.email.split("@")[0],
+    username: prof?.username || target.email.split("@")[0],
+    email: target.email,
+    reason: restoreReason,
+    ruleBroken: "account_restored",
+    strikeCount: nextStrikes
+  });
+  insertTargetUserSystemNotification(target.id, params.adminId, template, banRecordId);
+  const emailSent = await sendModerationEmail(target.email, template);
+  return {
+    success: true,
+    user: findUserById(target.id),
+    banId: banRecordId,
+    statusApplied: "active",
+    strikeCount: nextStrikes,
+    emailSent
+  };
+}
+async function executeModerationAction(params) {
+  const { adminId, targetUserId, action } = params;
+  const target = findUserById(targetUserId);
+  if (!target) {
+    throw Object.assign(new Error("Target user not found"), { statusCode: 404 });
+  }
+  if (action === "restore") {
+    return restoreUserAccount({
+      targetUserId,
+      adminId,
+      reason: params.reason,
+      decrementStrike: false,
+      isAuto: false,
+      onStatusUpdated: params.onStatusUpdated
+    });
+  }
+  if (target.role === "admin") {
+    throw Object.assign(new Error("Admins cannot warn, restrict, suspend, or ban other admin accounts."), {
+      statusCode: 403
+    });
+  }
+  const ruleBroken = (params.ruleBroken || "community_guidelines").trim();
+  const reason = (params.reason || formatRuleLabel(ruleBroken)).trim();
+  const currentStrikes = Number(target.strike_count || 0);
+  const nextStrikeCount = currentStrikes + 1;
+  const now = Date.now();
+  const nowIso = new Date(now).toISOString();
+  let resolvedAction;
+  if (SERIOUS_VIOLATION_RULES.has(ruleBroken)) {
+    resolvedAction = "ban";
+  } else if (action === "auto_strike") {
+    if (nextStrikeCount === 1) resolvedAction = "warn";
+    else if (nextStrikeCount === 2) resolvedAction = "restrict";
+    else if (nextStrikeCount === 3) resolvedAction = "suspend";
+    else resolvedAction = "ban";
+  } else if (action === "permanent_ban") {
+    resolvedAction = "ban";
+  } else {
+    resolvedAction = action;
+  }
+  let statusApplied = "active";
+  let severity = "warning";
+  let durationDays = null;
+  let banUntil = null;
+  let restrictedUntil = null;
+  let scheduledDeletionAt = null;
+  let templateKind = "warning";
+  if (resolvedAction === "warn") {
+    statusApplied = "active";
+    severity = "warning";
+    templateKind = "warning";
+  } else if (resolvedAction === "restrict") {
+    statusApplied = "restricted";
+    severity = "restriction";
+    durationDays = Math.min(30, Math.max(1, Number(params.durationDays || 2)));
+    restrictedUntil = new Date(now + durationDays * 24 * 60 * 60 * 1e3).toISOString();
+    templateKind = "restricted";
+  } else if (resolvedAction === "suspend") {
+    statusApplied = "suspended";
+    severity = "suspension";
+    durationDays = Math.min(30, Math.max(1, Number(params.durationDays || 7)));
+    banUntil = new Date(now + durationDays * 24 * 60 * 60 * 1e3).toISOString();
+    templateKind = "suspend";
+  } else {
+    statusApplied = "disabled";
+    severity = "permanent";
+    banUntil = "9999-12-31T23:59:59.000Z";
+    scheduledDeletionAt = new Date(now + 30 * 24 * 60 * 60 * 1e3).toISOString();
+    templateKind = "permanent_ban";
+  }
+  const banId = generateId();
+  const prof = getProfileById(target.id);
+  db.exec("BEGIN");
+  try {
+    db.prepare("UPDATE bans SET is_active = 0 WHERE user_id = ? AND is_active = 1").run(target.id);
+    db.prepare(`
+      UPDATE users SET
+        status = ?,
+        strike_count = ?,
+        ban_reason = ?,
+        rule_broken = ?,
+        ban_until = ?,
+        banned_until = ?,
+        restricted_until = ?,
+        scheduled_deletion_at = ?,
+        restored_notice_pending = 0,
+        updated_at = ?
+      WHERE id = ?
+    `).run(
+      statusApplied,
+      nextStrikeCount,
+      reason,
+      ruleBroken,
+      banUntil,
+      banUntil,
+      restrictedUntil,
+      scheduledDeletionAt,
+      nowIso,
+      target.id
+    );
+    db.prepare(`
+      INSERT INTO bans (
+        id, user_id, admin_id, action_type, status_applied, reason, rule_broken,
+        severity, strike_number, duration_days, ban_until, scheduled_deletion_at, is_active, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      banId,
+      target.id,
+      adminId,
+      resolvedAction,
+      statusApplied,
+      reason,
+      ruleBroken,
+      severity,
+      nextStrikeCount,
+      durationDays,
+      banUntil || restrictedUntil,
+      scheduledDeletionAt,
+      statusApplied === "active" ? 0 : 1,
+      nowIso
+    );
+    if (statusApplied === "suspended" || statusApplied === "disabled") {
+      revokeAllSessionsForUser(target.id);
+      db.prepare("UPDATE profiles SET is_online = 0, last_seen = ?, updated_at = ? WHERE id = ?").run(
+        nowIso,
+        nowIso,
+        target.id
+      );
+    }
+    if (statusApplied === "disabled") {
+      recordBannedIdentifiers(target.id, banId, {
+        email: target.email,
+        phone: target.phone || prof?.phone_number || null,
+        deviceId: target.last_device_id || null
+      });
+      handleOwnerDepartureFromFamilies(target.id);
+    }
+    writeAuditLog({
+      adminId,
+      targetUserId: target.id,
+      action: resolvedAction,
+      reason,
+      details: {
+        ruleBroken,
+        strikeNumber: nextStrikeCount,
+        statusApplied,
+        durationDays,
+        banUntil: banUntil || restrictedUntil,
+        scheduledDeletionAt
+      }
+    });
+    db.exec("COMMIT");
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
+  params.onStatusUpdated?.(target.id, statusApplied);
+  const template = buildModerationTemplate({
+    kind: templateKind,
+    displayName: prof?.display_name || target.email.split("@")[0],
+    username: prof?.username || target.email.split("@")[0],
+    email: target.email,
+    reason,
+    ruleBroken,
+    strikeCount: nextStrikeCount,
+    banUntil: banUntil || restrictedUntil,
+    scheduledDeletionAt
+  });
+  insertTargetUserSystemNotification(target.id, adminId, template, banId);
+  const emailSent = await sendModerationEmail(target.email, template);
+  return {
+    success: true,
+    user: findUserById(target.id),
+    banId,
+    statusApplied,
+    strikeCount: nextStrikeCount,
+    emailSent
+  };
+}
+async function resolveLiveUserRow(userId, onStatusUpdated) {
+  const row = findUserById(userId);
+  if (!row) return null;
+  const nowMs = Date.now();
+  if (row.status === "suspended" && row.ban_until && new Date(row.ban_until).getTime() <= nowMs) {
+    const res = await restoreUserAccount({
+      targetUserId: row.id,
+      adminId: "system_scheduler",
+      reason: "Temporary suspension expired automatically.",
+      decrementStrike: false,
+      isAuto: true,
+      onStatusUpdated
+    });
+    return res.user;
+  }
+  if (row.status === "restricted" && row.restricted_until && new Date(row.restricted_until).getTime() <= nowMs) {
+    const res = await restoreUserAccount({
+      targetUserId: row.id,
+      adminId: "system_scheduler",
+      reason: "Temporary feature restriction expired automatically.",
+      decrementStrike: false,
+      isAuto: true,
+      onStatusUpdated
+    });
+    return res.user;
+  }
+  return row;
+}
+async function runScheduledModerationSweep(onStatusUpdated) {
+  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+  const expiredSuspensions = db.prepare(
+    "SELECT id FROM users WHERE status = 'suspended' AND ban_until IS NOT NULL AND ban_until <= ?"
+  ).all(nowIso);
+  for (const row of expiredSuspensions) {
+    await restoreUserAccount({
+      targetUserId: row.id,
+      adminId: "system_scheduler",
+      reason: "Your temporary suspension period has completed and your account is active again.",
+      decrementStrike: false,
+      isAuto: true,
+      onStatusUpdated
+    }).catch(() => {
+    });
+  }
+  const expiredRestrictions = db.prepare(
+    "SELECT id FROM users WHERE status = 'restricted' AND restricted_until IS NOT NULL AND restricted_until <= ?"
+  ).all(nowIso);
+  for (const row of expiredRestrictions) {
+    await restoreUserAccount({
+      targetUserId: row.id,
+      adminId: "system_scheduler",
+      reason: "Your temporary restriction period has completed.",
+      decrementStrike: false,
+      isAuto: true,
+      onStatusUpdated
+    }).catch(() => {
+    });
+  }
+  const expiredPermanentBans = db.prepare(
+    "SELECT id, email FROM users WHERE status = 'disabled' AND scheduled_deletion_at IS NOT NULL AND scheduled_deletion_at <= ?"
+  ).all(nowIso);
+  for (const row of expiredPermanentBans) {
+    const openAppeal = db.prepare("SELECT id FROM appeals WHERE user_id = ? AND status IN ('pending', 'approved') LIMIT 1").get(row.id);
+    if (openAppeal) continue;
+    writeAuditLog({
+      adminId: "system_scheduler",
+      targetUserId: row.id,
+      action: "permanent_ban_data_purge",
+      reason: "30-day retention period elapsed with no approved appeal; account data deleted while banned identifiers remain blocked."
+    });
+    deleteAccountCompletely(row.id, true);
+  }
+}
+function startModerationScheduler(onStatusUpdated) {
+  void runScheduledModerationSweep(onStatusUpdated);
+  return setInterval(() => {
+    void runScheduledModerationSweep(onStatusUpdated);
+  }, 6e4);
 }
 
 // server/cloudinaryService.ts
@@ -595,6 +1549,1767 @@ async function deleteAssetFromCloudinary(publicId, resourceType = "image") {
   return true;
 }
 
+// server/familyRoutes.ts
+var import_express = __toESM(require("express"), 1);
+var import_crypto2 = __toESM(require("crypto"), 1);
+var MAX_MEMBERS = 5e3;
+var LARGE_FAMILY_THRESHOLD = 50;
+var MAX_INVITE_BATCH = 10;
+var MAX_DAILY_INVITES = 50;
+var MAX_PINNED_MESSAGES = 3;
+var VALID_MUTE_DURATIONS = /* @__PURE__ */ new Set(["1h", "8h", "1w", "always", "off"]);
+var familyMsgRateBuckets = /* @__PURE__ */ new Map();
+function checkFamilyMessageRateLimit(userId) {
+  const now = Date.now();
+  const cutoff = now - 1e4;
+  const recent = (familyMsgRateBuckets.get(userId) || []).filter((ts) => ts > cutoff);
+  if (recent.length >= 20) {
+    familyMsgRateBuckets.set(userId, recent);
+    return false;
+  }
+  recent.push(now);
+  familyMsgRateBuckets.set(userId, recent);
+  return true;
+}
+function generateInviteCode() {
+  return `fam_${import_crypto2.default.randomBytes(6).toString("hex")}`;
+}
+function safeJsonParse(raw, fallback) {
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
+}
+function formatFamilyRow(row, includePendingCount = false) {
+  if (!row) return null;
+  let pendingRequestsCount;
+  if (includePendingCount) {
+    const cnt = db.prepare("SELECT COUNT(*) as cnt FROM family_requests WHERE family_id = ? AND status = 'pending'").get(row.id);
+    pendingRequestsCount = Number(cnt?.cnt || 0);
+  }
+  return {
+    id: row.id,
+    name: row.name,
+    photoUrl: row.photo_url || null,
+    ownerId: row.owner_id,
+    memberCount: Number(row.member_count || 0),
+    maxMembers: Number(row.max_members || MAX_MEMBERS),
+    joinApprovalRequired: Boolean(row.join_approval_required),
+    onlyAdminsCanSend: Boolean(row.only_admins_can_send),
+    inviteCode: row.invite_link_enabled ? row.invite_code || null : null,
+    inviteLinkEnabled: Boolean(row.invite_link_enabled),
+    pinnedMessages: safeJsonParse(row.pinned_messages_json, []),
+    lastMessageId: row.last_message_id || null,
+    lastMessageText: row.last_message_text || null,
+    lastMessageSenderId: row.last_message_sender_id || null,
+    lastMessageSenderName: row.last_message_sender_name || null,
+    lastMessageAt: row.last_message_at || null,
+    pendingRequestsCount,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+function formatMemberRow(row, hidePresence) {
+  return {
+    userId: row.user_id,
+    familyId: row.family_id,
+    role: row.role,
+    status: row.status,
+    relationTag: row.relation_tag || null,
+    displayName: row.live_display_name || row.display_name || row.username || "User",
+    username: row.live_username || row.username || "user",
+    avatarUrl: row.live_avatar_url !== void 0 ? row.live_avatar_url : row.avatar_url || null,
+    isOnline: hidePresence ? false : Boolean(row.live_is_online),
+    lastSeen: hidePresence ? null : row.live_last_seen || null,
+    joinedAt: row.joined_at,
+    updatedAt: row.updated_at,
+    removedAt: row.removed_at || null,
+    removedBy: row.removed_by || null
+  };
+}
+function computeUnreadCount(familyId, userId, lastReadAt, clearedAt, joinedAt) {
+  const baseline = [lastReadAt, clearedAt, joinedAt].filter((v) => Boolean(v)).sort().pop() || joinedAt;
+  const row = db.prepare(
+    `SELECT COUNT(*) as cnt FROM family_messages
+       WHERE family_id = ? AND created_at > ? AND sender_id != ? AND is_deleted = 0`
+  ).get(familyId, baseline, userId);
+  return Number(row?.cnt || 0);
+}
+function insertNotificationRow(params) {
+  const actor = params.actorId && params.actorId !== "system" ? getProfileById(params.actorId) : null;
+  db.prepare(`
+    INSERT INTO notifications (id, user_id, actor_id, type, title, message, reference_id, actor_json, is_read, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+  `).run(
+    generateId(),
+    params.userId,
+    params.actorId,
+    params.type,
+    params.title.slice(0, 140),
+    params.message.slice(0, 320),
+    params.referenceId || null,
+    actor ? JSON.stringify(actor) : null,
+    (/* @__PURE__ */ new Date()).toISOString()
+  );
+}
+function insertSystemMessage(familyId, text) {
+  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+  const msgId = `fmsg_${generateId().replace(/-/g, "").slice(0, 20)}`;
+  db.prepare(`
+    INSERT INTO family_messages (
+      id, family_id, sender_id, sender_name, type, content,
+      mentions_json, reactions_json, is_pinned, is_deleted, created_at, updated_at
+    ) VALUES (?, ?, 'system', 'System', 'system', ?, '[]', '{}', 0, 0, ?, ?)
+  `).run(msgId, familyId, text, nowIso, nowIso);
+  db.prepare(`
+    UPDATE families SET
+      last_message_id = ?,
+      last_message_text = ?,
+      last_message_sender_id = 'system',
+      last_message_sender_name = 'System',
+      last_message_at = ?,
+      updated_at = ?
+    WHERE id = ?
+  `).run(msgId, text, nowIso, nowIso, familyId);
+  return msgId;
+}
+function recalcFamilyMemberCount(familyId) {
+  const row = db.prepare("SELECT COUNT(*) as cnt FROM family_members WHERE family_id = ? AND status = 'active'").get(familyId);
+  const cnt = Number(row?.cnt || 0);
+  db.prepare("UPDATE families SET member_count = ?, updated_at = ? WHERE id = ?").run(
+    cnt,
+    (/* @__PURE__ */ new Date()).toISOString(),
+    familyId
+  );
+  return cnt;
+}
+function formatMessageRow(row, seenCountMap) {
+  const replyTo = safeJsonParse(row.reply_to_json, null);
+  return {
+    id: row.id,
+    familyId: row.family_id,
+    senderId: row.sender_id,
+    senderName: row.sender_name,
+    senderUsername: row.sender_username || null,
+    senderAvatar: row.sender_avatar || null,
+    senderRole: row.sender_role || "member",
+    senderRelationTag: row.sender_relation_tag || null,
+    type: row.type,
+    content: row.is_deleted ? "This message was deleted" : row.content,
+    mediaUrl: row.is_deleted ? null : row.media_url || null,
+    mediaType: row.is_deleted ? null : row.media_type || null,
+    cloudinaryPublicId: row.is_deleted ? null : row.cloudinary_public_id || null,
+    b2FileId: row.is_deleted ? null : row.b2_file_id || null,
+    b2FileName: row.is_deleted ? null : row.b2_file_name || null,
+    replyToMessageId: row.reply_to_message_id || null,
+    replyToMessage: replyTo,
+    mentions: safeJsonParse(row.mentions_json, []),
+    reactions: row.is_deleted ? {} : safeJsonParse(row.reactions_json, {}),
+    isPinned: Boolean(row.is_pinned),
+    isDeleted: Boolean(row.is_deleted),
+    deletedBy: row.deleted_by || null,
+    deletedByRole: row.deleted_by_role || null,
+    safeCheckInAt: row.safe_checkin_at || null,
+    seenCount: seenCountMap ? Number(seenCountMap.get(row.id) || 0) : 0,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+function createFamilyRouter(requireAuth2) {
+  const router = import_express.default.Router();
+  router.use(requireAuth2);
+  function rejectIfRestricted(req, res) {
+    const userRow = req.authUserRow;
+    if (userRow?.status === "restricted") {
+      res.status(403).json({
+        error: "Your account is temporarily restricted from sending messages or managing Family groups.",
+        code: "ACCOUNT_RESTRICTED"
+      });
+      return true;
+    }
+    return false;
+  }
+  function getActiveMembership(familyId, userId) {
+    return db.prepare("SELECT * FROM family_members WHERE family_id = ? AND user_id = ? LIMIT 1").get(familyId, userId);
+  }
+  router.get("/my", (req, res) => {
+    try {
+      const userId = req.authUserId;
+      const memberRows = db.prepare(`
+          SELECT fm.*, f.id as f_id, f.name, f.photo_url, f.owner_id, f.member_count, f.max_members,
+                 f.join_approval_required, f.only_admins_can_send, f.invite_code, f.invite_link_enabled,
+                 f.pinned_messages_json, f.last_message_id, f.last_message_text, f.last_message_sender_id,
+                 f.last_message_sender_name, f.last_message_at, f.created_at as f_created_at, f.updated_at as f_updated_at
+          FROM family_members fm
+          INNER JOIN families f ON f.id = fm.family_id
+          WHERE fm.user_id = ? AND fm.status IN ('active', 'pending')
+          ORDER BY COALESCE(f.last_message_at, f.updated_at) DESC
+        `).all(userId);
+      const memberships = memberRows.map((row) => {
+        const isPrivileged = row.status === "active" && (row.role === "owner" || row.role === "admin");
+        const unreadCount = row.status === "active" ? computeUnreadCount(row.family_id, userId, row.last_read_at, row.cleared_at, row.joined_at) : 0;
+        const familyObj = formatFamilyRow(
+          {
+            id: row.f_id,
+            name: row.name,
+            photo_url: row.photo_url,
+            owner_id: row.owner_id,
+            member_count: row.member_count,
+            max_members: row.max_members,
+            join_approval_required: row.join_approval_required,
+            only_admins_can_send: row.only_admins_can_send,
+            invite_code: row.invite_code,
+            invite_link_enabled: row.invite_link_enabled,
+            pinned_messages_json: row.pinned_messages_json,
+            last_message_id: row.last_message_id,
+            last_message_text: row.last_message_text,
+            last_message_sender_id: row.last_message_sender_id,
+            last_message_sender_name: row.last_message_sender_name,
+            last_message_at: row.last_message_at,
+            created_at: row.f_created_at,
+            updated_at: row.f_updated_at
+          },
+          isPrivileged
+        );
+        return {
+          familyId: row.family_id,
+          userId: row.user_id,
+          role: row.role,
+          status: row.status,
+          relationTag: row.relation_tag || null,
+          mutedUntil: row.muted_until || null,
+          isMutedAlways: Boolean(row.is_muted_always),
+          lastReadAt: row.last_read_at || null,
+          clearedAt: row.cleared_at || null,
+          unreadCount,
+          joinedAt: row.joined_at,
+          updatedAt: row.updated_at,
+          family: familyObj
+        };
+      });
+      const invites = db.prepare(
+        `SELECT * FROM family_invites
+           WHERE invitee_id = ? AND status = 'pending'
+           ORDER BY created_at DESC LIMIT 50`
+      ).all(userId).map((inv) => ({
+        id: inv.id,
+        familyId: inv.family_id,
+        familyName: inv.family_name,
+        familyPhotoUrl: inv.family_photo_url || null,
+        inviterId: inv.inviter_id,
+        inviterName: inv.inviter_name,
+        inviteeId: inv.invitee_id,
+        status: inv.status,
+        createdAt: inv.created_at,
+        respondedAt: inv.responded_at || null
+      }));
+      return res.json({ memberships, invites });
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Failed to load Families" });
+    }
+  });
+  router.post("/", (req, res) => {
+    try {
+      if (rejectIfRestricted(req, res)) return;
+      const userId = req.authUserId;
+      const { name, photoUrl, joinApprovalRequired, relationTag } = req.body || {};
+      const cleanName = typeof name === "string" ? name.trim().slice(0, 80) : "";
+      if (!cleanName) {
+        return res.status(400).json({ error: "Family name is required." });
+      }
+      const cleanPhoto = typeof photoUrl === "string" && photoUrl.trim() ? photoUrl.trim().slice(0, 500) : null;
+      const cleanRelation = typeof relationTag === "string" && relationTag.trim() ? relationTag.trim().slice(0, 32) : null;
+      const approvalFlag = joinApprovalRequired === void 0 ? 1 : joinApprovalRequired ? 1 : 0;
+      const profile = getProfileById(userId);
+      const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+      const familyId = `fam_${generateId().replace(/-/g, "").slice(0, 20)}`;
+      const inviteCode = generateInviteCode();
+      const sysMsgId = `fmsg_${generateId().replace(/-/g, "").slice(0, 20)}`;
+      const ownerDisplay = profile?.display_name || profile?.username || "Owner";
+      const welcomeText = `${ownerDisplay} created "${cleanName}"`;
+      db.exec("BEGIN");
+      try {
+        db.prepare(`
+          INSERT INTO families (
+            id, name, photo_url, owner_id, member_count, max_members,
+            join_approval_required, only_admins_can_send, invite_code, invite_link_enabled,
+            pinned_messages_json, last_message_id, last_message_text, last_message_sender_id,
+            last_message_sender_name, last_message_at, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, 1, ?, ?, 0, ?, 1, '[]', ?, ?, 'system', 'System', ?, ?, ?)
+        `).run(
+          familyId,
+          cleanName,
+          cleanPhoto,
+          userId,
+          MAX_MEMBERS,
+          approvalFlag,
+          inviteCode,
+          sysMsgId,
+          welcomeText,
+          nowIso,
+          nowIso,
+          nowIso
+        );
+        db.prepare(`
+          INSERT INTO family_members (
+            family_id, user_id, role, status, relation_tag, display_name, username, avatar_url,
+            muted_until, is_muted_always, last_read_at, joined_at, updated_at
+          ) VALUES (?, ?, 'owner', 'active', ?, ?, ?, ?, NULL, 0, ?, ?, ?)
+        `).run(
+          familyId,
+          userId,
+          cleanRelation,
+          ownerDisplay,
+          profile?.username || "user",
+          profile?.avatar_url || null,
+          nowIso,
+          nowIso,
+          nowIso
+        );
+        db.prepare(`
+          INSERT INTO family_messages (
+            id, family_id, sender_id, sender_name, type, content,
+            mentions_json, reactions_json, is_pinned, is_deleted, created_at, updated_at
+          ) VALUES (?, ?, 'system', 'System', 'system', ?, '[]', '{}', 0, 0, ?, ?)
+        `).run(sysMsgId, familyId, welcomeText, nowIso, nowIso);
+        db.exec("COMMIT");
+      } catch (err) {
+        db.exec("ROLLBACK");
+        throw err;
+      }
+      const famRow = db.prepare("SELECT * FROM families WHERE id = ?").get(familyId);
+      const memRow = db.prepare("SELECT * FROM family_members WHERE family_id = ? AND user_id = ?").get(familyId, userId);
+      return res.json({
+        family: formatFamilyRow(famRow, true),
+        membership: {
+          familyId,
+          userId,
+          role: "owner",
+          status: "active",
+          relationTag: cleanRelation,
+          mutedUntil: null,
+          isMutedAlways: false,
+          lastReadAt: memRow?.last_read_at || nowIso,
+          clearedAt: null,
+          unreadCount: 0,
+          joinedAt: nowIso,
+          updatedAt: nowIso,
+          family: formatFamilyRow(famRow, true)
+        }
+      });
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Failed to create Family" });
+    }
+  });
+  router.get("/by-invite/:code", (req, res) => {
+    try {
+      const userId = req.authUserId;
+      const code = String(req.params.code || "").trim();
+      if (!code) return res.status(400).json({ error: "Invite code is required." });
+      const fam = db.prepare("SELECT * FROM families WHERE invite_code = ? AND invite_link_enabled = 1 LIMIT 1").get(code);
+      if (!fam) {
+        return res.status(404).json({ error: "Invite link is invalid or has been disabled." });
+      }
+      const mem = getActiveMembership(fam.id, userId);
+      return res.json({
+        family: {
+          id: fam.id,
+          name: fam.name,
+          photoUrl: fam.photo_url || null,
+          memberCount: Number(fam.member_count || 0),
+          maxMembers: Number(fam.max_members || MAX_MEMBERS),
+          joinApprovalRequired: Boolean(fam.join_approval_required)
+        },
+        membershipStatus: mem?.status || null
+      });
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Failed to look up invite link" });
+    }
+  });
+  router.post("/join-by-code", (req, res) => {
+    try {
+      if (rejectIfRestricted(req, res)) return;
+      const userId = req.authUserId;
+      const code = String(req.body?.code || "").trim();
+      if (!code) return res.status(400).json({ error: "Invite code is required." });
+      const fam = db.prepare("SELECT * FROM families WHERE invite_code = ? AND invite_link_enabled = 1 LIMIT 1").get(code);
+      if (!fam) {
+        return res.status(404).json({ error: "This invite link is invalid, reset, or disabled." });
+      }
+      const existing = getActiveMembership(fam.id, userId);
+      if (existing?.status === "active") {
+        return res.json({
+          status: "active",
+          family: formatFamilyRow(fam, existing.role === "owner" || existing.role === "admin")
+        });
+      }
+      if (existing?.status === "removed") {
+        return res.status(403).json({
+          error: "You were removed from this Family and cannot rejoin until an Owner or Admin allows you again.",
+          code: "FAMILY_REMOVED"
+        });
+      }
+      if (Number(fam.member_count || 0) >= MAX_MEMBERS) {
+        return res.status(400).json({ error: `This Family has reached the maximum of ${MAX_MEMBERS} members.` });
+      }
+      const profile = getProfileById(userId);
+      const displayName = profile?.display_name || profile?.username || "Member";
+      const username = profile?.username || "user";
+      const avatarUrl = profile?.avatar_url || null;
+      const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+      if (fam.join_approval_required) {
+        db.prepare(`
+          INSERT INTO family_requests (family_id, user_id, display_name, username, avatar_url, status, invite_code, created_at)
+          VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+          ON CONFLICT(family_id, user_id) DO UPDATE SET
+            display_name = excluded.display_name,
+            username = excluded.username,
+            avatar_url = excluded.avatar_url,
+            status = 'pending',
+            invite_code = excluded.invite_code,
+            created_at = excluded.created_at,
+            reviewed_at = NULL,
+            reviewed_by = NULL
+        `).run(fam.id, userId, displayName, username, avatarUrl, code, nowIso);
+        db.prepare(`
+          INSERT INTO family_members (
+            family_id, user_id, role, status, display_name, username, avatar_url, joined_at, updated_at
+          ) VALUES (?, ?, 'member', 'pending', ?, ?, ?, ?, ?)
+          ON CONFLICT(family_id, user_id) DO UPDATE SET
+            status = 'pending',
+            display_name = excluded.display_name,
+            username = excluded.username,
+            avatar_url = excluded.avatar_url,
+            updated_at = excluded.updated_at
+        `).run(fam.id, userId, displayName, username, avatarUrl, nowIso, nowIso);
+        const admins = db.prepare("SELECT user_id FROM family_members WHERE family_id = ? AND status = 'active' AND role IN ('owner', 'admin')").all(fam.id);
+        for (const admin of admins) {
+          insertNotificationRow({
+            userId: admin.user_id,
+            actorId: userId,
+            type: "family_join_request",
+            title: `Join request: ${fam.name}`,
+            message: `${displayName} (@${username}) requested to join ${fam.name}.`,
+            referenceId: fam.id
+          });
+        }
+        return res.json({ status: "pending", familyId: fam.id, familyName: fam.name });
+      }
+      const autoMute = Number(fam.member_count || 0) >= LARGE_FAMILY_THRESHOLD ? 1 : 0;
+      db.prepare(`
+        INSERT INTO family_members (
+          family_id, user_id, role, status, display_name, username, avatar_url,
+          muted_until, is_muted_always, last_read_at, joined_at, updated_at
+        ) VALUES (?, ?, 'member', 'active', ?, ?, ?, NULL, ?, ?, ?, ?)
+        ON CONFLICT(family_id, user_id) DO UPDATE SET
+          role = 'member',
+          status = 'active',
+          display_name = excluded.display_name,
+          username = excluded.username,
+          avatar_url = excluded.avatar_url,
+          is_muted_always = excluded.is_muted_always,
+          last_read_at = excluded.last_read_at,
+          joined_at = excluded.joined_at,
+          updated_at = excluded.updated_at,
+          removed_at = NULL,
+          removed_by = NULL
+      `).run(fam.id, userId, displayName, username, avatarUrl, autoMute, nowIso, nowIso, nowIso);
+      recalcFamilyMemberCount(fam.id);
+      insertSystemMessage(fam.id, `${displayName} joined via invite link`);
+      const updatedFam = db.prepare("SELECT * FROM families WHERE id = ?").get(fam.id);
+      return res.json({ status: "active", family: formatFamilyRow(updatedFam, false) });
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Failed to join Family" });
+    }
+  });
+  router.post("/invites/:inviteId/respond", (req, res) => {
+    try {
+      const userId = req.authUserId;
+      const { inviteId } = req.params;
+      const action = String(req.body?.action || "").trim().toLowerCase();
+      if (action !== "accept" && action !== "decline") {
+        return res.status(400).json({ error: "action must be accept or decline." });
+      }
+      if (action === "accept" && rejectIfRestricted(req, res)) return;
+      const invite = db.prepare("SELECT * FROM family_invites WHERE id = ? AND invitee_id = ? LIMIT 1").get(inviteId, userId);
+      if (!invite) {
+        return res.status(404).json({ error: "Invite not found." });
+      }
+      if (invite.status !== "pending") {
+        return res.json({ success: true, status: invite.status, familyId: invite.family_id });
+      }
+      const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+      if (action === "decline") {
+        db.prepare("UPDATE family_invites SET status = 'declined', responded_at = ? WHERE id = ?").run(nowIso, inviteId);
+        return res.json({ success: true, status: "declined" });
+      }
+      const fam = db.prepare("SELECT * FROM families WHERE id = ? LIMIT 1").get(invite.family_id);
+      if (!fam) {
+        db.prepare("UPDATE family_invites SET status = 'declined', responded_at = ? WHERE id = ?").run(nowIso, inviteId);
+        return res.status(404).json({ error: "This Family no longer exists." });
+      }
+      const existing = getActiveMembership(fam.id, userId);
+      if (existing?.status === "removed") {
+        return res.status(403).json({
+          error: "You were removed from this Family and cannot join until an Owner or Admin allows you again."
+        });
+      }
+      if (existing?.status !== "active" && Number(fam.member_count || 0) >= MAX_MEMBERS) {
+        return res.status(400).json({ error: `This Family has reached the ${MAX_MEMBERS} member limit.` });
+      }
+      const profile = getProfileById(userId);
+      const displayName = profile?.display_name || profile?.username || "Member";
+      const username = profile?.username || "user";
+      const autoMute = Number(fam.member_count || 0) >= LARGE_FAMILY_THRESHOLD ? 1 : 0;
+      db.exec("BEGIN");
+      try {
+        db.prepare("UPDATE family_invites SET status = 'accepted', responded_at = ? WHERE id = ?").run(nowIso, inviteId);
+        if (existing?.status !== "active") {
+          db.prepare(`
+            INSERT INTO family_members (
+              family_id, user_id, role, status, display_name, username, avatar_url,
+              muted_until, is_muted_always, last_read_at, joined_at, updated_at
+            ) VALUES (?, ?, 'member', 'active', ?, ?, ?, NULL, ?, ?, ?, ?)
+            ON CONFLICT(family_id, user_id) DO UPDATE SET
+              role = 'member',
+              status = 'active',
+              display_name = excluded.display_name,
+              username = excluded.username,
+              avatar_url = excluded.avatar_url,
+              is_muted_always = excluded.is_muted_always,
+              last_read_at = excluded.last_read_at,
+              joined_at = excluded.joined_at,
+              updated_at = excluded.updated_at,
+              removed_at = NULL,
+              removed_by = NULL
+          `).run(fam.id, userId, displayName, username, profile?.avatar_url || null, autoMute, nowIso, nowIso, nowIso);
+          db.prepare("DELETE FROM family_requests WHERE family_id = ? AND user_id = ?").run(fam.id, userId);
+          recalcFamilyMemberCount(fam.id);
+          insertSystemMessage(fam.id, `${invite.inviter_name} added ${displayName}`);
+        }
+        db.exec("COMMIT");
+      } catch (err) {
+        db.exec("ROLLBACK");
+        throw err;
+      }
+      const updatedFam = db.prepare("SELECT * FROM families WHERE id = ?").get(fam.id);
+      return res.json({ success: true, status: "accepted", familyId: fam.id, family: formatFamilyRow(updatedFam, false) });
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Failed to respond to invite" });
+    }
+  });
+  router.get("/:familyId", (req, res) => {
+    try {
+      const userId = req.authUserId;
+      const { familyId } = req.params;
+      const fam = db.prepare("SELECT * FROM families WHERE id = ? LIMIT 1").get(familyId);
+      if (!fam) return res.status(404).json({ error: "Family not found." });
+      const mem = getActiveMembership(familyId, userId);
+      if (!mem) return res.status(403).json({ error: "You are not a member of this Family." });
+      if (mem.status === "removed") {
+        return res.status(403).json({
+          error: "You were removed from this Family.",
+          code: "FAMILY_REMOVED"
+        });
+      }
+      if (mem.status === "pending") {
+        return res.json({
+          family: {
+            id: fam.id,
+            name: fam.name,
+            photoUrl: fam.photo_url || null,
+            ownerId: fam.owner_id,
+            memberCount: Number(fam.member_count || 0),
+            maxMembers: Number(fam.max_members || MAX_MEMBERS),
+            joinApprovalRequired: Boolean(fam.join_approval_required),
+            onlyAdminsCanSend: Boolean(fam.only_admins_can_send),
+            inviteLinkEnabled: Boolean(fam.invite_link_enabled),
+            pinnedMessages: [],
+            createdAt: fam.created_at,
+            updatedAt: fam.updated_at
+          },
+          membership: {
+            familyId: mem.family_id,
+            userId: mem.user_id,
+            role: mem.role,
+            status: "pending",
+            relationTag: mem.relation_tag || null,
+            mutedUntil: mem.muted_until || null,
+            isMutedAlways: Boolean(mem.is_muted_always),
+            unreadCount: 0,
+            joinedAt: mem.joined_at,
+            updatedAt: mem.updated_at
+          }
+        });
+      }
+      const isPrivileged = mem.role === "owner" || mem.role === "admin";
+      return res.json({
+        family: formatFamilyRow(fam, isPrivileged),
+        membership: {
+          familyId: mem.family_id,
+          userId: mem.user_id,
+          role: mem.role,
+          status: mem.status,
+          relationTag: mem.relation_tag || null,
+          mutedUntil: mem.muted_until || null,
+          isMutedAlways: Boolean(mem.is_muted_always),
+          lastReadAt: mem.last_read_at || null,
+          clearedAt: mem.cleared_at || null,
+          unreadCount: computeUnreadCount(familyId, userId, mem.last_read_at, mem.cleared_at, mem.joined_at),
+          joinedAt: mem.joined_at,
+          updatedAt: mem.updated_at
+        }
+      });
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Failed to load Family" });
+    }
+  });
+  router.patch("/:familyId", (req, res) => {
+    try {
+      if (rejectIfRestricted(req, res)) return;
+      const userId = req.authUserId;
+      const { familyId } = req.params;
+      const mem = getActiveMembership(familyId, userId);
+      if (!mem || mem.status !== "active" || mem.role !== "owner" && mem.role !== "admin") {
+        return res.status(403).json({ error: "Only the Owner or Admins can update Family settings." });
+      }
+      const fam = db.prepare("SELECT * FROM families WHERE id = ?").get(familyId);
+      if (!fam) return res.status(404).json({ error: "Family not found." });
+      const { name, photoUrl, joinApprovalRequired, onlyAdminsCanSend } = req.body || {};
+      const actor = getProfileById(userId);
+      const actorName = actor?.display_name || actor?.username || "Admin";
+      const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+      let nextName = fam.name;
+      let nextPhoto = fam.photo_url;
+      let nextJoinApproval = Boolean(fam.join_approval_required);
+      let nextOnlyAdmins = Boolean(fam.only_admins_can_send);
+      if (typeof name === "string" && name.trim()) {
+        const clean = name.trim().slice(0, 80);
+        if (clean !== fam.name) {
+          nextName = clean;
+          insertSystemMessage(familyId, `${actorName} renamed the Family to "${clean}"`);
+        }
+      }
+      if (photoUrl !== void 0) {
+        const cleanPhoto = typeof photoUrl === "string" && photoUrl.trim() ? photoUrl.trim().slice(0, 500) : null;
+        if (cleanPhoto !== fam.photo_url) {
+          nextPhoto = cleanPhoto;
+          insertSystemMessage(familyId, `${actorName} updated the Family photo`);
+        }
+      }
+      if (typeof joinApprovalRequired === "boolean") {
+        nextJoinApproval = joinApprovalRequired;
+      }
+      if (typeof onlyAdminsCanSend === "boolean" && onlyAdminsCanSend !== Boolean(fam.only_admins_can_send)) {
+        nextOnlyAdmins = onlyAdminsCanSend;
+        insertSystemMessage(
+          familyId,
+          onlyAdminsCanSend ? `${actorName} enabled "Only admins can send messages"` : `${actorName} allowed all members to send messages`
+        );
+      }
+      db.prepare(`
+        UPDATE families SET
+          name = ?,
+          photo_url = ?,
+          join_approval_required = ?,
+          only_admins_can_send = ?,
+          updated_at = ?
+        WHERE id = ?
+      `).run(nextName, nextPhoto, nextJoinApproval ? 1 : 0, nextOnlyAdmins ? 1 : 0, nowIso, familyId);
+      const updated = db.prepare("SELECT * FROM families WHERE id = ?").get(familyId);
+      return res.json({ family: formatFamilyRow(updated, true) });
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Failed to update Family" });
+    }
+  });
+  router.post("/:familyId/invite-link", (req, res) => {
+    try {
+      if (rejectIfRestricted(req, res)) return;
+      const userId = req.authUserId;
+      const { familyId } = req.params;
+      const action = String(req.body?.action || "reset").trim().toLowerCase();
+      const mem = getActiveMembership(familyId, userId);
+      if (!mem || mem.status !== "active" || mem.role !== "owner" && mem.role !== "admin") {
+        return res.status(403).json({ error: "Only the Owner or Admins can manage the invite link." });
+      }
+      const fam = db.prepare("SELECT * FROM families WHERE id = ?").get(familyId);
+      if (!fam) return res.status(404).json({ error: "Family not found." });
+      const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+      if (action === "disable") {
+        db.prepare("UPDATE families SET invite_link_enabled = 0, updated_at = ? WHERE id = ?").run(nowIso, familyId);
+      } else if (action === "enable") {
+        const code = fam.invite_code || generateInviteCode();
+        db.prepare("UPDATE families SET invite_code = ?, invite_link_enabled = 1, updated_at = ? WHERE id = ?").run(
+          code,
+          nowIso,
+          familyId
+        );
+      } else {
+        const newCode = generateInviteCode();
+        db.prepare("UPDATE families SET invite_code = ?, invite_link_enabled = 1, updated_at = ? WHERE id = ?").run(
+          newCode,
+          nowIso,
+          familyId
+        );
+      }
+      const updated = db.prepare("SELECT * FROM families WHERE id = ?").get(familyId);
+      return res.json({ family: formatFamilyRow(updated, true) });
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Failed to update invite link" });
+    }
+  });
+  router.get("/:familyId/members", (req, res) => {
+    try {
+      const userId = req.authUserId;
+      const { familyId } = req.params;
+      const mem = getActiveMembership(familyId, userId);
+      if (!mem || mem.status !== "active") {
+        return res.status(403).json({ error: "Active Family membership required to view members." });
+      }
+      const fam = db.prepare("SELECT member_count FROM families WHERE id = ?").get(familyId);
+      if (!fam) return res.status(404).json({ error: "Family not found." });
+      const requestedStatus = String(req.query.status || "active").trim();
+      const targetStatus = requestedStatus === "removed" && (mem.role === "owner" || mem.role === "admin") ? "removed" : "active";
+      const limit = Math.min(50, Math.max(1, parseInt(String(req.query.limit || "30"), 10) || 30));
+      const offset = Math.max(0, parseInt(String(req.query.offset || "0"), 10) || 0);
+      const q = String(req.query.q || "").trim().toLowerCase();
+      const hidePresence = Number(fam.member_count || 0) > LARGE_FAMILY_THRESHOLD;
+      let rows;
+      let totalRow;
+      if (q) {
+        const pattern = `%${q}%`;
+        totalRow = db.prepare(`
+            SELECT COUNT(*) as cnt FROM family_members fm
+            LEFT JOIN profiles p ON p.id = fm.user_id
+            WHERE fm.family_id = ? AND fm.status = ?
+              AND (LOWER(COALESCE(p.display_name, fm.display_name)) LIKE ?
+                   OR LOWER(COALESCE(p.username, fm.username)) LIKE ?
+                   OR LOWER(COALESCE(fm.relation_tag, '')) LIKE ?)
+          `).get(familyId, targetStatus, pattern, pattern, pattern);
+        rows = db.prepare(`
+            SELECT fm.*, p.display_name as live_display_name, p.username as live_username,
+                   p.avatar_url as live_avatar_url, p.is_online as live_is_online, p.last_seen as live_last_seen
+            FROM family_members fm
+            LEFT JOIN profiles p ON p.id = fm.user_id
+            WHERE fm.family_id = ? AND fm.status = ?
+              AND (LOWER(COALESCE(p.display_name, fm.display_name)) LIKE ?
+                   OR LOWER(COALESCE(p.username, fm.username)) LIKE ?
+                   OR LOWER(COALESCE(fm.relation_tag, '')) LIKE ?)
+            ORDER BY
+              CASE fm.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END,
+              LOWER(COALESCE(p.display_name, fm.display_name)) ASC
+            LIMIT ? OFFSET ?
+          `).all(familyId, targetStatus, pattern, pattern, pattern, limit, offset);
+      } else {
+        totalRow = db.prepare("SELECT COUNT(*) as cnt FROM family_members WHERE family_id = ? AND status = ?").get(familyId, targetStatus);
+        rows = db.prepare(`
+            SELECT fm.*, p.display_name as live_display_name, p.username as live_username,
+                   p.avatar_url as live_avatar_url, p.is_online as live_is_online, p.last_seen as live_last_seen
+            FROM family_members fm
+            LEFT JOIN profiles p ON p.id = fm.user_id
+            WHERE fm.family_id = ? AND fm.status = ?
+            ORDER BY
+              CASE fm.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END,
+              LOWER(COALESCE(p.display_name, fm.display_name)) ASC
+            LIMIT ? OFFSET ?
+          `).all(familyId, targetStatus, limit, offset);
+      }
+      const total = Number(totalRow?.cnt || 0);
+      return res.json({
+        members: rows.map((r) => formatMemberRow(r, hidePresence)),
+        total,
+        hasMore: offset + rows.length < total,
+        hidePresence
+      });
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Failed to load members" });
+    }
+  });
+  router.post("/:familyId/invite", (req, res) => {
+    try {
+      if (rejectIfRestricted(req, res)) return;
+      const userId = req.authUserId;
+      const { familyId } = req.params;
+      const mem = getActiveMembership(familyId, userId);
+      if (!mem || mem.status !== "active" || mem.role !== "owner" && mem.role !== "admin") {
+        return res.status(403).json({ error: "Only the Owner or Admins can invite members." });
+      }
+      const fam = db.prepare("SELECT * FROM families WHERE id = ?").get(familyId);
+      if (!fam) return res.status(404).json({ error: "Family not found." });
+      const rawIds = Array.isArray(req.body?.inviteeIds) ? req.body.inviteeIds : [];
+      const inviteeIds = Array.from(
+        new Set(rawIds.filter((v) => typeof v === "string" && v.trim().length > 0 && v !== userId))
+      );
+      if (inviteeIds.length === 0) {
+        return res.status(400).json({ error: "Select at least one user to invite." });
+      }
+      if (inviteeIds.length > MAX_INVITE_BATCH) {
+        return res.status(400).json({ error: `You can invite up to ${MAX_INVITE_BATCH} users at a time.` });
+      }
+      const dayKey = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+      const limitRow = db.prepare("SELECT invite_count FROM family_invite_daily_limits WHERE user_id = ? AND day_key = ?").get(userId, dayKey);
+      const sentToday = Number(limitRow?.invite_count || 0);
+      if (sentToday + inviteeIds.length > MAX_DAILY_INVITES) {
+        return res.status(429).json({
+          error: `Daily invite limit reached (${sentToday}/${MAX_DAILY_INVITES} invites sent today).`
+        });
+      }
+      const inviterProfile = getProfileById(userId);
+      const inviterName = inviterProfile?.display_name || inviterProfile?.username || "Someone";
+      const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+      let sentCount = 0;
+      const skipped = [];
+      for (const targetId of inviteeIds) {
+        const targetUser = findUserById(targetId);
+        const targetProfile = getProfileById(targetId);
+        if (!targetUser || !targetProfile) {
+          skipped.push({ userId: targetId, reason: "User not found" });
+          continue;
+        }
+        if (targetUser.status === "suspended" || targetUser.status === "disabled" || targetUser.status === "deactivated") {
+          skipped.push({ userId: targetId, reason: "User account unavailable" });
+          continue;
+        }
+        const blockRow = db.prepare("SELECT 1 FROM blocked_users WHERE (blocker_id = ? AND blocked_id = ?) OR (blocker_id = ? AND blocked_id = ?) LIMIT 1").get(userId, targetId, targetId, userId);
+        if (blockRow) {
+          skipped.push({ userId: targetId, reason: "Blocked relationship" });
+          continue;
+        }
+        const targetMem = getActiveMembership(familyId, targetId);
+        if (targetMem?.status === "active") {
+          skipped.push({ userId: targetId, reason: "Already a member" });
+          continue;
+        }
+        if (targetMem?.status === "removed") {
+          skipped.push({ userId: targetId, reason: "Previously removed (allow rejoin first)" });
+          continue;
+        }
+        const existingInvite = db.prepare("SELECT id FROM family_invites WHERE family_id = ? AND invitee_id = ? AND status = 'pending' LIMIT 1").get(familyId, targetId);
+        if (existingInvite) {
+          skipped.push({ userId: targetId, reason: "Invite already pending" });
+          continue;
+        }
+        const inviteId = `finv_${generateId().replace(/-/g, "").slice(0, 20)}`;
+        db.prepare(`
+          INSERT INTO family_invites (
+            id, family_id, family_name, family_photo_url, inviter_id, inviter_name, invitee_id, status, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+        `).run(inviteId, familyId, fam.name, fam.photo_url || null, userId, inviterName, targetId, nowIso);
+        insertNotificationRow({
+          userId: targetId,
+          actorId: userId,
+          type: "family_invite",
+          title: `Family Invite: ${fam.name}`,
+          message: `${inviterName} invited you to join "${fam.name}".`,
+          referenceId: inviteId
+        });
+        sentCount++;
+      }
+      if (sentCount > 0) {
+        db.prepare(`
+          INSERT INTO family_invite_daily_limits (user_id, day_key, invite_count)
+          VALUES (?, ?, ?)
+          ON CONFLICT(user_id, day_key) DO UPDATE SET invite_count = invite_count + excluded.invite_count
+        `).run(userId, dayKey, sentCount);
+      }
+      return res.json({
+        sentCount,
+        skipped,
+        dailyRemaining: Math.max(0, MAX_DAILY_INVITES - (sentToday + sentCount))
+      });
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Failed to send invites" });
+    }
+  });
+  router.get("/:familyId/requests", (req, res) => {
+    try {
+      const userId = req.authUserId;
+      const { familyId } = req.params;
+      const mem = getActiveMembership(familyId, userId);
+      if (!mem || mem.status !== "active" || mem.role !== "owner" && mem.role !== "admin") {
+        return res.status(403).json({ error: "Only the Owner or Admins can review join requests." });
+      }
+      const rows = db.prepare(`
+          SELECT fr.*, p.display_name as live_display_name, p.username as live_username, p.avatar_url as live_avatar_url
+          FROM family_requests fr
+          LEFT JOIN profiles p ON p.id = fr.user_id
+          WHERE fr.family_id = ? AND fr.status = 'pending'
+          ORDER BY fr.created_at DESC
+          LIMIT 200
+        `).all(familyId);
+      return res.json({
+        requests: rows.map((r) => ({
+          userId: r.user_id,
+          familyId: r.family_id,
+          displayName: r.live_display_name || r.display_name || "User",
+          username: r.live_username || r.username || "user",
+          avatarUrl: r.live_avatar_url !== void 0 ? r.live_avatar_url : r.avatar_url || null,
+          status: r.status,
+          inviteCode: r.invite_code || null,
+          createdAt: r.created_at
+        }))
+      });
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Failed to load join requests" });
+    }
+  });
+  router.post("/:familyId/requests/action", (req, res) => {
+    try {
+      if (rejectIfRestricted(req, res)) return;
+      const userId = req.authUserId;
+      const { familyId } = req.params;
+      const mem = getActiveMembership(familyId, userId);
+      if (!mem || mem.status !== "active" || mem.role !== "owner" && mem.role !== "admin") {
+        return res.status(403).json({ error: "Only the Owner or Admins can approve or reject requests." });
+      }
+      const fam = db.prepare("SELECT * FROM families WHERE id = ?").get(familyId);
+      if (!fam) return res.status(404).json({ error: "Family not found." });
+      const action = String(req.body?.action || "").trim().toLowerCase();
+      const targetUserIds = Array.isArray(req.body?.userIds) ? req.body.userIds.filter((v) => typeof v === "string") : [];
+      let pendingRows;
+      if (action === "approve_all" || action === "reject_all") {
+        pendingRows = db.prepare("SELECT * FROM family_requests WHERE family_id = ? AND status = 'pending'").all(familyId);
+      } else if ((action === "approve" || action === "reject") && targetUserIds.length > 0) {
+        const placeholders = targetUserIds.map(() => "?").join(",");
+        pendingRows = db.prepare(`SELECT * FROM family_requests WHERE family_id = ? AND status = 'pending' AND user_id IN (${placeholders})`).all(familyId, ...targetUserIds);
+      } else {
+        return res.status(400).json({ error: "Invalid join request action." });
+      }
+      const isApprove = action === "approve" || action === "approve_all";
+      if (isApprove && Number(fam.member_count || 0) + pendingRows.length > MAX_MEMBERS) {
+        return res.status(400).json({ error: `Approving these requests would exceed the ${MAX_MEMBERS} member limit.` });
+      }
+      const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+      const actor = getProfileById(userId);
+      const actorName = actor?.display_name || actor?.username || "Admin";
+      db.exec("BEGIN");
+      try {
+        for (const reqRow of pendingRows) {
+          if (isApprove) {
+            const targetUser = findUserById(reqRow.user_id);
+            if (!targetUser || targetUser.status === "suspended" || targetUser.status === "disabled" || targetUser.status === "deactivated") {
+              db.prepare("UPDATE family_requests SET status = 'rejected', reviewed_at = ?, reviewed_by = ? WHERE family_id = ? AND user_id = ?").run(
+                nowIso,
+                userId,
+                familyId,
+                reqRow.user_id
+              );
+              db.prepare("DELETE FROM family_members WHERE family_id = ? AND user_id = ? AND status = 'pending'").run(
+                familyId,
+                reqRow.user_id
+              );
+              continue;
+            }
+            const autoMute = Number(fam.member_count || 0) >= LARGE_FAMILY_THRESHOLD ? 1 : 0;
+            db.prepare("UPDATE family_requests SET status = 'approved', reviewed_at = ?, reviewed_by = ? WHERE family_id = ? AND user_id = ?").run(
+              nowIso,
+              userId,
+              familyId,
+              reqRow.user_id
+            );
+            db.prepare(`
+              UPDATE family_members SET
+                status = 'active',
+                role = 'member',
+                is_muted_always = ?,
+                last_read_at = ?,
+                joined_at = ?,
+                updated_at = ?
+              WHERE family_id = ? AND user_id = ?
+            `).run(autoMute, nowIso, nowIso, nowIso, familyId, reqRow.user_id);
+            insertNotificationRow({
+              userId: reqRow.user_id,
+              actorId: userId,
+              type: "family_join_approved",
+              title: `Approved: ${fam.name}`,
+              message: `${actorName} approved your request to join "${fam.name}".`,
+              referenceId: familyId
+            });
+          } else {
+            db.prepare("UPDATE family_requests SET status = 'rejected', reviewed_at = ?, reviewed_by = ? WHERE family_id = ? AND user_id = ?").run(
+              nowIso,
+              userId,
+              familyId,
+              reqRow.user_id
+            );
+            db.prepare("DELETE FROM family_members WHERE family_id = ? AND user_id = ? AND status = 'pending'").run(
+              familyId,
+              reqRow.user_id
+            );
+            insertNotificationRow({
+              userId: reqRow.user_id,
+              actorId: userId,
+              type: "family_join_rejected",
+              title: `Join request declined`,
+              message: `Your request to join "${fam.name}" was declined.`,
+              referenceId: familyId
+            });
+          }
+        }
+        if (isApprove && pendingRows.length > 0) {
+          recalcFamilyMemberCount(familyId);
+          if (pendingRows.length === 1) {
+            insertSystemMessage(familyId, `${pendingRows[0].display_name || "Member"} joined the Family`);
+          } else {
+            insertSystemMessage(familyId, `${pendingRows.length} new members joined the Family`);
+          }
+        }
+        db.exec("COMMIT");
+      } catch (err) {
+        db.exec("ROLLBACK");
+        throw err;
+      }
+      const updatedFam = db.prepare("SELECT * FROM families WHERE id = ?").get(familyId);
+      return res.json({ processed: pendingRows.length, family: formatFamilyRow(updatedFam, true) });
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Failed to process join requests" });
+    }
+  });
+  router.patch("/:familyId/members/:targetUserId/relation-tag", (req, res) => {
+    try {
+      if (rejectIfRestricted(req, res)) return;
+      const userId = req.authUserId;
+      const { familyId, targetUserId } = req.params;
+      const mem = getActiveMembership(familyId, userId);
+      if (!mem || mem.status !== "active") {
+        return res.status(403).json({ error: "Active Family membership required." });
+      }
+      const isSelf = userId === targetUserId;
+      const isPrivileged = mem.role === "owner" || mem.role === "admin";
+      if (!isSelf && !isPrivileged) {
+        return res.status(403).json({ error: "Only the Owner or Admins can change other members' relation tags." });
+      }
+      const targetMem = getActiveMembership(familyId, targetUserId);
+      if (!targetMem || targetMem.status !== "active") {
+        return res.status(404).json({ error: "Target member not found." });
+      }
+      const rawTag = req.body?.relationTag;
+      const cleanTag = typeof rawTag === "string" && rawTag.trim() ? rawTag.trim().slice(0, 32) : null;
+      db.prepare("UPDATE family_members SET relation_tag = ?, updated_at = ? WHERE family_id = ? AND user_id = ?").run(
+        cleanTag,
+        (/* @__PURE__ */ new Date()).toISOString(),
+        familyId,
+        targetUserId
+      );
+      return res.json({ success: true, userId: targetUserId, relationTag: cleanTag });
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Failed to update relation tag" });
+    }
+  });
+  router.patch("/:familyId/members/:targetUserId/role", (req, res) => {
+    try {
+      if (rejectIfRestricted(req, res)) return;
+      const userId = req.authUserId;
+      const { familyId, targetUserId } = req.params;
+      const mem = getActiveMembership(familyId, userId);
+      if (!mem || mem.status !== "active" || mem.role !== "owner") {
+        return res.status(403).json({ error: "Only the Family Owner can assign or remove Admins." });
+      }
+      if (targetUserId === userId) {
+        return res.status(400).json({ error: "Owner role cannot be changed directly. Use Transfer Ownership instead." });
+      }
+      const targetRole = String(req.body?.role || "").trim().toLowerCase();
+      if (targetRole !== "admin" && targetRole !== "member") {
+        return res.status(400).json({ error: "role must be admin or member." });
+      }
+      const targetMem = getActiveMembership(familyId, targetUserId);
+      if (!targetMem || targetMem.status !== "active") {
+        return res.status(404).json({ error: "Member not found." });
+      }
+      db.prepare("UPDATE family_members SET role = ?, updated_at = ? WHERE family_id = ? AND user_id = ?").run(
+        targetRole,
+        (/* @__PURE__ */ new Date()).toISOString(),
+        familyId,
+        targetUserId
+      );
+      const targetName = targetMem.display_name || targetMem.username || "Member";
+      insertSystemMessage(
+        familyId,
+        targetRole === "admin" ? `${targetName} is now an Admin` : `${targetName} is no longer an Admin`
+      );
+      return res.json({ success: true, userId: targetUserId, role: targetRole });
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Failed to update member role" });
+    }
+  });
+  router.post("/:familyId/members/:targetUserId/remove", (req, res) => {
+    try {
+      if (rejectIfRestricted(req, res)) return;
+      const userId = req.authUserId;
+      const { familyId, targetUserId } = req.params;
+      const mem = getActiveMembership(familyId, userId);
+      if (!mem || mem.status !== "active" || mem.role !== "owner" && mem.role !== "admin") {
+        return res.status(403).json({ error: "Only the Owner or Admins can remove members." });
+      }
+      if (targetUserId === userId) {
+        return res.status(400).json({ error: "Use Leave Family instead of removing yourself." });
+      }
+      const targetMem = getActiveMembership(familyId, targetUserId);
+      if (!targetMem || targetMem.status !== "active") {
+        return res.status(404).json({ error: "Active member not found." });
+      }
+      if (targetMem.role === "owner") {
+        return res.status(403).json({ error: "The Family Owner cannot be removed." });
+      }
+      if (mem.role === "admin" && targetMem.role === "admin") {
+        return res.status(403).json({ error: "Admins cannot remove other Admins." });
+      }
+      const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+      db.prepare(`
+        UPDATE family_members SET
+          status = 'removed',
+          role = 'member',
+          removed_at = ?,
+          removed_by = ?,
+          updated_at = ?
+        WHERE family_id = ? AND user_id = ?
+      `).run(nowIso, userId, nowIso, familyId, targetUserId);
+      recalcFamilyMemberCount(familyId);
+      const actor = getProfileById(userId);
+      const actorName = actor?.display_name || actor?.username || "Admin";
+      const targetName = targetMem.display_name || targetMem.username || "Member";
+      insertSystemMessage(familyId, `${actorName} removed ${targetName}`);
+      return res.json({ success: true });
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Failed to remove member" });
+    }
+  });
+  router.post("/:familyId/members/:targetUserId/allow-rejoin", (req, res) => {
+    try {
+      if (rejectIfRestricted(req, res)) return;
+      const userId = req.authUserId;
+      const { familyId, targetUserId } = req.params;
+      const mem = getActiveMembership(familyId, userId);
+      if (!mem || mem.status !== "active" || mem.role !== "owner" && mem.role !== "admin") {
+        return res.status(403).json({ error: "Only the Owner or Admins can allow a removed member to rejoin." });
+      }
+      const targetMem = getActiveMembership(familyId, targetUserId);
+      if (!targetMem || targetMem.status !== "removed") {
+        return res.status(404).json({ error: "Removed member record not found." });
+      }
+      db.prepare(
+        "UPDATE family_members SET status = 'left', removed_at = NULL, removed_by = NULL, updated_at = ? WHERE family_id = ? AND user_id = ?"
+      ).run((/* @__PURE__ */ new Date()).toISOString(), familyId, targetUserId);
+      return res.json({ success: true });
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Failed to allow rejoin" });
+    }
+  });
+  router.post("/:familyId/transfer-ownership", (req, res) => {
+    try {
+      if (rejectIfRestricted(req, res)) return;
+      const userId = req.authUserId;
+      const { familyId } = req.params;
+      const targetUserId = String(req.body?.targetUserId || "").trim();
+      if (!targetUserId) return res.status(400).json({ error: "targetUserId is required." });
+      const mem = getActiveMembership(familyId, userId);
+      if (!mem || mem.status !== "active" || mem.role !== "owner") {
+        return res.status(403).json({ error: "Only the Family Owner can transfer ownership." });
+      }
+      if (targetUserId === userId) {
+        return res.status(400).json({ error: "You are already the Owner." });
+      }
+      const targetMem = getActiveMembership(familyId, targetUserId);
+      if (!targetMem || targetMem.status !== "active") {
+        return res.status(404).json({ error: "Target user must be an active Family member." });
+      }
+      const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+      db.exec("BEGIN");
+      try {
+        db.prepare("UPDATE family_members SET role = 'admin', updated_at = ? WHERE family_id = ? AND user_id = ?").run(
+          nowIso,
+          familyId,
+          userId
+        );
+        db.prepare("UPDATE family_members SET role = 'owner', updated_at = ? WHERE family_id = ? AND user_id = ?").run(
+          nowIso,
+          familyId,
+          targetUserId
+        );
+        db.prepare("UPDATE families SET owner_id = ?, updated_at = ? WHERE id = ?").run(targetUserId, nowIso, familyId);
+        db.exec("COMMIT");
+      } catch (err) {
+        db.exec("ROLLBACK");
+        throw err;
+      }
+      const targetName = targetMem.display_name || targetMem.username || "Member";
+      const oldName = mem.display_name || mem.username || "Owner";
+      insertSystemMessage(familyId, `${oldName} transferred Family ownership to ${targetName}`);
+      const updatedFam = db.prepare("SELECT * FROM families WHERE id = ?").get(familyId);
+      return res.json({ success: true, family: formatFamilyRow(updatedFam, true) });
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Failed to transfer ownership" });
+    }
+  });
+  router.post("/:familyId/mute", (req, res) => {
+    try {
+      const userId = req.authUserId;
+      const { familyId } = req.params;
+      const duration = String(req.body?.duration || "off").trim();
+      if (!VALID_MUTE_DURATIONS.has(duration)) {
+        return res.status(400).json({ error: "Invalid mute duration." });
+      }
+      const mem = getActiveMembership(familyId, userId);
+      if (!mem || mem.status !== "active") {
+        return res.status(403).json({ error: "Active Family membership required." });
+      }
+      let isMutedAlways = 0;
+      let mutedUntil = null;
+      if (duration === "always") isMutedAlways = 1;
+      else if (duration === "1h") mutedUntil = new Date(Date.now() + 60 * 60 * 1e3).toISOString();
+      else if (duration === "8h") mutedUntil = new Date(Date.now() + 8 * 60 * 60 * 1e3).toISOString();
+      else if (duration === "1w") mutedUntil = new Date(Date.now() + 7 * 24 * 60 * 60 * 1e3).toISOString();
+      db.prepare(
+        "UPDATE family_members SET is_muted_always = ?, muted_until = ?, updated_at = ? WHERE family_id = ? AND user_id = ?"
+      ).run(isMutedAlways, mutedUntil, (/* @__PURE__ */ new Date()).toISOString(), familyId, userId);
+      return res.json({ success: true, isMutedAlways: Boolean(isMutedAlways), mutedUntil });
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Failed to update mute preference" });
+    }
+  });
+  router.post("/:familyId/clear-chat", (req, res) => {
+    try {
+      const userId = req.authUserId;
+      const { familyId } = req.params;
+      const mem = getActiveMembership(familyId, userId);
+      if (!mem || mem.status !== "active") {
+        return res.status(403).json({ error: "Active Family membership required." });
+      }
+      const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+      db.prepare(
+        "UPDATE family_members SET cleared_at = ?, last_read_at = ?, updated_at = ? WHERE family_id = ? AND user_id = ?"
+      ).run(nowIso, nowIso, nowIso, familyId, userId);
+      return res.json({ success: true, clearedAt: nowIso });
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Failed to clear chat" });
+    }
+  });
+  router.post("/:familyId/leave", (req, res) => {
+    try {
+      const userId = req.authUserId;
+      const { familyId } = req.params;
+      const mem = getActiveMembership(familyId, userId);
+      if (!mem || mem.status !== "active") {
+        return res.status(403).json({ error: "You are not an active member of this Family." });
+      }
+      if (mem.role === "owner") {
+        return res.status(400).json({
+          error: "As Owner, please transfer ownership to another member before leaving, or delete the Family."
+        });
+      }
+      const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+      db.prepare("UPDATE family_members SET status = 'left', role = 'member', updated_at = ? WHERE family_id = ? AND user_id = ?").run(
+        nowIso,
+        familyId,
+        userId
+      );
+      recalcFamilyMemberCount(familyId);
+      const profile = getProfileById(userId);
+      insertSystemMessage(familyId, `${profile?.display_name || mem.display_name || "Member"} left`);
+      return res.json({ success: true });
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Failed to leave Family" });
+    }
+  });
+  router.delete("/:familyId", async (req, res) => {
+    try {
+      const userId = req.authUserId;
+      const { familyId } = req.params;
+      const fam = db.prepare("SELECT * FROM families WHERE id = ?").get(familyId);
+      if (!fam) return res.status(404).json({ error: "Family not found." });
+      const mem = getActiveMembership(familyId, userId);
+      if (!mem || mem.status !== "active" || mem.role !== "owner") {
+        return res.status(403).json({ error: "Only the Family Owner can delete this Family." });
+      }
+      const ownerProfile = getProfileById(userId);
+      const ownerName = ownerProfile?.display_name || ownerProfile?.username || "Owner";
+      const activeMembers = db.prepare("SELECT user_id FROM family_members WHERE family_id = ? AND status = 'active' AND user_id != ?").all(familyId, userId);
+      const mediaMessages = db.prepare(
+        "SELECT cloudinary_public_id, b2_file_id, media_type FROM family_messages WHERE family_id = ? AND (cloudinary_public_id IS NOT NULL OR b2_file_id IS NOT NULL)"
+      ).all(familyId);
+      db.exec("BEGIN");
+      try {
+        for (const m of activeMembers) {
+          insertNotificationRow({
+            userId: m.user_id,
+            actorId: userId,
+            type: "family_deleted",
+            title: `Family Deleted: ${fam.name}`,
+            message: `${ownerName} deleted the Family "${fam.name}".`,
+            referenceId: familyId
+          });
+        }
+        db.prepare("DELETE FROM family_message_reads WHERE family_id = ?").run(familyId);
+        db.prepare("DELETE FROM family_typing_status WHERE family_id = ?").run(familyId);
+        db.prepare("DELETE FROM family_messages WHERE family_id = ?").run(familyId);
+        db.prepare("DELETE FROM family_requests WHERE family_id = ?").run(familyId);
+        db.prepare("DELETE FROM family_invites WHERE family_id = ?").run(familyId);
+        db.prepare("DELETE FROM family_members WHERE family_id = ?").run(familyId);
+        db.prepare("DELETE FROM families WHERE id = ?").run(familyId);
+        db.exec("COMMIT");
+      } catch (err) {
+        db.exec("ROLLBACK");
+        throw err;
+      }
+      for (const item of mediaMessages) {
+        const pid = item.cloudinary_public_id || item.b2_file_id;
+        if (pid) {
+          const rType = item.media_type === "voice" ? "raw" : "image";
+          deleteAssetFromCloudinary(pid, rType).catch(() => {
+          });
+        }
+      }
+      return res.json({ success: true });
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Failed to delete Family" });
+    }
+  });
+  router.get("/:familyId/messages", (req, res) => {
+    try {
+      const userId = req.authUserId;
+      const { familyId } = req.params;
+      const mem = getActiveMembership(familyId, userId);
+      if (!mem || mem.status !== "active") {
+        return res.status(403).json({ error: "Only active Family members can read chat messages." });
+      }
+      const limit = Math.min(80, Math.max(10, parseInt(String(req.query.limit || "50"), 10) || 50));
+      const before = typeof req.query.before === "string" && req.query.before.trim() ? req.query.before.trim() : null;
+      const clearedAt = mem.cleared_at || null;
+      let query = "SELECT * FROM family_messages WHERE family_id = ?";
+      const params = [familyId];
+      if (clearedAt) {
+        query += " AND created_at > ?";
+        params.push(clearedAt);
+      }
+      if (before) {
+        query += " AND created_at < ?";
+        params.push(before);
+      }
+      query += " ORDER BY created_at DESC LIMIT ?";
+      params.push(limit);
+      const rows = db.prepare(query).all(...params).reverse();
+      const msgIds = rows.map((r) => r.id);
+      const seenCountMap = /* @__PURE__ */ new Map();
+      if (msgIds.length > 0) {
+        const placeholders = msgIds.map(() => "?").join(",");
+        const counts = db.prepare(
+          `SELECT message_id, COUNT(*) as cnt FROM family_message_reads
+             WHERE family_id = ? AND message_id IN (${placeholders})
+             GROUP BY message_id`
+        ).all(familyId, ...msgIds);
+        for (const c of counts) {
+          seenCountMap.set(c.message_id, Number(c.cnt || 0));
+        }
+      }
+      return res.json({
+        messages: rows.map((r) => formatMessageRow(r, seenCountMap)),
+        hasMore: rows.length === limit
+      });
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Failed to load Family messages" });
+    }
+  });
+  router.post("/:familyId/messages", (req, res) => {
+    try {
+      if (rejectIfRestricted(req, res)) return;
+      const userId = req.authUserId;
+      const { familyId } = req.params;
+      if (!checkFamilyMessageRateLimit(userId)) {
+        return res.status(429).json({ error: "Slow down! You are sending messages too quickly." });
+      }
+      const fam = db.prepare("SELECT * FROM families WHERE id = ?").get(familyId);
+      if (!fam) return res.status(404).json({ error: "Family not found." });
+      const mem = getActiveMembership(familyId, userId);
+      if (!mem || mem.status !== "active") {
+        return res.status(403).json({ error: "Only active Family members can send messages." });
+      }
+      if (fam.only_admins_can_send && mem.role !== "owner" && mem.role !== "admin") {
+        return res.status(403).json({ error: "Only the Owner and Admins can send messages in this Family." });
+      }
+      const {
+        type = "text",
+        content,
+        mediaUrl,
+        mediaType,
+        cloudinaryPublicId,
+        b2FileId,
+        b2FileName,
+        replyToMessageId,
+        mentions
+      } = req.body || {};
+      const allowedTypes = /* @__PURE__ */ new Set(["text", "image", "voice", "sticker", "safe_checkin"]);
+      const msgType = allowedTypes.has(String(type)) ? String(type) : "text";
+      const cleanContent = typeof content === "string" ? content.trim().slice(0, 4e3) : "";
+      if (!cleanContent && msgType === "text") {
+        return res.status(400).json({ error: "Message content cannot be empty." });
+      }
+      const finalContent = msgType === "safe_checkin" ? cleanContent || "I'm safe" : cleanContent;
+      const profile = getProfileById(userId);
+      const senderName = profile?.display_name || mem.display_name || "Member";
+      const senderUsername = profile?.username || mem.username || "user";
+      const senderAvatar = profile?.avatar_url || mem.avatar_url || null;
+      let replySnapshot = null;
+      let validReplyId = null;
+      if (typeof replyToMessageId === "string" && replyToMessageId.trim()) {
+        const parent = db.prepare("SELECT id, sender_id, sender_name, content, is_deleted FROM family_messages WHERE id = ? AND family_id = ? LIMIT 1").get(replyToMessageId.trim(), familyId);
+        if (parent) {
+          validReplyId = parent.id;
+          replySnapshot = {
+            id: parent.id,
+            senderId: parent.sender_id,
+            senderName: parent.sender_name,
+            content: parent.is_deleted ? "This message was deleted" : String(parent.content || "").slice(0, 140)
+          };
+        }
+      }
+      const mentionIds = Array.isArray(mentions) ? Array.from(new Set(mentions.filter((m) => typeof m === "string" && m.trim().length > 0 && m !== "everyone"))).slice(0, 20) : [];
+      const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+      const msgId = `fmsg_${generateId().replace(/-/g, "").slice(0, 20)}`;
+      const previewText = msgType === "image" || finalContent.startsWith("[IMAGE:") ? "Sent a photo" : msgType === "voice" || finalContent.startsWith("[VOICE:") ? "Sent a voice message" : msgType === "sticker" || finalContent.startsWith("[STICKER:") ? "Sent a sticker" : msgType === "safe_checkin" ? "I'm Safe check-in" : finalContent.slice(0, 160);
+      db.exec("BEGIN");
+      try {
+        db.prepare(`
+          INSERT INTO family_messages (
+            id, family_id, sender_id, sender_name, sender_username, sender_avatar, sender_role, sender_relation_tag,
+            type, content, media_url, media_type, cloudinary_public_id, b2_file_id, b2_file_name,
+            reply_to_message_id, reply_to_json, mentions_json, reactions_json, is_pinned, is_deleted,
+            safe_checkin_at, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', 0, 0, ?, ?, ?)
+        `).run(
+          msgId,
+          familyId,
+          userId,
+          senderName,
+          senderUsername,
+          senderAvatar,
+          mem.role,
+          mem.relation_tag || null,
+          msgType,
+          finalContent,
+          mediaUrl || null,
+          mediaType || null,
+          cloudinaryPublicId || null,
+          b2FileId || null,
+          b2FileName || null,
+          validReplyId,
+          replySnapshot ? JSON.stringify(replySnapshot) : null,
+          JSON.stringify(mentionIds),
+          msgType === "safe_checkin" ? nowIso : null,
+          nowIso,
+          nowIso
+        );
+        db.prepare(`
+          UPDATE families SET
+            last_message_id = ?,
+            last_message_text = ?,
+            last_message_sender_id = ?,
+            last_message_sender_name = ?,
+            last_message_at = ?,
+            updated_at = ?
+          WHERE id = ?
+        `).run(msgId, previewText, userId, senderName, nowIso, nowIso, familyId);
+        db.prepare("UPDATE family_members SET last_read_at = ?, updated_at = ? WHERE family_id = ? AND user_id = ?").run(
+          nowIso,
+          nowIso,
+          familyId,
+          userId
+        );
+        db.prepare("DELETE FROM family_typing_status WHERE family_id = ? AND user_id = ?").run(familyId, userId);
+        for (const targetUid of mentionIds) {
+          if (targetUid === userId) continue;
+          const targetMem = getActiveMembership(familyId, targetUid);
+          if (targetMem?.status === "active") {
+            insertNotificationRow({
+              userId: targetUid,
+              actorId: userId,
+              type: "family_mention",
+              title: `${senderName} mentioned you in ${fam.name}`,
+              message: previewText,
+              referenceId: familyId
+            });
+          }
+        }
+        db.exec("COMMIT");
+      } catch (err) {
+        db.exec("ROLLBACK");
+        throw err;
+      }
+      const inserted = db.prepare("SELECT * FROM family_messages WHERE id = ?").get(msgId);
+      return res.json({ message: formatMessageRow(inserted) });
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Failed to send message" });
+    }
+  });
+  router.post("/:familyId/messages/:messageId/react", (req, res) => {
+    try {
+      if (rejectIfRestricted(req, res)) return;
+      const userId = req.authUserId;
+      const { familyId, messageId } = req.params;
+      const emoji = typeof req.body?.emoji === "string" ? req.body.emoji.trim().slice(0, 16) : "";
+      if (!emoji) return res.status(400).json({ error: "emoji is required." });
+      const mem = getActiveMembership(familyId, userId);
+      if (!mem || mem.status !== "active") {
+        return res.status(403).json({ error: "Only active Family members can react to messages." });
+      }
+      const msg = db.prepare("SELECT * FROM family_messages WHERE id = ? AND family_id = ? LIMIT 1").get(messageId, familyId);
+      if (!msg || msg.is_deleted) {
+        return res.status(404).json({ error: "Message not found." });
+      }
+      const reactions = safeJsonParse(msg.reactions_json, {});
+      const list = Array.isArray(reactions[emoji]) ? [...reactions[emoji]] : [];
+      const idx = list.indexOf(userId);
+      if (idx >= 0) {
+        list.splice(idx, 1);
+      } else {
+        list.push(userId);
+      }
+      if (list.length === 0) {
+        delete reactions[emoji];
+      } else {
+        reactions[emoji] = list;
+      }
+      db.prepare("UPDATE family_messages SET reactions_json = ?, updated_at = ? WHERE id = ?").run(
+        JSON.stringify(reactions),
+        (/* @__PURE__ */ new Date()).toISOString(),
+        messageId
+      );
+      return res.json({ success: true, reactions });
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Failed to update reaction" });
+    }
+  });
+  router.post("/:familyId/messages/:messageId/pin", (req, res) => {
+    try {
+      if (rejectIfRestricted(req, res)) return;
+      const userId = req.authUserId;
+      const { familyId, messageId } = req.params;
+      const mem = getActiveMembership(familyId, userId);
+      if (!mem || mem.status !== "active" || mem.role !== "owner" && mem.role !== "admin") {
+        return res.status(403).json({ error: "Only the Owner or Admins can pin or unpin messages." });
+      }
+      const fam = db.prepare("SELECT * FROM families WHERE id = ?").get(familyId);
+      const msg = db.prepare("SELECT * FROM family_messages WHERE id = ? AND family_id = ?").get(messageId, familyId);
+      if (!fam || !msg || msg.is_deleted) {
+        return res.status(404).json({ error: "Message not found." });
+      }
+      const currentPins = safeJsonParse(fam.pinned_messages_json, []);
+      const alreadyIdx = currentPins.findIndex((p) => p.messageId === messageId);
+      const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+      const actor = getProfileById(userId);
+      const actorName = actor?.display_name || actor?.username || "Admin";
+      let nextPins = [...currentPins];
+      let nextIsPinned = 0;
+      if (alreadyIdx >= 0) {
+        nextPins.splice(alreadyIdx, 1);
+        nextIsPinned = 0;
+      } else {
+        while (nextPins.length >= MAX_PINNED_MESSAGES) {
+          const evicted = nextPins.shift();
+          if (evicted?.messageId) {
+            db.prepare("UPDATE family_messages SET is_pinned = 0, updated_at = ? WHERE id = ? AND family_id = ?").run(
+              nowIso,
+              evicted.messageId,
+              familyId
+            );
+          }
+        }
+        nextPins.push({
+          messageId: msg.id,
+          content: String(msg.content || "").slice(0, 180),
+          senderId: msg.sender_id,
+          senderName: msg.sender_name,
+          pinnedById: userId,
+          pinnedByName: actorName,
+          pinnedAt: nowIso
+        });
+        nextIsPinned = 1;
+      }
+      db.prepare("UPDATE family_messages SET is_pinned = ?, updated_at = ? WHERE id = ?").run(
+        nextIsPinned,
+        nowIso,
+        messageId
+      );
+      db.prepare("UPDATE families SET pinned_messages_json = ?, updated_at = ? WHERE id = ?").run(
+        JSON.stringify(nextPins),
+        nowIso,
+        familyId
+      );
+      return res.json({ success: true, isPinned: Boolean(nextIsPinned), pinnedMessages: nextPins });
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Failed to update pinned message" });
+    }
+  });
+  router.delete("/:familyId/messages/:messageId", (req, res) => {
+    try {
+      const userId = req.authUserId;
+      const { familyId, messageId } = req.params;
+      const mem = getActiveMembership(familyId, userId);
+      if (!mem || mem.status !== "active") {
+        return res.status(403).json({ error: "Active Family membership required." });
+      }
+      const fam = db.prepare("SELECT * FROM families WHERE id = ?").get(familyId);
+      const msg = db.prepare("SELECT * FROM family_messages WHERE id = ? AND family_id = ?").get(messageId, familyId);
+      if (!fam || !msg) return res.status(404).json({ error: "Message not found." });
+      const isSelf = msg.sender_id === userId;
+      const isPrivileged = mem.role === "owner" || mem.role === "admin";
+      if (!isSelf && !isPrivileged) {
+        return res.status(403).json({ error: "You can only delete your own messages unless you are Owner or Admin." });
+      }
+      const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+      const publicId = msg.cloudinary_public_id || msg.b2_file_id;
+      const mediaType = msg.media_type;
+      const currentPins = safeJsonParse(fam.pinned_messages_json, []);
+      const filteredPins = currentPins.filter((p) => p.messageId !== messageId);
+      db.prepare(`
+        UPDATE family_messages SET
+          is_deleted = 1,
+          is_pinned = 0,
+          content = 'This message was deleted',
+          media_url = NULL,
+          cloudinary_public_id = NULL,
+          b2_file_id = NULL,
+          b2_file_name = NULL,
+          reactions_json = '{}',
+          deleted_by = ?,
+          deleted_by_role = ?,
+          updated_at = ?
+        WHERE id = ? AND family_id = ?
+      `).run(userId, mem.role, nowIso, messageId, familyId);
+      if (filteredPins.length !== currentPins.length) {
+        db.prepare("UPDATE families SET pinned_messages_json = ?, updated_at = ? WHERE id = ?").run(
+          JSON.stringify(filteredPins),
+          nowIso,
+          familyId
+        );
+      }
+      if (fam.last_message_id === messageId) {
+        db.prepare("UPDATE families SET last_message_text = 'This message was deleted', updated_at = ? WHERE id = ?").run(
+          nowIso,
+          familyId
+        );
+      }
+      if (publicId) {
+        const resType = mediaType === "voice" ? "raw" : "image";
+        deleteAssetFromCloudinary(publicId, resType).catch(() => {
+        });
+      }
+      return res.json({ success: true, pinnedMessages: filteredPins });
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Failed to delete message" });
+    }
+  });
+  router.post("/:familyId/read", (req, res) => {
+    try {
+      const userId = req.authUserId;
+      const { familyId } = req.params;
+      const mem = getActiveMembership(familyId, userId);
+      if (!mem || mem.status !== "active") {
+        return res.status(403).json({ error: "Active Family membership required." });
+      }
+      const messageIds = Array.isArray(req.body?.messageIds) ? req.body.messageIds.filter((v) => typeof v === "string").slice(-50) : [];
+      const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+      const profile = getProfileById(userId);
+      const displayName = profile?.display_name || mem.display_name || "Member";
+      db.prepare("UPDATE family_members SET last_read_at = ?, updated_at = ? WHERE family_id = ? AND user_id = ?").run(
+        nowIso,
+        nowIso,
+        familyId,
+        userId
+      );
+      if (messageIds.length > 0) {
+        const stmt = db.prepare(`
+          INSERT OR IGNORE INTO family_message_reads (message_id, family_id, user_id, display_name, read_at)
+          VALUES (?, ?, ?, ?, ?)
+        `);
+        for (const mid of messageIds) {
+          stmt.run(mid, familyId, userId, displayName, nowIso);
+        }
+      }
+      return res.json({ success: true, lastReadAt: nowIso });
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Failed to mark messages read" });
+    }
+  });
+  router.get("/:familyId/messages/:messageId/seen", (req, res) => {
+    try {
+      const userId = req.authUserId;
+      const { familyId, messageId } = req.params;
+      const mem = getActiveMembership(familyId, userId);
+      if (!mem || mem.status !== "active") {
+        return res.status(403).json({ error: "Active Family membership required." });
+      }
+      const fam = db.prepare("SELECT member_count FROM families WHERE id = ?").get(familyId);
+      const countRow = db.prepare("SELECT COUNT(*) as cnt FROM family_message_reads WHERE family_id = ? AND message_id = ?").get(familyId, messageId);
+      const count = Number(countRow?.cnt || 0);
+      const largeFamily = Number(fam?.member_count || 0) > LARGE_FAMILY_THRESHOLD;
+      if (largeFamily) {
+        return res.json({ count, readers: [], isLargeFamily: true });
+      }
+      const readers = db.prepare(
+        `SELECT user_id as userId, display_name as displayName, read_at as readAt
+           FROM family_message_reads
+           WHERE family_id = ? AND message_id = ?
+           ORDER BY read_at DESC LIMIT 50`
+      ).all(familyId, messageId);
+      return res.json({ count, readers, isLargeFamily: false });
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Failed to load seen info" });
+    }
+  });
+  router.post("/:familyId/typing", (req, res) => {
+    try {
+      const userId = req.authUserId;
+      const { familyId } = req.params;
+      const isTyping = Boolean(req.body?.isTyping);
+      const fam = db.prepare("SELECT member_count FROM families WHERE id = ?").get(familyId);
+      if (!fam || Number(fam.member_count || 0) > LARGE_FAMILY_THRESHOLD) {
+        return res.json({ success: true, disabledForLargeFamily: true });
+      }
+      const mem = getActiveMembership(familyId, userId);
+      if (!mem || mem.status !== "active") {
+        return res.status(403).json({ error: "Active Family membership required." });
+      }
+      if (isTyping) {
+        const profile = getProfileById(userId);
+        const name = profile?.display_name || mem.display_name || "Member";
+        db.prepare(`
+          INSERT INTO family_typing_status (family_id, user_id, display_name, updated_at)
+          VALUES (?, ?, ?, ?)
+          ON CONFLICT(family_id, user_id) DO UPDATE SET display_name = excluded.display_name, updated_at = excluded.updated_at
+        `).run(familyId, userId, name, (/* @__PURE__ */ new Date()).toISOString());
+      } else {
+        db.prepare("DELETE FROM family_typing_status WHERE family_id = ? AND user_id = ?").run(familyId, userId);
+      }
+      return res.json({ success: true });
+    } catch {
+      return res.status(500).json({ error: "Failed to update typing status" });
+    }
+  });
+  router.get("/:familyId/typing", (req, res) => {
+    try {
+      const userId = req.authUserId;
+      const { familyId } = req.params;
+      const fam = db.prepare("SELECT member_count FROM families WHERE id = ?").get(familyId);
+      if (!fam || Number(fam.member_count || 0) > LARGE_FAMILY_THRESHOLD) {
+        return res.json({ typingUsers: [], disabledForLargeFamily: true });
+      }
+      const cutoff = new Date(Date.now() - 5500).toISOString();
+      const rows = db.prepare(
+        `SELECT user_id as userId, display_name as displayName
+           FROM family_typing_status
+           WHERE family_id = ? AND user_id != ? AND updated_at > ?
+           ORDER BY updated_at DESC LIMIT 10`
+      ).all(familyId, userId, cutoff);
+      return res.json({ typingUsers: rows, disabledForLargeFamily: false });
+    } catch {
+      return res.json({ typingUsers: [] });
+    }
+  });
+  return router;
+}
+
 // server.ts
 if (import_fs3.default.existsSync(import_path3.default.join(process.cwd(), ".env.example"))) {
   import_dotenv.default.config({ path: import_path3.default.join(process.cwd(), ".env.example") });
@@ -612,62 +3327,20 @@ function createStandardTransporter(host, port, user, pass) {
   const finalHost = isGmail ? "smtp.gmail.com" : targetHost;
   const finalPort = isGmail ? 587 : targetPort;
   const isSecure = finalPort === 465;
-  return import_nodemailer.default.createTransport({
+  return import_nodemailer2.default.createTransport({
     host: finalHost,
     port: finalPort,
     secure: isSecure,
     requireTLS: !isSecure,
     auth: { user: targetUser, pass: targetPass },
     lookup: (hostname, _options, callback) => {
-      import_dns.default.lookup(hostname, { family: 4 }, callback);
+      import_dns2.default.lookup(hostname, { family: 4 }, callback);
     },
     connectionTimeout: 7e3,
     greetingTimeout: 5e3,
     socketTimeout: 8e3,
     tls: { rejectUnauthorized: false }
   });
-}
-async function sendBanNotificationEmail(toEmail, username, displayName, reason) {
-  if (!toEmail || !toEmail.includes("@")) {
-    return false;
-  }
-  const user = process.env.SMTP_USER || process.env.GMAIL_USER;
-  const pass = process.env.SMTP_PASS || process.env.GMAIL_PASS;
-  if (!user || !pass) {
-    return false;
-  }
-  const transporter = createStandardTransporter();
-  const htmlContent = `
-<div style="font-family: Arial, sans-serif; max-width: 520px; margin: 0 auto; padding: 32px 24px; background-color: #0a0a0a; border-radius: 16px; color: #ffffff; border: 1px solid #262626;">
-  <div style="text-align: center; margin-bottom: 24px;">
-    <h2 style="color: #ef4444; font-size: 24px; margin: 0; font-weight: 800;">LiveConnect Account Notice</h2>
-    <p style="color: #a3a3a3; font-size: 14px; margin-top: 6px;">Important security & account status notification</p>
-  </div>
-  <div style="background-color: #171717; border: 1px solid #262626; border-radius: 12px; padding: 24px; margin-bottom: 24px;">
-    <p style="color: #ffffff; font-size: 16px; margin: 0 0 12px 0;">
-      Hello <strong>${displayName || username}</strong> (@${username}),
-    </p>
-    <p style="color: #d4d4d4; font-size: 14px; line-height: 1.6; margin: 0 0 16px 0;">
-      Your LiveConnect account (<strong>${toEmail}</strong> / @${username}) has been <span style="color: #ef4444; font-weight: bold;">banned / suspended</span>.
-    </p>
-    ${reason ? `<div style="background-color: #262626; border-left: 4px solid #ef4444; padding: 14px 16px; border-radius: 8px; margin-bottom: 16px;">
-            <p style="color: #a3a3a3; font-size: 11px; margin: 0 0 4px 0; font-weight: bold; text-transform: uppercase;">Reason for Ban:</p>
-            <p style="color: #f87171; font-size: 14px; margin: 0; font-weight: 600;">${reason}</p>
-          </div>` : ""}
-  </div>
-</div>`;
-  try {
-    await transporter.sendMail({
-      from: '"LiveConnect Security" <security@liveconnect.app>',
-      to: toEmail,
-      subject: `Account Banned Notice: LiveConnect (@${username})`,
-      html: htmlContent
-    });
-    return true;
-  } catch (err) {
-    console.warn(`[Ban Email] Email send notice for ${toEmail}:`, err.message || err);
-    return false;
-  }
 }
 async function sendOtpEmail(toEmail, otpCode) {
   if (!toEmail || !toEmail.includes("@")) return false;
@@ -708,10 +3381,10 @@ async function sendOtpEmail(toEmail, otpCode) {
     return false;
   }
 }
-var app = (0, import_express.default)();
+var app = (0, import_express2.default)();
 var PORT = parseInt(process.env.PORT || "3000", 10);
-app.use(import_express.default.json({ limit: "50mb" }));
-app.use(import_express.default.urlencoded({ extended: true, limit: "50mb" }));
+app.use(import_express2.default.json({ limit: "50mb" }));
+app.use(import_express2.default.urlencoded({ extended: true, limit: "50mb" }));
 var mediaFilesStore = /* @__PURE__ */ new Map();
 function transcodeAudioToMp3(inputBuffer) {
   return new Promise((resolve, reject) => {
@@ -821,16 +3494,123 @@ async function getOptionalAuthUserId(req) {
   if (!token) return null;
   return verifyAuthToken(token);
 }
+function getRequestDeviceId(req) {
+  const fromHeader = req.headers["x-device-id"];
+  if (typeof fromHeader === "string" && fromHeader.trim()) return fromHeader.trim().slice(0, 128);
+  const fromBody = req.body?.deviceId;
+  if (typeof fromBody === "string" && fromBody.trim()) return fromBody.trim().slice(0, 128);
+  return null;
+}
+function syncProfileCacheAfterModeration(userId, status) {
+  for (const [tok, val] of verifiedFirebaseTokenCache.entries()) {
+    if (val.uid === userId) verifiedFirebaseTokenCache.delete(tok);
+  }
+  const fresh = getProfileById(userId);
+  if (fresh) {
+    serverProfilesStore.set(userId, {
+      ...fresh,
+      status,
+      is_online: isAccountHiddenStatus(status) ? false : fresh.is_online
+    });
+  }
+}
+var APPEAL_ALLOWED_API_PATHS = /* @__PURE__ */ new Set([
+  "/appeals",
+  "/appeals/me",
+  "/appeals/upload",
+  "/account/export-data",
+  "/account/status",
+  "/account/templates",
+  "/account/reactivate",
+  "/account/acknowledge-restored",
+  "/auth/session",
+  "/auth/logout",
+  "/auth/check-ban-status",
+  "/auth/login",
+  "/auth/google",
+  "/auth/create-account",
+  "/auth/confirm-user",
+  "/auth/send-otp",
+  "/auth/verify-otp",
+  "/auth/truecaller/initiate",
+  "/auth/truecaller/status",
+  "/auth/truecaller/verify-otp",
+  "/auth/truecaller/verify-number",
+  "/health"
+]);
+app.use("/api", async (req, res, next) => {
+  try {
+    const token = extractBearerToken(req);
+    if (!token) return next();
+    const sessionInfo = getUserBySessionToken(token);
+    const uid = sessionInfo?.userRow?.id || await verifyAuthToken(token);
+    if (!uid) return next();
+    const liveRow = await resolveLiveUserRow(uid, syncProfileCacheAfterModeration);
+    if (!liveRow) return next();
+    const tokenScope = sessionInfo?.session?.token_scope || "full";
+    req.authUserId = uid;
+    req.authUserRow = liveRow;
+    req.tokenScope = tokenScope;
+    const reqPath = req.path || "/";
+    const isMediaServe = reqPath.startsWith("/media/file/") || reqPath.startsWith("/b2/file/");
+    if (APPEAL_ALLOWED_API_PATHS.has(reqPath) || isMediaServe) {
+      return next();
+    }
+    if (tokenScope === "appeal_only" || liveRow.status === "suspended" || liveRow.status === "disabled" || liveRow.status === "deactivated") {
+      return res.status(403).json({
+        error: liveRow.status === "disabled" ? "Your account has been permanently disabled. Only the appeal and data-export APIs are permitted." : liveRow.status === "deactivated" ? "Your account is deactivated. Please reactivate your account to continue." : "Your account has been suspended. Only the appeal and data-export APIs are permitted.",
+        code: "ACCOUNT_SUSPENDED",
+        accountStatus: liveRow.status,
+        banReason: liveRow.ban_reason || null,
+        ruleBroken: liveRow.rule_broken || null,
+        ruleLabel: formatRuleLabel(liveRow.rule_broken),
+        banUntil: liveRow.ban_until || liveRow.banned_until || null,
+        scheduledDeletionAt: liveRow.scheduled_deletion_at || null
+      });
+    }
+    const restrictedWriteRoutes = /* @__PURE__ */ new Set([
+      "/messages/send",
+      "/messages/react",
+      "/calls/create",
+      "/relations/follow",
+      "/conversations/create-or-get"
+    ]);
+    if (liveRow.status === "restricted" && restrictedWriteRoutes.has(reqPath)) {
+      return res.status(403).json({
+        error: "Your account is temporarily restricted from sending messages, starting calls, or following users.",
+        code: "ACCOUNT_RESTRICTED",
+        accountStatus: "restricted",
+        restrictedUntil: liveRow.restricted_until || null
+      });
+    }
+    return next();
+  } catch {
+    return next();
+  }
+});
 async function requireAuth(req, res, next) {
   const token = extractBearerToken(req);
   if (!token) {
     return res.status(401).json({ error: "Authentication required" });
   }
-  const uid = await verifyAuthToken(token);
+  const uid = req.authUserId || await verifyAuthToken(token);
   if (!uid) {
     return res.status(401).json({ error: "Invalid or expired authentication token" });
   }
+  if (!req.authUserRow) {
+    req.authUserRow = await resolveLiveUserRow(uid, syncProfileCacheAfterModeration);
+  }
   req.authUserId = uid;
+  return next();
+}
+function requireModeratorOrAdmin(req, res, next) {
+  const userRow = req.authUserRow;
+  const uid = req.authUserId;
+  const live = userRow || (uid ? findUserById(uid) : void 0);
+  const role = live?.role || "user";
+  if (role !== "admin" && role !== "moderator") {
+    return res.status(403).json({ error: "Admin or moderator privileges required" });
+  }
   return next();
 }
 var blockRateLimitBuckets = /* @__PURE__ */ new Map();
@@ -852,6 +3632,27 @@ function blockRateLimiter(req, res, next) {
   }
   timestamps.push(now);
   blockRateLimitBuckets.set(key, timestamps);
+  return next();
+}
+var appealRateLimitBuckets = /* @__PURE__ */ new Map();
+var APPEAL_RATE_LIMIT_MAX = 5;
+var APPEAL_RATE_LIMIT_WINDOW_MS = 10 * 6e4;
+function appealRateLimiter(req, res, next) {
+  const key = String(req.authUserId || req.ip || "anonymous");
+  const now = Date.now();
+  const windowStart = now - APPEAL_RATE_LIMIT_WINDOW_MS;
+  const timestamps = (appealRateLimitBuckets.get(key) || []).filter((ts) => ts > windowStart);
+  if (timestamps.length >= APPEAL_RATE_LIMIT_MAX) {
+    const oldest = timestamps[0] || now;
+    const retryAfterSec = Math.max(1, Math.ceil((oldest + APPEAL_RATE_LIMIT_WINDOW_MS - now) / 1e3));
+    res.setHeader("Retry-After", String(retryAfterSec));
+    return res.status(429).json({
+      error: "Appeal submission rate limit exceeded. Please wait before submitting another request.",
+      retryAfterSeconds: retryAfterSec
+    });
+  }
+  timestamps.push(now);
+  appealRateLimitBuckets.set(key, timestamps);
   return next();
 }
 function getDeterministicDirectConvId(userA, userB) {
@@ -963,10 +3764,23 @@ function isMutualFollow(userA, userB) {
   if (isBlocked(userA, userB)) return false;
   return isFollowing(userA, userB) && isFollowing(userB, userA);
 }
+function isTargetUserHidden(userId) {
+  if (!userId) return false;
+  const row = db.prepare("SELECT status FROM users WHERE id = ? LIMIT 1").get(userId);
+  return isAccountHiddenStatus(row?.status);
+}
 function getFollowCounts(userId) {
   const canonicalUserId = resolveUserId(userId);
-  const followersRow = db.prepare("SELECT COUNT(*) as cnt FROM follows WHERE following_id = ?").get(canonicalUserId);
-  const followingRow = db.prepare("SELECT COUNT(*) as cnt FROM follows WHERE follower_id = ?").get(canonicalUserId);
+  const followersRow = db.prepare(
+    `SELECT COUNT(*) as cnt FROM follows f
+       LEFT JOIN users u ON u.id = f.follower_id
+       WHERE f.following_id = ? AND COALESCE(u.status, 'active') NOT IN ('suspended', 'disabled', 'deactivated')`
+  ).get(canonicalUserId);
+  const followingRow = db.prepare(
+    `SELECT COUNT(*) as cnt FROM follows f
+       LEFT JOIN users u ON u.id = f.following_id
+       WHERE f.follower_id = ? AND COALESCE(u.status, 'active') NOT IN ('suspended', 'disabled', 'deactivated')`
+  ).get(canonicalUserId);
   return {
     followersCount: Number(followersRow?.cnt || 0),
     followingCount: Number(followingRow?.cnt || 0)
@@ -1047,7 +3861,19 @@ function buildConversationObject(convId, requestingUserId) {
        WHERE m.conversation_id = ? AND dm.message_id IS NULL
        ORDER BY m.created_at DESC LIMIT 1`
   ).get(convId);
-  const lastMessage = msgRow ? formatMessageRow(msgRow) : null;
+  const lastMessage = msgRow ? formatMessageRow2(msgRow) : null;
+  let pinnedMessage = null;
+  if (convRow.pinned_message_id) {
+    const pinnedRow = db.prepare(
+      `SELECT m.* FROM messages m
+         LEFT JOIN deleted_messages dm ON m.id = dm.message_id
+         WHERE m.id = ? AND m.conversation_id = ? AND dm.message_id IS NULL
+         LIMIT 1`
+    ).get(convRow.pinned_message_id, convId);
+    if (pinnedRow) {
+      pinnedMessage = formatMessageRow2(pinnedRow);
+    }
+  }
   let unreadCount = 0;
   if (requestingUserId) {
     const unreadRow = db.prepare(
@@ -1079,6 +3905,7 @@ function buildConversationObject(convId, requestingUserId) {
     id: convRow.id,
     type: "direct",
     pinned_message_id: convRow.pinned_message_id || null,
+    pinned_message: pinnedMessage,
     member_ids: memberIds,
     members_meta: membersMeta,
     created_at: convRow.created_at,
@@ -1088,7 +3915,7 @@ function buildConversationObject(convId, requestingUserId) {
     unread_count: unreadCount
   };
 }
-function formatMessageRow(row) {
+function formatMessageRow2(row) {
   if (!row) return null;
   let reactions = void 0;
   if (row.reactions_json) {
@@ -1233,6 +4060,18 @@ app.post("/api/auth/create-account", async (req, res) => {
     }
     const cleanEmail = String(email).trim().toLowerCase();
     const cleanUsername = String(username).trim().toLowerCase().replace(/[^a-z0-9_]/g, "");
+    const deviceId = getRequestDeviceId(req);
+    const permanentBlock = findPermanentBanByIdentifier({
+      email: cleanEmail,
+      phone: req.body?.phone || null,
+      deviceId
+    });
+    if (permanentBlock) {
+      return res.status(403).json({
+        error: `Account creation is permanently blocked because this ${permanentBlock.type} is associated with a permanently disabled account.`,
+        code: "PERMANENT_BAN_BLOCK"
+      });
+    }
     if (cleanUsername.length < 3) {
       return res.status(400).json({ error: "Username must be at least 3 characters." });
     }
@@ -1252,10 +4091,11 @@ app.post("/api/auth/create-account", async (req, res) => {
       username: cleanUsername,
       country: country || "India"
     };
+    const assignedRole = cleanEmail === "ravikantsharma925490@gmail.com" ? "admin" : "user";
     db.prepare(`
-      INSERT INTO users (id, email, password_hash, email_confirmed, user_metadata, created_at, updated_at)
-      VALUES (?, ?, ?, 1, ?, ?, ?)
-    `).run(userId, cleanEmail, hashPassword(password), JSON.stringify(meta), nowIso, nowIso);
+      INSERT INTO users (id, email, password_hash, email_confirmed, user_metadata, role, last_device_id, created_at, updated_at)
+      VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)
+    `).run(userId, cleanEmail, hashPassword(password), JSON.stringify(meta), assignedRole, deviceId, nowIso, nowIso);
     const profile = upsertProfile({
       id: userId,
       username: cleanUsername,
@@ -1298,32 +4138,54 @@ app.post("/api/auth/login", async (req, res) => {
       return res.status(400).json({ error: "Email and password are required" });
     }
     const cleanEmail = String(email).trim().toLowerCase();
-    const userRow = findUserByEmail(cleanEmail);
+    const deviceId = getRequestDeviceId(req);
+    let userRow = findUserByEmail(cleanEmail);
     if (!userRow) {
       return res.status(401).json({ error: "Invalid email or password." });
     }
     if (!userRow.password_hash || !verifyPassword(String(password), userRow.password_hash)) {
       return res.status(401).json({ error: "Invalid email or password." });
     }
-    if (userRow.banned_until && new Date(userRow.banned_until).getTime() > Date.now()) {
+    userRow = await resolveLiveUserRow(userRow.id, syncProfileCacheAfterModeration) || userRow;
+    if (userRow.status === "suspended" || userRow.status === "disabled") {
+      revokeAllSessionsForUser(userRow.id);
+      const appealSession = createSessionForUser(userRow.id, 7, "appeal_only", deviceId);
+      const latestBan = db.prepare("SELECT * FROM bans WHERE user_id = ? ORDER BY created_at DESC LIMIT 1").get(userRow.id);
       return res.status(403).json({
-        error: "Your account has been suspended.",
+        error: userRow.status === "disabled" ? "Your account has been permanently disabled." : "Your account has been suspended.",
         banned: true,
-        bannedUntil: userRow.banned_until
+        accountStatus: userRow.status,
+        banReason: userRow.ban_reason || latestBan?.reason || "Community Guidelines violation",
+        ruleBroken: userRow.rule_broken || latestBan?.rule_broken || "community_guidelines",
+        ruleLabel: formatRuleLabel(userRow.rule_broken || latestBan?.rule_broken),
+        banUntil: userRow.ban_until || userRow.banned_until || null,
+        bannedUntil: userRow.ban_until || userRow.banned_until || null,
+        scheduledDeletionAt: userRow.scheduled_deletion_at || null,
+        strikeCount: Number(userRow.strike_count || 0),
+        appealSession,
+        user: formatAuthUser(userRow)
       });
     }
-    const session = createSessionForUser(userRow.id);
+    if (userRow.status === "deactivated") {
+      db.prepare("UPDATE users SET status = 'active', updated_at = ? WHERE id = ?").run(
+        (/* @__PURE__ */ new Date()).toISOString(),
+        userRow.id
+      );
+      userRow = findUserById(userRow.id);
+    }
+    const session = createSessionForUser(userRow.id, 30, "full", deviceId);
     const profile = getProfileById(userRow.id);
     if (profile) {
       upsertProfile({ id: userRow.id, username: profile.username, display_name: profile.display_name, is_online: true });
-      serverProfilesStore.set(userRow.id, { ...profile, is_online: true });
+      serverProfilesStore.set(userRow.id, { ...profile, is_online: true, status: userRow.status });
     }
     return res.json({
       success: true,
       session,
       user: formatAuthUser(userRow),
-      profile: profile ? { ...profile, is_online: true } : null,
-      needsOnboarding: !profile
+      profile: profile ? { ...profile, is_online: true, status: userRow.status } : null,
+      needsOnboarding: !profile,
+      restoredNoticePending: Boolean(userRow.restored_notice_pending)
     });
   } catch (err) {
     return res.status(500).json({ error: err.message || "Failed to sign in" });
@@ -1373,9 +4235,17 @@ app.post("/api/auth/google", async (req, res) => {
       return res.status(400).json({ error: "Google account did not return an email address." });
     }
     const cleanEmail = googleProfile.email.trim().toLowerCase();
+    const deviceId = getRequestDeviceId(req);
     let userRow = findUserByEmail(cleanEmail);
     const nowIso = (/* @__PURE__ */ new Date()).toISOString();
     if (!userRow) {
+      const permanentBlock = findPermanentBanByIdentifier({ email: cleanEmail, deviceId });
+      if (permanentBlock) {
+        return res.status(403).json({
+          error: `Account creation is permanently blocked because this ${permanentBlock.type} is associated with a permanently disabled account.`,
+          code: "PERMANENT_BAN_BLOCK"
+        });
+      }
       const userId = generateUUID();
       const meta = {
         full_name: googleProfile.name || cleanEmail.split("@")[0],
@@ -1385,18 +4255,34 @@ app.post("/api/auth/google", async (req, res) => {
         provider: "google",
         google_sub: googleProfile.sub
       };
+      const assignedRole = cleanEmail === "ravikantsharma925490@gmail.com" ? "admin" : "user";
       db.prepare(`
-        INSERT INTO users (id, email, password_hash, email_confirmed, user_metadata, created_at, updated_at)
-        VALUES (?, ?, NULL, 1, ?, ?, ?)
-      `).run(userId, cleanEmail, JSON.stringify(meta), nowIso, nowIso);
+        INSERT INTO users (id, email, password_hash, email_confirmed, user_metadata, role, last_device_id, created_at, updated_at)
+        VALUES (?, ?, NULL, 1, ?, ?, ?, ?, ?)
+      `).run(userId, cleanEmail, JSON.stringify(meta), assignedRole, deviceId, nowIso, nowIso);
       userRow = findUserById(userId);
     } else {
-      if (userRow.banned_until && new Date(userRow.banned_until).getTime() > Date.now()) {
+      userRow = await resolveLiveUserRow(userRow.id, syncProfileCacheAfterModeration) || userRow;
+      if (userRow.status === "suspended" || userRow.status === "disabled") {
+        revokeAllSessionsForUser(userRow.id);
+        const appealSession = createSessionForUser(userRow.id, 7, "appeal_only", deviceId);
         return res.status(403).json({
-          error: "Your account has been suspended.",
+          error: userRow.status === "disabled" ? "Your account has been permanently disabled." : "Your account has been suspended.",
           banned: true,
-          bannedUntil: userRow.banned_until
+          accountStatus: userRow.status,
+          banReason: userRow.ban_reason || "Community Guidelines violation",
+          ruleBroken: userRow.rule_broken || "community_guidelines",
+          ruleLabel: formatRuleLabel(userRow.rule_broken),
+          banUntil: userRow.ban_until || userRow.banned_until || null,
+          bannedUntil: userRow.ban_until || userRow.banned_until || null,
+          scheduledDeletionAt: userRow.scheduled_deletion_at || null,
+          strikeCount: Number(userRow.strike_count || 0),
+          appealSession,
+          user: formatAuthUser(userRow)
         });
+      }
+      if (userRow.status === "deactivated") {
+        db.prepare("UPDATE users SET status = 'active', updated_at = ? WHERE id = ?").run(nowIso, userRow.id);
       }
       let existingMeta = {};
       try {
@@ -1409,28 +4295,30 @@ app.post("/api/auth/google", async (req, res) => {
         avatar_url: existingMeta.avatar_url || googleProfile.picture || null,
         provider: "google"
       };
-      db.prepare("UPDATE users SET user_metadata = ?, email_confirmed = 1, updated_at = ? WHERE id = ?").run(
+      db.prepare("UPDATE users SET user_metadata = ?, email_confirmed = 1, last_device_id = COALESCE(?, last_device_id), updated_at = ? WHERE id = ?").run(
         JSON.stringify(updatedMeta),
+        deviceId,
         nowIso,
         userRow.id
       );
       userRow = findUserById(userRow.id);
     }
-    const session = createSessionForUser(userRow.id);
+    const session = createSessionForUser(userRow.id, 30, "full", deviceId);
     const profile = getProfileById(userRow.id);
     return res.json({
       success: true,
       session,
       user: formatAuthUser(userRow),
       profile,
-      needsOnboarding: !profile
+      needsOnboarding: !profile,
+      restoredNoticePending: Boolean(userRow.restored_notice_pending)
     });
   } catch (err) {
     console.error("[Google Auth Error]:", err);
     return res.status(500).json({ error: err.message || "Google sign-in failed" });
   }
 });
-app.get("/api/auth/session", (req, res) => {
+app.get("/api/auth/session", async (req, res) => {
   try {
     const token = extractBearerToken(req);
     if (!token) {
@@ -1440,27 +4328,50 @@ app.get("/api/auth/session", (req, res) => {
     if (!authInfo) {
       return res.json({ session: null, user: null, profile: null });
     }
-    const bannedUntil = authInfo.userRow.banned_until;
-    if (bannedUntil && new Date(bannedUntil).getTime() > Date.now()) {
+    const liveRow = await resolveLiveUserRow(authInfo.user.id, syncProfileCacheAfterModeration) || authInfo.userRow;
+    const isBannedOrSuspended = liveRow.status === "suspended" || liveRow.status === "disabled";
+    if (isBannedOrSuspended) {
       return res.json({
         session: authInfo.session,
-        user: authInfo.user,
+        user: formatAuthUser(liveRow),
         profile: null,
         banned: true,
-        bannedUntil
+        accountStatus: liveRow.status,
+        banReason: liveRow.ban_reason || null,
+        ruleBroken: liveRow.rule_broken || null,
+        ruleLabel: formatRuleLabel(liveRow.rule_broken),
+        bannedUntil: liveRow.ban_until || liveRow.banned_until || null,
+        banUntil: liveRow.ban_until || liveRow.banned_until || null,
+        scheduledDeletionAt: liveRow.scheduled_deletion_at || null,
+        strikeCount: Number(liveRow.strike_count || 0)
       });
     }
-    const profile = getProfileById(authInfo.user.id);
+    if (authInfo.session.token_scope === "appeal_only") {
+      deleteSessionToken(token);
+      const upgraded = createSessionForUser(liveRow.id, 30, "full", getRequestDeviceId(req));
+      const profile2 = getProfileById(liveRow.id);
+      return res.json({
+        session: upgraded,
+        user: formatAuthUser(liveRow),
+        profile: profile2,
+        needsOnboarding: !profile2,
+        banned: false,
+        bannedUntil: null,
+        restoredNoticePending: Boolean(liveRow.restored_notice_pending)
+      });
+    }
+    const profile = getProfileById(liveRow.id);
     if (profile) {
       serverProfilesStore.set(profile.id, profile);
     }
     return res.json({
       session: authInfo.session,
-      user: authInfo.user,
+      user: formatAuthUser(liveRow),
       profile,
       needsOnboarding: !profile,
       banned: false,
-      bannedUntil: null
+      bannedUntil: null,
+      restoredNoticePending: Boolean(liveRow.restored_notice_pending)
     });
   } catch (err) {
     return res.status(500).json({ error: err.message || "Session lookup failed" });
@@ -1658,30 +4569,64 @@ app.post("/api/auth/update-password", (req, res) => {
     return res.status(500).json({ error: err.message || "Failed to update password" });
   }
 });
-app.post("/api/auth/confirm-user", (req, res) => {
+app.post("/api/auth/confirm-user", async (req, res) => {
   try {
     const { email, password } = req.body || {};
     if (!email) return res.status(400).json({ error: "Email is required" });
     const cleanEmail = String(email).trim().toLowerCase();
+    const deviceId = getRequestDeviceId(req);
     let userRow = findUserByEmail(cleanEmail);
     const nowIso = (/* @__PURE__ */ new Date()).toISOString();
     const cleanUsername = cleanEmail.split("@")[0].replace(/[^a-z0-9_]/g, "") || "user";
     if (!userRow && password) {
+      const permanentBlock = findPermanentBanByIdentifier({ email: cleanEmail, deviceId });
+      if (permanentBlock) {
+        return res.status(403).json({
+          error: `Account creation is permanently blocked because this ${permanentBlock.type} is associated with a permanently disabled account.`,
+          code: "PERMANENT_BAN_BLOCK"
+        });
+      }
       const userId = generateUUID();
+      const assignedRole = cleanEmail === "ravikantsharma925490@gmail.com" ? "admin" : "user";
       db.prepare(`
-        INSERT INTO users (id, email, password_hash, email_confirmed, user_metadata, created_at, updated_at)
-        VALUES (?, ?, ?, 1, ?, ?, ?)
+        INSERT INTO users (id, email, password_hash, email_confirmed, user_metadata, role, last_device_id, created_at, updated_at)
+        VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)
       `).run(
         userId,
         cleanEmail,
         hashPassword(String(password)),
         JSON.stringify({ display_name: cleanUsername, username: cleanUsername, country: "India" }),
+        assignedRole,
+        deviceId,
         nowIso,
         nowIso
       );
       userRow = findUserById(userId);
     } else if (userRow) {
-      db.prepare("UPDATE users SET email_confirmed = 1, updated_at = ? WHERE id = ?").run(nowIso, userRow.id);
+      userRow = await resolveLiveUserRow(userRow.id, syncProfileCacheAfterModeration) || userRow;
+      if (userRow.status === "suspended" || userRow.status === "disabled") {
+        revokeAllSessionsForUser(userRow.id);
+        const appealSession = createSessionForUser(userRow.id, 7, "appeal_only", deviceId);
+        return res.status(403).json({
+          error: userRow.status === "disabled" ? "Your account has been permanently disabled." : "Your account has been suspended.",
+          banned: true,
+          accountStatus: userRow.status,
+          banReason: userRow.ban_reason || "Community Guidelines violation",
+          ruleBroken: userRow.rule_broken || "community_guidelines",
+          ruleLabel: formatRuleLabel(userRow.rule_broken),
+          banUntil: userRow.ban_until || userRow.banned_until || null,
+          bannedUntil: userRow.ban_until || userRow.banned_until || null,
+          scheduledDeletionAt: userRow.scheduled_deletion_at || null,
+          strikeCount: Number(userRow.strike_count || 0),
+          appealSession,
+          user: formatAuthUser(userRow)
+        });
+      }
+      db.prepare("UPDATE users SET email_confirmed = 1, status = CASE WHEN status = 'deactivated' THEN 'active' ELSE status END, updated_at = ? WHERE id = ?").run(
+        nowIso,
+        userRow.id
+      );
+      userRow = findUserById(userRow.id);
     }
     if (!userRow) {
       return res.status(404).json({ error: "User not found" });
@@ -1691,7 +4636,7 @@ app.post("/api/auth/confirm-user", (req, res) => {
       display_name: cleanUsername,
       email: cleanEmail
     });
-    const session = createSessionForUser(userRow.id);
+    const session = createSessionForUser(userRow.id, 30, "full", deviceId);
     return res.json({
       success: true,
       userId: userRow.id,
@@ -1720,7 +4665,7 @@ app.post("/api/auth/send-otp", async (req, res) => {
     return res.status(500).json({ error: err.message || "Failed to send OTP email" });
   }
 });
-app.post("/api/auth/verify-otp", (req, res) => {
+app.post("/api/auth/verify-otp", async (req, res) => {
   try {
     const { email, otpCode } = req.body || {};
     if (!email || !otpCode) {
@@ -1728,6 +4673,7 @@ app.post("/api/auth/verify-otp", (req, res) => {
     }
     const cleanEmail = String(email).trim().toLowerCase();
     const cleanCode = String(otpCode).trim();
+    const deviceId = getRequestDeviceId(req);
     const row = db.prepare("SELECT * FROM user_otps WHERE LOWER(email) = LOWER(?) ORDER BY created_at DESC LIMIT 1").get(cleanEmail);
     if (!row) {
       return res.status(400).json({ error: "Verification code not found. Please request a new code." });
@@ -1742,16 +4688,35 @@ app.post("/api/auth/verify-otp", (req, res) => {
       return res.status(400).json({ error: "Incorrect code. Please check and try again." });
     }
     db.prepare("UPDATE user_otps SET verified = 1 WHERE id = ?").run(row.id);
-    const userRow = findUserByEmail(cleanEmail);
+    let userRow = findUserByEmail(cleanEmail);
     let session = null;
     let user = null;
     let profile = null;
     if (userRow) {
-      db.prepare("UPDATE users SET email_confirmed = 1, updated_at = ? WHERE id = ?").run(
-        (/* @__PURE__ */ new Date()).toISOString(),
-        userRow.id
-      );
-      session = createSessionForUser(userRow.id);
+      userRow = await resolveLiveUserRow(userRow.id, syncProfileCacheAfterModeration) || userRow;
+      if (userRow.status === "suspended" || userRow.status === "disabled") {
+        revokeAllSessionsForUser(userRow.id);
+        const appealSession = createSessionForUser(userRow.id, 7, "appeal_only", deviceId);
+        return res.status(403).json({
+          error: userRow.status === "disabled" ? "Your account has been permanently disabled." : "Your account has been suspended.",
+          banned: true,
+          accountStatus: userRow.status,
+          banReason: userRow.ban_reason || "Community Guidelines violation",
+          ruleBroken: userRow.rule_broken || "community_guidelines",
+          ruleLabel: formatRuleLabel(userRow.rule_broken),
+          banUntil: userRow.ban_until || userRow.banned_until || null,
+          bannedUntil: userRow.ban_until || userRow.banned_until || null,
+          scheduledDeletionAt: userRow.scheduled_deletion_at || null,
+          strikeCount: Number(userRow.strike_count || 0),
+          appealSession,
+          user: formatAuthUser(userRow)
+        });
+      }
+      db.prepare(
+        "UPDATE users SET email_confirmed = 1, status = CASE WHEN status = 'deactivated' THEN 'active' ELSE status END, updated_at = ? WHERE id = ?"
+      ).run((/* @__PURE__ */ new Date()).toISOString(), userRow.id);
+      userRow = findUserById(userRow.id);
+      session = createSessionForUser(userRow.id, 30, "full", deviceId);
       user = formatAuthUser(userRow);
       profile = getProfileById(userRow.id);
     }
@@ -1760,65 +4725,692 @@ app.post("/api/auth/verify-otp", (req, res) => {
     return res.status(500).json({ error: err.message || "Failed to verify OTP" });
   }
 });
-app.get("/api/auth/check-ban-status", (req, res) => {
+app.get("/api/auth/check-ban-status", async (req, res) => {
   try {
     const token = extractBearerToken(req);
     if (!token) return res.status(401).json({ error: "Not authenticated" });
-    const authInfo = getUserBySessionToken(token);
-    if (!authInfo) return res.status(401).json({ error: "Not authenticated" });
-    const bannedUntil = authInfo.userRow.banned_until;
-    const isBanned = Boolean(bannedUntil && new Date(bannedUntil).getTime() > Date.now());
-    return res.json({ banned: isBanned, bannedUntil: bannedUntil || null });
+    const uid = req.authUserId || await verifyAuthToken(token);
+    if (!uid) return res.status(401).json({ error: "Not authenticated" });
+    const liveRow = await resolveLiveUserRow(uid, syncProfileCacheAfterModeration);
+    if (!liveRow) return res.status(401).json({ error: "Not authenticated" });
+    const isBanned = liveRow.status === "suspended" || liveRow.status === "disabled";
+    return res.json({
+      banned: isBanned,
+      accountStatus: liveRow.status,
+      banReason: liveRow.ban_reason || null,
+      ruleBroken: liveRow.rule_broken || null,
+      ruleLabel: formatRuleLabel(liveRow.rule_broken),
+      bannedUntil: liveRow.ban_until || liveRow.banned_until || null,
+      banUntil: liveRow.ban_until || liveRow.banned_until || null,
+      restrictedUntil: liveRow.restricted_until || null,
+      scheduledDeletionAt: liveRow.scheduled_deletion_at || null,
+      strikeCount: Number(liveRow.strike_count || 0),
+      restoredNoticePending: Boolean(liveRow.restored_notice_pending)
+    });
   } catch (err) {
     return res.status(500).json({ error: err.message || "Failed to check ban status" });
   }
 });
-app.post("/api/admin/ban-user", async (req, res) => {
+app.get("/api/account/status", requireAuth, async (req, res) => {
   try {
-    const { adminId, targetUserId, targetEmail, targetUsername, targetDisplayName, reason } = req.body || {};
-    if (!targetUserId && !targetEmail) {
-      return res.status(400).json({ error: "targetUserId or targetEmail is required" });
+    const userId = req.authUserId;
+    const liveRow = await resolveLiveUserRow(userId, syncProfileCacheAfterModeration);
+    if (!liveRow) return res.status(404).json({ error: "Account not found" });
+    const profile = getProfileById(userId);
+    const historyRows = db.prepare("SELECT * FROM bans WHERE user_id = ? ORDER BY created_at DESC LIMIT 30").all(userId);
+    const appealRows = db.prepare("SELECT * FROM appeals WHERE user_id = ? ORDER BY created_at DESC LIMIT 10").all(userId);
+    const status = liveRow.status || "active";
+    const permissions = {
+      canLogin: status === "active" || status === "restricted",
+      canSendMessages: status === "active",
+      canStartCalls: status === "active",
+      canFollowUsers: status === "active",
+      profileVisibleToOthers: status === "active" || status === "restricted",
+      appearsInSearch: status === "active" || status === "restricted",
+      canSubmitAppeal: status === "suspended" || status === "disabled" || status === "restricted",
+      canDownloadData: true
+    };
+    return res.json({
+      account: {
+        id: liveRow.id,
+        email: liveRow.email,
+        status,
+        strike_count: Number(liveRow.strike_count || 0),
+        ban_reason: liveRow.ban_reason || null,
+        rule_broken: liveRow.rule_broken || null,
+        rule_label: formatRuleLabel(liveRow.rule_broken),
+        ban_until: liveRow.ban_until || liveRow.banned_until || null,
+        restricted_until: liveRow.restricted_until || null,
+        scheduled_deletion_at: liveRow.scheduled_deletion_at || null,
+        restored_at: liveRow.restored_at || null,
+        restored_notice_pending: Boolean(liveRow.restored_notice_pending),
+        role: liveRow.role || "user"
+      },
+      profile,
+      history: historyRows.map((r) => ({ ...r, action: r.action_type || r.action, is_active: Boolean(r.is_active) })),
+      appeals: appealRows,
+      permissions
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message || "Failed to fetch account status" });
+  }
+});
+app.post("/api/account/acknowledge-restored", requireAuth, (req, res) => {
+  try {
+    const userId = req.authUserId;
+    db.prepare("UPDATE users SET restored_notice_pending = 0, updated_at = ? WHERE id = ?").run(
+      (/* @__PURE__ */ new Date()).toISOString(),
+      userId
+    );
+    return res.json({ success: true });
+  } catch (err) {
+    return res.status(500).json({ error: err.message || "Failed to acknowledge restore notice" });
+  }
+});
+app.post("/api/account/deactivate", requireAuth, (req, res) => {
+  try {
+    const userId = req.authUserId;
+    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+    db.prepare("UPDATE users SET status = 'deactivated', updated_at = ? WHERE id = ?").run(nowIso, userId);
+    db.prepare("UPDATE profiles SET is_online = 0, last_seen = ?, updated_at = ? WHERE id = ?").run(
+      nowIso,
+      nowIso,
+      userId
+    );
+    revokeAllSessionsForUser(userId);
+    writeAuditLog({
+      adminId: userId,
+      targetUserId: userId,
+      action: "deactivate",
+      reason: String(req.body?.reason || "User voluntarily deactivated their account.")
+    });
+    syncProfileCacheAfterModeration(userId, "deactivated");
+    return res.json({ success: true, status: "deactivated" });
+  } catch (err) {
+    return res.status(500).json({ error: err.message || "Failed to deactivate account" });
+  }
+});
+app.get("/api/account/export-data", requireAuth, (req, res) => {
+  try {
+    const userId = req.authUserId;
+    const userRow = findUserById(userId);
+    if (!userRow) return res.status(404).json({ error: "User not found" });
+    const profile = getProfileById(userId);
+    const follows = db.prepare("SELECT follower_id, following_id, created_at FROM follows WHERE follower_id = ? OR following_id = ?").all(userId, userId);
+    const messages = db.prepare("SELECT id, conversation_id, sender_id, content, created_at FROM messages WHERE sender_id = ? ORDER BY created_at DESC LIMIT 500").all(userId);
+    const calls = db.prepare("SELECT id, caller_id, callee_id, call_type, status, started_at, ended_at FROM calls WHERE caller_id = ? OR callee_id = ? ORDER BY created_at DESC LIMIT 200").all(userId, userId);
+    const bans = db.prepare("SELECT * FROM bans WHERE user_id = ? ORDER BY created_at DESC").all(userId);
+    const appeals = db.prepare("SELECT * FROM appeals WHERE user_id = ? ORDER BY created_at DESC").all(userId);
+    const exportPayload = {
+      exportedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      account: formatAuthUser(userRow),
+      profile,
+      follows,
+      messagesSentCount: messages.length,
+      messages,
+      calls,
+      moderationHistory: bans,
+      appeals
+    };
+    const safeUsername = profile?.username || "user";
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="liveconnect-export-${safeUsername}.json"`);
+    return res.send(JSON.stringify(exportPayload, null, 2));
+  } catch (err) {
+    return res.status(500).json({ error: err.message || "Failed to export user data" });
+  }
+});
+app.get("/api/account/templates", requireAuth, (req, res) => {
+  const userId = req.authUserId;
+  const userRow = findUserById(userId);
+  const profile = getProfileById(userId);
+  const displayName = profile?.display_name || userRow?.email?.split("@")[0] || "Alex Morgan";
+  const username = profile?.username || "alex_morgan";
+  const email = userRow?.email || "user@example.com";
+  const templates = {
+    warning: buildModerationTemplate({
+      kind: "warning",
+      displayName,
+      username,
+      email,
+      reason: "Repeated unsolicited messages flagged by safety filters.",
+      ruleBroken: "spam",
+      strikeCount: 1
+    }),
+    restricted: buildModerationTemplate({
+      kind: "restricted",
+      displayName,
+      username,
+      email,
+      reason: "Abusive language in direct messages (2nd strike).",
+      ruleBroken: "harassment",
+      strikeCount: 2,
+      banUntil: new Date(Date.now() + 2 * 24 * 3600 * 1e3).toISOString()
+    }),
+    suspend: buildModerationTemplate({
+      kind: "suspend",
+      displayName,
+      username,
+      email,
+      reason: userRow?.ban_reason || "Continued violations after prior warnings (3rd strike).",
+      ruleBroken: userRow?.rule_broken || "harassment",
+      strikeCount: Math.max(3, Number(userRow?.strike_count || 3)),
+      banUntil: userRow?.ban_until || new Date(Date.now() + 7 * 24 * 3600 * 1e3).toISOString()
+    }),
+    permanent_ban: buildModerationTemplate({
+      kind: "permanent_ban",
+      displayName,
+      username,
+      email,
+      reason: userRow?.ban_reason || "Severe safety policy violation.",
+      ruleBroken: userRow?.rule_broken || "scam",
+      strikeCount: Math.max(4, Number(userRow?.strike_count || 4)),
+      scheduledDeletionAt: userRow?.scheduled_deletion_at || new Date(Date.now() + 30 * 24 * 3600 * 1e3).toISOString()
+    }),
+    restore: buildModerationTemplate({
+      kind: "restore",
+      displayName,
+      username,
+      email,
+      reason: "Your appeal was approved and your account access has been restored.",
+      ruleBroken: "account_restored",
+      strikeCount: Math.max(0, Number(userRow?.strike_count || 0))
+    })
+  };
+  return res.json({ templates });
+});
+app.post("/api/appeals/upload", requireAuth, appealRateLimiter, async (req, res) => {
+  try {
+    const userId = req.authUserId;
+    const { base64Data, mimeType, fileName } = req.body || {};
+    if (!base64Data || typeof base64Data !== "string") {
+      return res.status(400).json({ error: "Verification image data is required" });
     }
-    let emailToSend = targetEmail;
-    let usernameToSend = targetUsername || "user";
-    let displayNameToSend = targetDisplayName || "User";
-    const targetProfile = targetUserId ? getProfileById(targetUserId) : null;
-    if (targetProfile) {
-      if (targetProfile.email) emailToSend = targetProfile.email;
-      if (targetProfile.username) usernameToSend = targetProfile.username;
-      if (targetProfile.display_name) displayNameToSend = targetProfile.display_name;
+    const cleanBase64 = base64Data.includes(",") ? base64Data.split(",")[1] : base64Data;
+    const buf = Buffer.from(cleanBase64, "base64");
+    if (buf.length === 0 || buf.length > 5 * 1024 * 1024) {
+      return res.status(400).json({ error: "Verification document must be between 1 byte and 5 MB" });
     }
-    if (targetUserId) {
-      const banDate = new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString();
-      db.prepare("UPDATE users SET banned_until = ?, updated_at = ? WHERE id = ?").run(
-        banDate,
-        (/* @__PURE__ */ new Date()).toISOString(),
-        targetUserId
-      );
-      if (adminId) {
-        db.prepare(
-          "INSERT OR IGNORE INTO blocked_users (blocker_id, blocked_id, created_at) VALUES (?, ?, ?)"
-        ).run(adminId, targetUserId, (/* @__PURE__ */ new Date()).toISOString());
-      }
-    }
-    let emailSent = false;
-    if (emailToSend) {
-      emailSent = await sendBanNotificationEmail(
-        emailToSend,
-        usernameToSend,
-        displayNameToSend,
-        reason || "Violation of LiveConnect Community Guidelines & Safety Policies"
-      );
-    }
+    const cleanMime = String(mimeType || "image/jpeg").split(";")[0].trim().toLowerCase();
+    const ext = cleanMime.includes("png") ? "png" : cleanMime.includes("webp") ? "webp" : cleanMime.includes("pdf") ? "pdf" : "jpg";
+    const fileId = `appeal_${userId.slice(0, 8)}_${Date.now()}.${ext}`;
+    const filePath = import_path3.default.join(UPLOADS_DIR, fileId);
+    import_fs3.default.writeFileSync(filePath, buf);
+    mediaFilesStore.set(fileId, {
+      id: fileId,
+      buffer: buf,
+      mimeType: cleanMime,
+      fileName: fileName || fileId,
+      size: buf.length,
+      createdAt: (/* @__PURE__ */ new Date()).toISOString()
+    });
     return res.json({
       success: true,
-      bannedUserId: targetUserId || null,
-      targetEmail: emailToSend || null,
-      emailSent,
-      message: emailSent ? `User @${usernameToSend} has been banned and notification email was sent to ${emailToSend}.` : `User @${usernameToSend} has been banned.`
+      url: `/api/media/file/${fileId}`,
+      fileName: fileName || fileId
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message || "Failed to upload verification document" });
+  }
+});
+app.post("/api/appeals", requireAuth, appealRateLimiter, async (req, res) => {
+  try {
+    const userId = req.authUserId;
+    const { reason, verificationDocUrl, verificationDocName } = req.body || {};
+    const cleanReason = String(reason || "").trim();
+    if (cleanReason.length < 10) {
+      return res.status(400).json({ error: "Please explain your appeal in at least 10 characters." });
+    }
+    const existingPending = db.prepare("SELECT id FROM appeals WHERE user_id = ? AND status = 'pending' LIMIT 1").get(userId);
+    if (existingPending) {
+      return res.status(409).json({
+        error: "You already have a pending appeal under review. Please wait for a decision."
+      });
+    }
+    const activeBan = db.prepare("SELECT id FROM bans WHERE user_id = ? AND is_active = 1 ORDER BY created_at DESC LIMIT 1").get(userId);
+    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+    const decisionDueAt = new Date(Date.now() + 48 * 60 * 60 * 1e3).toISOString();
+    const appealId = generateId();
+    db.prepare(`
+      INSERT INTO appeals (
+        id, user_id, ban_id, reason, verification_doc_url, verification_doc_name,
+        status, decision_due_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+    `).run(
+      appealId,
+      userId,
+      activeBan?.id || null,
+      cleanReason.slice(0, 2e3),
+      verificationDocUrl || null,
+      verificationDocName || null,
+      decisionDueAt,
+      nowIso,
+      nowIso
+    );
+    writeAuditLog({
+      adminId: userId,
+      targetUserId: userId,
+      action: "appeal_submitted",
+      reason: cleanReason.slice(0, 300),
+      details: { appealId, hasDoc: Boolean(verificationDocUrl) }
+    });
+    const userRow = findUserById(userId);
+    const prof = getProfileById(userId);
+    if (userRow?.email) {
+      const tpl = buildModerationTemplate({
+        kind: "appeal_update",
+        displayName: prof?.display_name || userRow.email.split("@")[0],
+        username: prof?.username || "user",
+        email: userRow.email,
+        reason: "We received your review request. Our Trust & Safety team will review it within 48 hours.",
+        ruleBroken: userRow.rule_broken || "community_guidelines",
+        strikeCount: Number(userRow.strike_count || 0)
+      });
+      void sendModerationEmail(userRow.email, tpl);
+    }
+    const appeal = db.prepare("SELECT * FROM appeals WHERE id = ?").get(appealId);
+    return res.status(201).json({ success: true, appeal });
+  } catch (err) {
+    return res.status(500).json({ error: err.message || "Failed to submit appeal" });
+  }
+});
+app.get("/api/appeals/me", requireAuth, (req, res) => {
+  try {
+    const userId = req.authUserId;
+    const rows = db.prepare("SELECT * FROM appeals WHERE user_id = ? ORDER BY created_at DESC LIMIT 20").all(userId);
+    return res.json({ appeals: rows });
+  } catch (err) {
+    return res.status(500).json({ error: err.message || "Failed to fetch appeals" });
+  }
+});
+app.get("/api/admin/users", requireAuth, requireModeratorOrAdmin, (req, res) => {
+  try {
+    const q = String(req.query.q || "").trim().toLowerCase();
+    const statusFilter = String(req.query.status || "all").trim().toLowerCase();
+    const rows = db.prepare(`
+        SELECT u.id, u.email, u.phone, u.status, u.strike_count, u.ban_reason, u.rule_broken,
+               u.ban_until, u.restricted_until, u.scheduled_deletion_at, u.role, u.created_at, u.updated_at,
+               p.username, p.display_name, p.avatar_url, p.is_online
+        FROM users u
+        LEFT JOIN profiles p ON p.id = u.id
+        ORDER BY u.updated_at DESC
+        LIMIT 200
+      `).all();
+    const filtered = rows.filter((r) => {
+      if (statusFilter && statusFilter !== "all" && (r.status || "active") !== statusFilter) {
+        return false;
+      }
+      if (!q) return true;
+      return String(r.email || "").toLowerCase().includes(q) || String(r.username || "").toLowerCase().includes(q) || String(r.display_name || "").toLowerCase().includes(q) || String(r.id || "").toLowerCase().includes(q);
+    }).map((r) => ({
+      ...r,
+      strike_count: Number(r.strike_count || 0),
+      rule_label: formatRuleLabel(r.rule_broken),
+      is_online: Boolean(r.is_online) && !isAccountHiddenStatus(r.status)
+    }));
+    return res.json({ users: filtered });
+  } catch (err) {
+    return res.status(500).json({ error: err.message || "Failed to fetch admin users list" });
+  }
+});
+app.get("/api/admin/users/:userId", requireAuth, requireModeratorOrAdmin, (req, res) => {
+  try {
+    const { userId } = req.params;
+    const userRow = findUserById(userId);
+    if (!userRow) return res.status(404).json({ error: "User not found" });
+    const profile = getProfileById(userId);
+    const bans = db.prepare("SELECT * FROM bans WHERE user_id = ? ORDER BY created_at DESC LIMIT 50").all(userId);
+    const appeals = db.prepare("SELECT * FROM appeals WHERE user_id = ? ORDER BY created_at DESC LIMIT 20").all(userId);
+    const problemReports = db.prepare("SELECT * FROM problem_reports WHERE user_id = ? ORDER BY created_at DESC LIMIT 20").all(userId);
+    const incomingUserReports = db.prepare(`
+        SELECT ur.*, p.username as reporter_username, p.display_name as reporter_display_name
+        FROM user_reports ur
+        LEFT JOIN profiles p ON p.id = ur.reporter_id
+        WHERE ur.reported_user_id = ?
+        ORDER BY ur.created_at DESC
+        LIMIT 30
+      `).all(userId);
+    const reports = [
+      ...incomingUserReports.map((r) => ({
+        ...r,
+        report_type: "user_report",
+        description: r.details || `Reported from ${r.source} (${r.category})`
+      })),
+      ...problemReports.map((r) => ({
+        ...r,
+        report_type: "problem_report"
+      }))
+    ];
+    const auditLogs = db.prepare("SELECT * FROM audit_logs WHERE target_user_id = ? ORDER BY created_at DESC LIMIT 50").all(userId);
+    return res.json({
+      user: formatAuthUser(userRow),
+      profile,
+      bans: bans.map((b) => ({
+        ...b,
+        action: b.action_type || b.action,
+        is_active: Boolean(b.is_active),
+        rule_label: formatRuleLabel(b.rule_broken)
+      })),
+      appeals,
+      reports,
+      auditLogs
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message || "Failed to fetch user moderation detail" });
+  }
+});
+async function handleAdminModerate(req, res) {
+  try {
+    const adminId = req.authUserId;
+    const { targetUserId, action, reason, ruleBroken, durationDays } = req.body || {};
+    if (!targetUserId || !action) {
+      return res.status(400).json({ error: "targetUserId and action are required" });
+    }
+    const result = await executeModerationAction({
+      adminId,
+      targetUserId,
+      action,
+      reason,
+      ruleBroken,
+      durationDays: durationDays ? Number(durationDays) : void 0,
+      onStatusUpdated: syncProfileCacheAfterModeration
+    });
+    return res.json({
+      success: true,
+      user: formatAuthUser(result.user),
+      banId: result.banId,
+      statusApplied: result.statusApplied,
+      strikeCount: result.strikeCount,
+      emailSent: result.emailSent
+    });
+  } catch (err) {
+    return res.status(err?.statusCode || 500).json({ error: err.message || "Moderation action failed" });
+  }
+}
+app.post("/api/admin/moderate", requireAuth, requireModeratorOrAdmin, handleAdminModerate);
+app.post("/api/admin/ban-user", requireAuth, requireModeratorOrAdmin, async (req, res) => {
+  try {
+    const adminId = req.authUserId;
+    const { targetUserId, targetEmail, reason, ruleBroken, durationDays, action } = req.body || {};
+    let resolvedTargetId = targetUserId;
+    if (!resolvedTargetId && targetEmail) {
+      const u = findUserByEmail(String(targetEmail));
+      if (u) resolvedTargetId = u.id;
+    }
+    if (!resolvedTargetId) {
+      return res.status(400).json({ error: "targetUserId or valid targetEmail is required" });
+    }
+    const result = await executeModerationAction({
+      adminId,
+      targetUserId: resolvedTargetId,
+      action: action || "suspend",
+      reason: reason || "Violation of LiveConnect Community Guidelines & Safety Policies",
+      ruleBroken: ruleBroken || "community_guidelines",
+      durationDays: durationDays ? Number(durationDays) : 7,
+      onStatusUpdated: syncProfileCacheAfterModeration
+    });
+    return res.json({
+      success: true,
+      bannedUserId: resolvedTargetId,
+      statusApplied: result.statusApplied,
+      strikeCount: result.strikeCount,
+      emailSent: result.emailSent
     });
   } catch (error) {
-    return res.status(500).json({ error: error.message || "Failed to ban user" });
+    return res.status(error?.statusCode || 500).json({ error: error.message || "Failed to ban user" });
+  }
+});
+app.get("/api/admin/appeals", requireAuth, requireModeratorOrAdmin, (req, res) => {
+  try {
+    const statusFilter = String(req.query.status || "all").trim().toLowerCase();
+    const rows = db.prepare(`
+        SELECT a.*, u.email, u.status as user_status, u.strike_count, u.ban_reason, u.rule_broken, u.ban_until,
+               p.username, p.display_name, p.avatar_url
+        FROM appeals a
+        LEFT JOIN users u ON u.id = a.user_id
+        LEFT JOIN profiles p ON p.id = a.user_id
+        ORDER BY CASE WHEN a.status = 'pending' THEN 0 ELSE 1 END, a.created_at DESC
+        LIMIT 100
+      `).all();
+    const appeals = rows.filter((r) => statusFilter === "all" || r.status === statusFilter).map((r) => ({
+      id: r.id,
+      user_id: r.user_id,
+      ban_id: r.ban_id,
+      reason: r.reason,
+      verification_doc_url: r.verification_doc_url,
+      verification_doc_name: r.verification_doc_name,
+      status: r.status,
+      admin_id: r.admin_id,
+      admin_note: r.admin_note,
+      decision_due_at: r.decision_due_at,
+      reviewed_at: r.reviewed_at,
+      created_at: r.created_at,
+      updated_at: r.updated_at,
+      user: {
+        id: r.user_id,
+        username: r.username || "user",
+        display_name: r.display_name || r.email || "User",
+        email: r.email,
+        avatar_url: r.avatar_url || null,
+        status: r.user_status || "active",
+        strike_count: Number(r.strike_count || 0),
+        ban_reason: r.ban_reason || null,
+        rule_broken: r.rule_broken || null,
+        ban_until: r.ban_until || null
+      }
+    }));
+    return res.json({ appeals });
+  } catch (err) {
+    return res.status(500).json({ error: err.message || "Failed to load appeals queue" });
+  }
+});
+app.post("/api/admin/appeals/:appealId/review", requireAuth, requireModeratorOrAdmin, async (req, res) => {
+  try {
+    const adminId = req.authUserId;
+    const { appealId } = req.params;
+    const { decision, note } = req.body || {};
+    if (decision !== "approved" && decision !== "rejected") {
+      return res.status(400).json({ error: 'decision must be "approved" or "rejected"' });
+    }
+    const appeal = db.prepare("SELECT * FROM appeals WHERE id = ?").get(appealId);
+    if (!appeal) return res.status(404).json({ error: "Appeal not found" });
+    if (appeal.status !== "pending") {
+      return res.status(409).json({ error: `Appeal was already ${appeal.status}.` });
+    }
+    const targetRow = findUserById(appeal.user_id);
+    if (targetRow?.role === "admin" && decision === "rejected") {
+      return res.status(403).json({ error: "Cannot uphold ban against an admin." });
+    }
+    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+    const adminNote = String(note || (decision === "approved" ? "Appeal approved upon review." : "Violation confirmed upon manual review.")).trim();
+    db.prepare(
+      "UPDATE appeals SET status = ?, admin_id = ?, admin_note = ?, reviewed_at = ?, updated_at = ? WHERE id = ?"
+    ).run(decision, adminId, adminNote, nowIso, nowIso, appealId);
+    if (decision === "approved") {
+      await restoreUserAccount({
+        targetUserId: appeal.user_id,
+        adminId,
+        reason: adminNote,
+        decrementStrike: true,
+        isAuto: false,
+        onStatusUpdated: syncProfileCacheAfterModeration
+      });
+      writeAuditLog({
+        adminId,
+        targetUserId: appeal.user_id,
+        action: "appeal_approved",
+        reason: adminNote,
+        details: { appealId, strikeReduced: true }
+      });
+    } else {
+      writeAuditLog({
+        adminId,
+        targetUserId: appeal.user_id,
+        action: "appeal_rejected",
+        reason: adminNote,
+        details: { appealId }
+      });
+      const prof = getProfileById(appeal.user_id);
+      if (targetRow?.email) {
+        const tpl = buildModerationTemplate({
+          kind: "appeal_update",
+          displayName: prof?.display_name || targetRow.email.split("@")[0],
+          username: prof?.username || "user",
+          email: targetRow.email,
+          reason: "Your appeal was reviewed and not approved.",
+          ruleBroken: targetRow.rule_broken || "community_guidelines",
+          strikeCount: Number(targetRow.strike_count || 0),
+          adminNote
+        });
+        void sendModerationEmail(targetRow.email, tpl);
+      }
+    }
+    const updatedAppeal = db.prepare("SELECT * FROM appeals WHERE id = ?").get(appealId);
+    return res.json({ success: true, appeal: updatedAppeal });
+  } catch (err) {
+    return res.status(500).json({ error: err.message || "Failed to review appeal" });
+  }
+});
+app.get("/api/admin/audit-logs", requireAuth, requireModeratorOrAdmin, (req, res) => {
+  try {
+    const limit = Math.min(200, Math.max(10, Number(req.query.limit || 100)));
+    const rows = db.prepare(`
+        SELECT a.*, ap.username as admin_username, tp.username as target_username
+        FROM audit_logs a
+        LEFT JOIN profiles ap ON ap.id = a.admin_id
+        LEFT JOIN profiles tp ON tp.id = a.target_user_id
+        ORDER BY a.created_at DESC
+        LIMIT ?
+      `).all(limit);
+    return res.json({ logs: rows });
+  } catch (err) {
+    return res.status(500).json({ error: err.message || "Failed to fetch audit logs" });
+  }
+});
+var VALID_USER_REPORT_CATEGORIES = /* @__PURE__ */ new Set([
+  "spam",
+  "harassment",
+  "hate_speech",
+  "nudity_sexual",
+  "impersonation",
+  "scam_fraud",
+  "violence_threats",
+  "child_safety",
+  "underage",
+  "privacy_violation",
+  "abusive_calls",
+  "other"
+]);
+var VALID_USER_REPORT_SOURCES = /* @__PURE__ */ new Set(["profile", "chat", "search", "call", "family_chat"]);
+var VALID_USER_REPORT_STATUSES = /* @__PURE__ */ new Set(["pending", "under_review", "resolved", "dismissed"]);
+app.get("/api/admin/reports", requireAuth, requireModeratorOrAdmin, (req, res) => {
+  try {
+    const statusFilter = String(req.query.status || "all").trim().toLowerCase();
+    const rows = db.prepare(`
+        SELECT ur.*,
+               rp.username as reporter_username, rp.display_name as reporter_display_name, rp.avatar_url as reporter_avatar_url,
+               tp.username as target_username, tp.display_name as target_display_name, tp.avatar_url as target_avatar_url,
+               tu.email as target_email, tu.status as target_status, tu.strike_count as target_strike_count
+        FROM user_reports ur
+        LEFT JOIN profiles rp ON rp.id = ur.reporter_id
+        LEFT JOIN profiles tp ON tp.id = ur.reported_user_id
+        LEFT JOIN users tu ON tu.id = ur.reported_user_id
+        ORDER BY
+          CASE ur.status
+            WHEN 'pending' THEN 0
+            WHEN 'under_review' THEN 1
+            ELSE 2
+          END,
+          ur.created_at DESC
+        LIMIT 200
+      `).all();
+    const reports = rows.filter((r) => statusFilter === "all" || r.status === statusFilter).map((r) => ({
+      id: r.id,
+      reporter_id: r.reporter_id,
+      reported_user_id: r.reported_user_id,
+      reported_username: r.reported_username || r.target_username || null,
+      reported_display_name: r.reported_display_name || r.target_display_name || null,
+      category: r.category,
+      details: r.details || null,
+      source: r.source,
+      conversation_id: r.conversation_id || null,
+      family_id: r.family_id || null,
+      family_name: r.family_name || null,
+      reported_message_id: r.reported_message_id || null,
+      reported_message_content: r.reported_message_content || null,
+      reported_message_media_url: r.reported_message_media_url || null,
+      also_blocked: Boolean(r.also_blocked),
+      status: r.status,
+      admin_id: r.admin_id || null,
+      admin_note: r.admin_note || null,
+      reviewed_at: r.reviewed_at || null,
+      created_at: r.created_at,
+      updated_at: r.updated_at,
+      reporter: {
+        id: r.reporter_id,
+        username: r.reporter_username || "user",
+        display_name: r.reporter_display_name || "User",
+        avatar_url: r.reporter_avatar_url || null
+      },
+      reported_user: {
+        id: r.reported_user_id,
+        username: r.target_username || r.reported_username || "user",
+        display_name: r.target_display_name || r.reported_display_name || "User",
+        email: r.target_email || null,
+        avatar_url: r.target_avatar_url || null,
+        status: r.target_status || "active",
+        strike_count: Number(r.target_strike_count || 0)
+      }
+    }));
+    return res.json({ reports });
+  } catch (err) {
+    return res.status(500).json({ error: err.message || "Failed to load user reports queue" });
+  }
+});
+app.post("/api/admin/reports/:reportId/review", requireAuth, requireModeratorOrAdmin, async (req, res) => {
+  try {
+    const adminId = req.authUserId;
+    const { reportId } = req.params;
+    const { status, note, moderationAction, ruleBroken, durationDays } = req.body || {};
+    if (!status || !VALID_USER_REPORT_STATUSES.has(String(status))) {
+      return res.status(400).json({ error: "Valid status (pending, under_review, resolved, dismissed) is required" });
+    }
+    const report = db.prepare("SELECT * FROM user_reports WHERE id = ?").get(reportId);
+    if (!report) return res.status(404).json({ error: "Report not found" });
+    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+    const adminNote = note ? String(note).trim().slice(0, 500) : null;
+    const reviewedAt = status === "resolved" || status === "dismissed" ? nowIso : report.reviewed_at || null;
+    db.prepare(
+      "UPDATE user_reports SET status = ?, admin_id = ?, admin_note = ?, reviewed_at = ?, updated_at = ? WHERE id = ?"
+    ).run(status, adminId, adminNote ?? report.admin_note ?? null, reviewedAt, nowIso, reportId);
+    let moderationResult = null;
+    if (moderationAction && ["warn", "restrict", "suspend", "permanent_ban"].includes(String(moderationAction))) {
+      moderationResult = await executeModerationAction({
+        adminId,
+        targetUserId: report.reported_user_id,
+        action: moderationAction,
+        reason: adminNote || `Action taken following user report (${report.category})`,
+        ruleBroken: ruleBroken || "community_guidelines",
+        durationDays: durationDays ? Number(durationDays) : 7,
+        onStatusUpdated: syncProfileCacheAfterModeration
+      });
+    } else {
+      writeAuditLog({
+        adminId,
+        targetUserId: report.reported_user_id,
+        action: `report_${status}`,
+        reason: adminNote || `Marked user report (${report.category}) as ${status}`,
+        details: { reportId, category: report.category, reporterId: report.reporter_id }
+      });
+    }
+    const updated = db.prepare("SELECT * FROM user_reports WHERE id = ?").get(reportId);
+    return res.json({
+      success: true,
+      report: updated,
+      moderationApplied: moderationResult ? moderationResult.statusApplied : null
+    });
+  } catch (err) {
+    return res.status(err?.statusCode || 500).json({ error: err.message || "Failed to update report" });
   }
 });
 var truecallerVerifications = /* @__PURE__ */ new Map();
@@ -1860,7 +5452,7 @@ app.post("/api/auth/truecaller/initiate", (req, res) => {
     return res.status(500).json({ error: "Failed to initiate Truecaller verification" });
   }
 });
-async function processTruecallerVerifiedProfile(requestId, rawPhone, displayName, avatarUrl, country) {
+async function processTruecallerVerifiedProfile(requestId, rawPhone, displayName, avatarUrl, country, deviceId) {
   try {
     const cleanDigits = rawPhone.replace(/\D/g, "");
     const formattedPhone = cleanDigits.length === 10 ? `+91${cleanDigits}` : `+${cleanDigits}`;
@@ -1869,6 +5461,21 @@ async function processTruecallerVerifiedProfile(requestId, rawPhone, displayName
     const nowIso = (/* @__PURE__ */ new Date()).toISOString();
     const baseUsername = (displayName || `user_${cleanDigits.slice(-4)}`).toLowerCase().replace(/[^a-z0-9_]/g, "").slice(0, 15) || `user_${cleanDigits.slice(-4)}`;
     if (!userRow) {
+      const permanentBlock = findPermanentBanByIdentifier({
+        email: userEmail,
+        phone: formattedPhone,
+        deviceId: deviceId || null
+      });
+      if (permanentBlock) {
+        const errMsg = `Account creation is permanently blocked because this ${permanentBlock.type} is associated with a permanently disabled account.`;
+        truecallerVerifications.set(requestId, {
+          requestId,
+          status: "failed",
+          error: errMsg,
+          createdAt: Date.now()
+        });
+        return { success: false, error: errMsg };
+      }
       const userId = generateUUID();
       const meta = {
         display_name: displayName || `User ${cleanDigits.slice(-4)}`,
@@ -1878,10 +5485,42 @@ async function processTruecallerVerifiedProfile(requestId, rawPhone, displayName
         verified_by: "truecaller"
       };
       db.prepare(`
-        INSERT INTO users (id, email, password_hash, email_confirmed, phone, user_metadata, created_at, updated_at)
-        VALUES (?, ?, NULL, 1, ?, ?, ?, ?)
-      `).run(userId, userEmail, formattedPhone, JSON.stringify(meta), nowIso, nowIso);
+        INSERT INTO users (id, email, password_hash, email_confirmed, phone, user_metadata, last_device_id, created_at, updated_at)
+        VALUES (?, ?, NULL, 1, ?, ?, ?, ?, ?)
+      `).run(userId, userEmail, formattedPhone, JSON.stringify(meta), deviceId || null, nowIso, nowIso);
       userRow = findUserById(userId);
+    } else {
+      userRow = await resolveLiveUserRow(userRow.id, syncProfileCacheAfterModeration) || userRow;
+      if (userRow.status === "suspended" || userRow.status === "disabled") {
+        revokeAllSessionsForUser(userRow.id);
+        const appealSession = createSessionForUser(userRow.id, 7, "appeal_only", deviceId || null);
+        const errMsg = userRow.status === "disabled" ? "Your account has been permanently disabled." : "Your account has been suspended.";
+        truecallerVerifications.set(requestId, {
+          requestId,
+          status: "failed",
+          error: errMsg,
+          createdAt: Date.now()
+        });
+        return {
+          success: false,
+          banned: true,
+          accountStatus: userRow.status,
+          banReason: userRow.ban_reason || "Community Guidelines violation",
+          ruleBroken: userRow.rule_broken || "community_guidelines",
+          ruleLabel: formatRuleLabel(userRow.rule_broken),
+          banUntil: userRow.ban_until || userRow.banned_until || null,
+          bannedUntil: userRow.ban_until || userRow.banned_until || null,
+          scheduledDeletionAt: userRow.scheduled_deletion_at || null,
+          strikeCount: Number(userRow.strike_count || 0),
+          appealSession,
+          user: formatAuthUser(userRow),
+          error: errMsg
+        };
+      }
+      if (userRow.status === "deactivated") {
+        db.prepare("UPDATE users SET status = 'active', updated_at = ? WHERE id = ?").run(nowIso, userRow.id);
+        userRow = findUserById(userRow.id);
+      }
     }
     const userProfile = ensureProfileRecord(userRow.id, {
       username: baseUsername,
@@ -1892,7 +5531,7 @@ async function processTruecallerVerifiedProfile(requestId, rawPhone, displayName
       bio: "Verified with Truecaller on LiveConnect.",
       email: userEmail
     });
-    const session = createSessionForUser(userRow.id);
+    const session = createSessionForUser(userRow.id, 30, "full", deviceId || null);
     const authUser = formatAuthUser(userRow);
     truecallerVerifications.set(requestId, {
       requestId,
@@ -2036,9 +5675,10 @@ app.post("/api/auth/truecaller/verify-otp", async (req, res) => {
     pcPhoneOtpStore.delete(cleanDigits);
     const reqId = customRequestId || `tc_manual_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     const displayName = String(name || `User ${cleanDigits.slice(-4)}`).trim();
-    const result = await processTruecallerVerifiedProfile(reqId, cleanDigits, displayName, void 0, "India");
+    const deviceId = getRequestDeviceId(req);
+    const result = await processTruecallerVerifiedProfile(reqId, cleanDigits, displayName, void 0, "India", deviceId);
     if (!result.success) {
-      return res.status(500).json({ error: result.error || "Failed to authenticate mobile number" });
+      return res.status(result.banned ? 403 : 500).json(result);
     }
     return res.json({ success: true, requestId: reqId, profile: result.profile, user: result.user, session: result.session });
   } catch (err) {
@@ -2055,9 +5695,10 @@ app.post("/api/auth/truecaller/verify-number", async (req, res) => {
     }
     const reqId = customRequestId || `tc_manual_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     const displayName = String(name || `User ${cleanDigits.slice(-4)}`).trim();
-    const result = await processTruecallerVerifiedProfile(reqId, cleanDigits, displayName, void 0, "India");
+    const deviceId = getRequestDeviceId(req);
+    const result = await processTruecallerVerifiedProfile(reqId, cleanDigits, displayName, void 0, "India", deviceId);
     if (!result.success) {
-      return res.status(500).json({ error: result.error || "Failed to authenticate mobile number" });
+      return res.status(result.banned ? 403 : 500).json(result);
     }
     return res.json({ success: true, requestId: reqId, profile: result.profile, user: result.user, session: result.session });
   } catch (err) {
@@ -2144,7 +5785,7 @@ app.get("/api/presence/online", (_req, res) => {
     const cutoff = new Date(Date.now() - 45e3).toISOString();
     const rows = db.prepare("SELECT id, is_online, last_seen FROM profiles WHERE is_online = 1 AND last_seen >= ?").all(cutoff);
     return res.json({
-      users: rows.map((r) => ({ id: r.id, is_online: true, last_seen: r.last_seen }))
+      users: rows.filter((r) => !isTargetUserHidden(r.id)).map((r) => ({ id: r.id, is_online: true, last_seen: r.last_seen }))
     });
   } catch {
     return res.json({ users: [] });
@@ -2162,6 +5803,11 @@ app.post("/api/relations/user-overview", async (req, res) => {
       if (p) targetId = p.id;
     }
     const viewerId = await getOptionalAuthUserId(req);
+    const viewerRow = viewerId ? findUserById(viewerId) : null;
+    const viewerIsMod = viewerRow?.role === "admin" || viewerRow?.role === "moderator";
+    if (targetId && viewerId !== targetId && !viewerIsMod && isTargetUserHidden(targetId)) {
+      return res.status(404).json({ error: "User not found" });
+    }
     if (viewerId && targetId && viewerId !== targetId && isBlocked(viewerId, targetId)) {
       return res.status(404).json({ error: "User not found" });
     }
@@ -2169,8 +5815,8 @@ app.post("/api/relations/user-overview", async (req, res) => {
     const followerRows = db.prepare("SELECT follower_id FROM follows WHERE following_id = ?").all(targetId);
     const blockedByMeRows = db.prepare("SELECT blocked_id FROM blocked_users WHERE blocker_id = ?").all(targetId);
     const blockedByThemRows = db.prepare("SELECT blocker_id FROM blocked_users WHERE blocked_id = ?").all(targetId);
-    const following = followingRows.map((r) => r.following_id).filter((id) => !isBlocked(targetId, id) && (!viewerId || !isBlocked(viewerId, id)));
-    const followers = followerRows.map((r) => r.follower_id).filter((id) => !isBlocked(targetId, id) && (!viewerId || !isBlocked(viewerId, id)));
+    const following = followingRows.map((r) => r.following_id).filter((id) => !isTargetUserHidden(id) && !isBlocked(targetId, id) && (!viewerId || !isBlocked(viewerId, id)));
+    const followers = followerRows.map((r) => r.follower_id).filter((id) => !isTargetUserHidden(id) && !isBlocked(targetId, id) && (!viewerId || !isBlocked(viewerId, id)));
     const blockedByMe = blockedByMeRows.map((r) => r.blocked_id);
     const blockedByThem = blockedByThemRows.map((r) => r.blocker_id);
     const buildMini = (id) => getProfileCachedOrDb(id) || {
@@ -2222,6 +5868,7 @@ app.get("/api/relations/all-counts", (_req, res) => {
     const counts = {};
     for (const r of rows) {
       if (isBlocked(r.follower_id, r.following_id)) continue;
+      if (isTargetUserHidden(r.follower_id) || isTargetUserHidden(r.following_id)) continue;
       if (!counts[r.follower_id]) counts[r.follower_id] = { followers: 0, following: 0 };
       if (!counts[r.following_id]) counts[r.following_id] = { followers: 0, following: 0 };
       counts[r.follower_id].following += 1;
@@ -2237,6 +5884,18 @@ app.post("/api/relations/status", (req, res) => {
     const { userId, targetUserId } = req.body || {};
     if (!userId || !targetUserId) {
       return res.status(400).json({ error: "userId and targetUserId are required" });
+    }
+    if (isTargetUserHidden(targetUserId) || isTargetUserHidden(userId)) {
+      return res.json({
+        isFollowing: false,
+        isFollowedBy: false,
+        isMutual: false,
+        isBlockedByMe: false,
+        isBlockedByThem: false,
+        isBlocked: false,
+        followersCount: 0,
+        followingCount: 0
+      });
     }
     const isBlockedByMe = Boolean(
       db.prepare("SELECT 1 FROM blocked_users WHERE blocker_id = ? AND blocked_id = ?").get(userId, targetUserId)
@@ -2282,14 +5941,46 @@ app.post("/api/relations/sync", (req, res) => {
     const stmt = db.prepare(
       "INSERT OR IGNORE INTO follows (follower_id, following_id, created_at) VALUES (?, ?, ?)"
     );
+    const peerIds = /* @__PURE__ */ new Set();
     if (userId && Array.isArray(following)) {
       for (const id of following) {
-        if (id && id !== userId && !isBlocked(userId, id)) stmt.run(userId, id, nowIso);
+        if (id && id !== userId && !isBlocked(userId, id)) {
+          stmt.run(userId, id, nowIso);
+          peerIds.add(id);
+        }
       }
     }
     if (userId && Array.isArray(followers)) {
       for (const id of followers) {
-        if (id && id !== userId && !isBlocked(userId, id)) stmt.run(id, userId, nowIso);
+        if (id && id !== userId && !isBlocked(userId, id)) {
+          stmt.run(id, userId, nowIso);
+          peerIds.add(id);
+        }
+      }
+    }
+    if (userId) {
+      for (const peerId of peerIds) {
+        if (isMutualFollow(userId, peerId)) {
+          const convId = getDeterministicDirectConvId(userId, peerId);
+          db.prepare("INSERT OR IGNORE INTO conversations (id, type, created_at, updated_at) VALUES (?, ?, ?, ?)").run(
+            convId,
+            "direct",
+            nowIso,
+            nowIso
+          );
+          db.prepare("INSERT OR IGNORE INTO conversation_members (conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)").run(
+            convId,
+            userId,
+            "member",
+            nowIso
+          );
+          db.prepare("INSERT OR IGNORE INTO conversation_members (conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)").run(
+            convId,
+            peerId,
+            "member",
+            nowIso
+          );
+        }
       }
     }
     return res.json({ success: true });
@@ -2306,16 +5997,37 @@ app.post("/api/relations/follow", requireNotBlocked((req) => req.body?.targetUse
     if (userId === targetUserId) {
       return res.status(400).json({ error: "You cannot follow yourself" });
     }
+    if (isTargetUserHidden(targetUserId) || isTargetUserHidden(userId)) {
+      return res.status(404).json({ error: "User not found" });
+    }
     if (isBlocked(userId, targetUserId)) {
       return res.status(403).json({ error: "Cannot follow a blocked user" });
     }
     if (userMeta) ensureProfileRecord(userId, userMeta);
     if (targetMeta) ensureProfileRecord(targetUserId, targetMeta);
+    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
     db.prepare(
       "INSERT OR IGNORE INTO follows (follower_id, following_id, created_at) VALUES (?, ?, ?)"
-    ).run(userId, targetUserId, (/* @__PURE__ */ new Date()).toISOString());
+    ).run(userId, targetUserId, nowIso);
     const wasFollowedByTarget = isFollowing(targetUserId, userId);
     const isMutualNow = wasFollowedByTarget;
+    let autoConvId = null;
+    let autoConv = null;
+    if (isMutualNow) {
+      autoConvId = getDeterministicDirectConvId(userId, targetUserId);
+      db.prepare("DELETE FROM deleted_conversations WHERE conversation_id = ?").run(autoConvId);
+      db.prepare(
+        "INSERT OR IGNORE INTO conversations (id, type, created_at, updated_at) VALUES (?, ?, ?, ?)"
+      ).run(autoConvId, "direct", nowIso, nowIso);
+      db.prepare("UPDATE conversations SET updated_at = ? WHERE id = ?").run(nowIso, autoConvId);
+      db.prepare(
+        "INSERT OR IGNORE INTO conversation_members (conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)"
+      ).run(autoConvId, userId, "member", nowIso);
+      db.prepare(
+        "INSERT OR IGNORE INTO conversation_members (conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)"
+      ).run(autoConvId, targetUserId, "member", nowIso);
+      autoConv = buildConversationObject(autoConvId, userId);
+    }
     const actorDisplayName = userMeta?.display_name || userMeta?.username || "Someone";
     if (isMutualNow) {
       addNotification(
@@ -2345,6 +6057,8 @@ app.post("/api/relations/follow", requireNotBlocked((req) => req.body?.targetUse
       isFollowing: true,
       isFollowedBy: wasFollowedByTarget,
       isMutual: isMutualNow,
+      conversationId: autoConvId,
+      conversation: autoConv,
       followersCount: targetCounts.followersCount,
       followingCount: targetCounts.followingCount,
       targetUserId,
@@ -2483,7 +6197,12 @@ app.post("/api/notifications/list", (req, res) => {
     const { userId } = req.body || {};
     if (!userId) return res.status(400).json({ error: "userId is required" });
     const rows = db.prepare("SELECT * FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 100").all(userId);
-    const notifications = rows.filter((r) => !r.actor_id || !isBlocked(userId, r.actor_id)).map((r) => {
+    const notifications = rows.filter((r) => {
+      const isModerationNotif = String(r.type || "").startsWith("account_") || r.type === "appeal_update";
+      if (isModerationNotif) return true;
+      if (r.actor_id && (isBlocked(userId, r.actor_id) || isTargetUserHidden(r.actor_id))) return false;
+      return true;
+    }).map((r) => {
       let actor = null;
       if (r.actor_json) {
         try {
@@ -2491,7 +6210,7 @@ app.post("/api/notifications/list", (req, res) => {
         } catch {
         }
       }
-      if (!actor && r.actor_id) actor = getProfileCachedOrDb(r.actor_id);
+      if (!actor && r.actor_id && r.actor_id !== "system_moderation") actor = getProfileCachedOrDb(r.actor_id);
       return {
         id: r.id,
         user_id: r.user_id,
@@ -2589,6 +6308,9 @@ app.post("/api/calls/create", (req, res) => {
     if (!call || !call.id || !call.caller_id || !call.callee_id) {
       return res.status(400).json({ error: "Valid call object with caller_id and callee_id required" });
     }
+    if (isTargetUserHidden(call.caller_id) || isTargetUserHidden(call.callee_id)) {
+      return res.status(403).json({ error: "Account unavailable for calls" });
+    }
     if (isBlocked(call.caller_id, call.callee_id)) {
       return res.status(403).json({ error: "Cannot call blocked user" });
     }
@@ -2644,7 +6366,7 @@ app.post("/api/calls/incoming", (req, res) => {
          WHERE callee_id = ? AND status IN ('calling', 'ringing') AND created_at >= ?
          ORDER BY created_at DESC LIMIT 5`
     ).all(userId, ninetySecondsAgo);
-    const pendingCalls = rows.filter((r) => !isBlocked(userId, r.caller_id)).filter((r) => !(deviceId && r.caller_device_id && r.caller_device_id === deviceId)).map(formatCallRow);
+    const pendingCalls = rows.filter((r) => !isBlocked(userId, r.caller_id) && !isTargetUserHidden(r.caller_id)).filter((r) => !(deviceId && r.caller_device_id && r.caller_device_id === deviceId)).map(formatCallRow);
     return res.json({ calls: pendingCalls });
   } catch {
     return res.status(500).json({ error: "Failed to check incoming calls" });
@@ -2892,6 +6614,9 @@ app.post("/api/conversations/create-or-get", (req, res) => {
     if (!userId || !targetUserId) {
       return res.status(400).json({ error: "userId and targetUserId are required" });
     }
+    if (isTargetUserHidden(userId) || isTargetUserHidden(targetUserId)) {
+      return res.status(404).json({ error: "User not found" });
+    }
     if (isBlocked(userId, targetUserId)) {
       return res.status(403).json({ error: "Cannot start conversation with blocked user" });
     }
@@ -2904,19 +6629,16 @@ app.post("/api/conversations/create-or-get", (req, res) => {
     );
     if (userProfile?.id) ensureProfileRecord(userProfile.id, userProfile);
     if (targetProfile?.id) ensureProfileRecord(targetProfile.id, targetProfile);
-    const existing = db.prepare("SELECT * FROM conversations WHERE id = ?").get(convId);
-    if (!existing) {
-      db.prepare(
-        "INSERT INTO conversations (id, type, created_at, updated_at) VALUES (?, ?, ?, ?)"
-      ).run(convId, "direct", nowIso, nowIso);
+    db.prepare(
+      "INSERT OR IGNORE INTO conversations (id, type, created_at, updated_at) VALUES (?, ?, ?, ?)"
+    ).run(convId, "direct", nowIso, nowIso);
+    db.prepare(
+      "INSERT OR IGNORE INTO conversation_members (conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)"
+    ).run(convId, userId, "member", nowIso);
+    if (userId !== targetUserId) {
       db.prepare(
         "INSERT OR IGNORE INTO conversation_members (conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)"
-      ).run(convId, userId, "member", nowIso);
-      if (userId !== targetUserId) {
-        db.prepare(
-          "INSERT OR IGNORE INTO conversation_members (conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)"
-        ).run(convId, targetUserId, "member", nowIso);
-      }
+      ).run(convId, targetUserId, "member", nowIso);
     }
     const convObj = buildConversationObject(convId, userId);
     return res.json({
@@ -2941,7 +6663,7 @@ app.post("/api/conversations/list", (req, res) => {
       const convObj = buildConversationObject(convId, userId);
       if (!convObj) continue;
       const otherId = convObj.other_member?.id;
-      if (otherId && otherId !== userId && isBlocked(userId, otherId)) continue;
+      if (otherId && otherId !== userId && (isBlocked(userId, otherId) || isTargetUserHidden(otherId))) continue;
       const mapKey = otherId || userId;
       const existing = directMap.get(mapKey);
       if (!existing || new Date(convObj.updated_at).getTime() >= new Date(existing.updated_at).getTime()) {
@@ -2981,7 +6703,7 @@ app.post("/api/users/search", async (req, res) => {
         ).all(likePattern, likePattern, cleanQuery);
       }
     }
-    const visibleUsers = rows.filter((r) => !viewerId || !isBlocked(viewerId, r.id)).map(formatProfile).filter(Boolean);
+    const visibleUsers = rows.filter((r) => !isTargetUserHidden(r.id)).filter((r) => !viewerId || !isBlocked(viewerId, r.id)).map(formatProfile).filter(Boolean);
     return res.json({ users: visibleUsers });
   } catch {
     return res.status(500).json({ error: "Failed to search users" });
@@ -2992,6 +6714,11 @@ app.get("/api/users/profile/:userId", async (req, res) => {
     const { userId } = req.params;
     if (!userId) return res.status(400).json({ error: "userId is required" });
     const viewerId = await getOptionalAuthUserId(req) || String(req.query.viewerId || "");
+    const viewerRow = viewerId ? findUserById(viewerId) : null;
+    const viewerIsMod = viewerRow?.role === "admin" || viewerRow?.role === "moderator";
+    if (viewerId !== userId && !viewerIsMod && isTargetUserHidden(userId)) {
+      return res.status(404).json({ error: "User not found" });
+    }
     if (viewerId && viewerId !== userId && isBlocked(viewerId, userId)) {
       return res.status(404).json({ error: "User not found" });
     }
@@ -3026,6 +6753,9 @@ app.post("/api/messages/react", (req, res) => {
     }
     const row = db.prepare("SELECT conversation_id, sender_id, reactions_json FROM messages WHERE id = ?").get(messageId);
     if (!row) return res.json({ success: true });
+    if (isTargetUserHidden(userId) || row.sender_id && isTargetUserHidden(row.sender_id)) {
+      return res.status(403).json({ error: "Interaction paused due to account status" });
+    }
     if (row.sender_id && isBlocked(userId, row.sender_id)) {
       return res.status(403).json({ error: "Cannot interact with blocked user" });
     }
@@ -3066,6 +6796,9 @@ app.post("/api/messages/send", (req, res) => {
     const convId = message.conversation_id;
     const senderId = message.sender_id;
     const nowIso = message.created_at || (/* @__PURE__ */ new Date()).toISOString();
+    if (isTargetUserHidden(senderId)) {
+      return res.status(403).json({ error: "Your account cannot send messages while suspended or disabled" });
+    }
     db.prepare("DELETE FROM deleted_conversations WHERE conversation_id = ?").run(convId);
     const existingConv = buildConversationObject(convId, senderId);
     let targetRecipient = recipientId || receiverId;
@@ -3073,6 +6806,9 @@ app.post("/api/messages/send", (req, res) => {
       targetRecipient = existingConv.member_ids.find((id) => id !== senderId);
     }
     if (targetRecipient && targetRecipient !== senderId) {
+      if (isTargetUserHidden(targetRecipient)) {
+        return res.status(403).json({ error: "Direct messages to this account are paused" });
+      }
       if (isBlocked(senderId, targetRecipient)) {
         return res.status(403).json({ error: "Cannot message blocked user" });
       }
@@ -3083,19 +6819,18 @@ app.post("/api/messages/send", (req, res) => {
     const recProfile = recipientProfile || receiverProfile;
     if (senderProfile?.id) ensureProfileRecord(senderProfile.id, senderProfile);
     if (recProfile?.id) ensureProfileRecord(recProfile.id, recProfile);
-    if (!existingConv) {
-      db.prepare(
-        "INSERT OR IGNORE INTO conversations (id, type, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)"
-      ).run(convId, "direct", null, nowIso, nowIso);
+    db.prepare(
+      "INSERT OR IGNORE INTO conversations (id, type, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)"
+    ).run(convId, "direct", null, nowIso, nowIso);
+    db.prepare(
+      "INSERT OR IGNORE INTO conversation_members (conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)"
+    ).run(convId, senderId, "member", nowIso);
+    if (targetRecipient && targetRecipient !== senderId) {
       db.prepare(
         "INSERT OR IGNORE INTO conversation_members (conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)"
-      ).run(convId, senderId, "member", nowIso);
-      if (targetRecipient && targetRecipient !== senderId) {
-        db.prepare(
-          "INSERT OR IGNORE INTO conversation_members (conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)"
-        ).run(convId, targetRecipient, "member", nowIso);
-      }
-    } else {
+      ).run(convId, targetRecipient, "member", nowIso);
+    }
+    if (existingConv) {
       db.prepare("UPDATE conversations SET updated_at = ? WHERE id = ?").run(nowIso, convId);
     }
     const dupRow = db.prepare("SELECT * FROM messages WHERE id = ?").get(message.id);
@@ -3147,8 +6882,9 @@ app.post("/api/messages/send", (req, res) => {
         senderProf
       );
     }
-    const savedMsg = formatMessageRow(db.prepare("SELECT * FROM messages WHERE id = ?").get(message.id));
-    return res.json({ success: true, message: savedMsg || message });
+    const savedMsg = formatMessageRow2(db.prepare("SELECT * FROM messages WHERE id = ?").get(message.id));
+    const updatedConv = buildConversationObject(convId, senderId);
+    return res.json({ success: true, message: savedMsg || message, conversation: updatedConv });
   } catch (error) {
     console.error("[Send Message Error]:", error);
     return res.status(500).json({ error: "Failed to send message" });
@@ -3174,7 +6910,7 @@ app.post("/api/messages/list", (req, res) => {
          WHERE m.conversation_id IN (${placeholders}) AND dm.message_id IS NULL
          ORDER BY m.created_at ASC LIMIT 250`
     ).all(...allIds);
-    const messages = rows.filter((r) => !userId || !isBlocked(userId, r.sender_id)).map(formatMessageRow).filter(Boolean);
+    const messages = rows.filter((r) => !userId || !isBlocked(userId, r.sender_id)).map(formatMessageRow2).filter(Boolean);
     const now = Date.now();
     const typingUserIds = [];
     for (const cId of allIds) {
@@ -3281,6 +7017,132 @@ app.post("/api/messages/clear", (req, res) => {
     return res.status(500).json({ error: "Failed to clear conversation messages" });
   }
 });
+var translationCache = /* @__PURE__ */ new Map();
+var TRANSLATION_CACHE_MAX = 1500;
+var sharedGeminiClient = null;
+function getGeminiTranslationClient() {
+  const apiKey = process.env.GEMINI_API_KEY?.trim();
+  if (!apiKey) {
+    const err = new Error(
+      "Translation requires a Gemini API key. Please configure it in Settings > Secrets."
+    );
+    err.statusCode = 503;
+    throw err;
+  }
+  if (!sharedGeminiClient) {
+    sharedGeminiClient = new import_genai.GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          "User-Agent": "aistudio-build"
+        }
+      }
+    });
+  }
+  return sharedGeminiClient;
+}
+app.post("/api/messages/translate", requireAuth, async (req, res) => {
+  try {
+    let body = req.body;
+    if (typeof body === "string") {
+      try {
+        body = JSON.parse(body);
+      } catch {
+      }
+    }
+    const { text, targetLangCode, targetLangName, targetNativeName } = body || {};
+    const cleanText = typeof text === "string" ? text.trim() : "";
+    const cleanCode = typeof targetLangCode === "string" ? targetLangCode.trim().slice(0, 24) : "";
+    const cleanName = typeof targetLangName === "string" ? targetLangName.trim().slice(0, 80) : "";
+    const cleanNative = typeof targetNativeName === "string" ? targetNativeName.trim().slice(0, 80) : "";
+    if (!cleanText) {
+      return res.status(400).json({ error: "Message text is required for translation." });
+    }
+    if (cleanText.length > 4e3) {
+      return res.status(400).json({ error: "Message is too long to translate (max 4000 characters)." });
+    }
+    if (!cleanCode && !cleanName) {
+      return res.status(400).json({ error: "Target language is required." });
+    }
+    const cacheKey = `${cleanCode.toLowerCase() || cleanName.toLowerCase()}::${cleanText}`;
+    const cached = translationCache.get(cacheKey);
+    if (cached) {
+      return res.json({
+        success: true,
+        translatedText: cached.translatedText,
+        detectedLanguage: cached.detectedLanguage,
+        targetLangCode: cleanCode || cleanName,
+        cached: true
+      });
+    }
+    const ai = getGeminiTranslationClient();
+    const targetDescriptor = [cleanName || cleanCode, cleanNative && cleanNative !== cleanName ? cleanNative : null].filter(Boolean).join(" / ");
+    const response = await ai.models.generateContent({
+      model: "gemini-4-hydrogen",
+      contents: `Target language: ${targetDescriptor} (code: ${cleanCode || "auto"})
+
+Message:
+${cleanText}`,
+      config: {
+        thinkingConfig: { thinkingLevel: import_genai.ThinkingLevel.LOW },
+        systemInstruction: "You are an accurate real-time chat translator supporting all 106+ world languages, Hinglish/romanized text, casual chat slang, and formal speech. Translate the provided chat message naturally into the exact requested target language while preserving emojis, formatting, line breaks, @mentions, and URLs. If the message is already in the target language, return it cleanly as-is. Respond strictly with valid JSON matching the schema.",
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: import_genai.Type.OBJECT,
+          properties: {
+            translatedText: {
+              type: import_genai.Type.STRING,
+              description: "The translated chat message in the target language."
+            },
+            detectedLanguage: {
+              type: import_genai.Type.STRING,
+              description: "The detected source language name in English."
+            }
+          },
+          required: ["translatedText", "detectedLanguage"]
+        }
+      }
+    });
+    const rawJson = (response.text ?? "{}").trim();
+    let parsed = {};
+    try {
+      parsed = JSON.parse(rawJson);
+    } catch {
+      parsed = { translatedText: rawJson || cleanText, detectedLanguage: "Detected" };
+    }
+    const translatedText = typeof parsed.translatedText === "string" && parsed.translatedText.trim() ? parsed.translatedText.trim() : cleanText;
+    const detectedLanguage = typeof parsed.detectedLanguage === "string" && parsed.detectedLanguage.trim() ? parsed.detectedLanguage.trim() : "Auto";
+    if (translationCache.size >= TRANSLATION_CACHE_MAX) {
+      const oldestKey = translationCache.keys().next().value;
+      if (oldestKey !== void 0) translationCache.delete(oldestKey);
+    }
+    translationCache.set(cacheKey, { translatedText, detectedLanguage });
+    return res.json({
+      success: true,
+      translatedText,
+      detectedLanguage,
+      targetLangCode: cleanCode || cleanName,
+      cached: false
+    });
+  } catch (err) {
+    const status = Number(err?.statusCode || err?.status || 500);
+    const msg = String(err?.message || "Failed to translate message");
+    if (status === 503) {
+      return res.status(503).json({ error: msg });
+    }
+    if (status === 429 || msg.includes("RESOURCE_EXHAUSTED")) {
+      return res.status(429).json({
+        error: "Translation quota limit reached. Please wait a moment or check your billing plan in Settings > Secrets."
+      });
+    }
+    if (status === 400 || status === 403 || msg.includes("PERMISSION_DENIED") || msg.includes("API_KEY_INVALID")) {
+      return res.status(502).json({
+        error: "Translation service API key error. Please check your Gemini API key in Settings > Secrets."
+      });
+    }
+    return res.status(500).json({ error: msg });
+  }
+});
 app.post("/api/conversations/delete", (req, res) => {
   try {
     let body = req.body;
@@ -3305,6 +7167,44 @@ app.post("/api/conversations/delete", (req, res) => {
     return res.status(500).json({ error: "Failed to delete conversation" });
   }
 });
+app.post("/api/conversations/pin", requireAuth, (req, res) => {
+  try {
+    const authUserId = req.authUserId;
+    const { conversationId, messageId } = req.body || {};
+    if (!conversationId || typeof conversationId !== "string") {
+      return res.status(400).json({ error: "conversationId is required." });
+    }
+    const memberRow = db.prepare("SELECT 1 FROM conversation_members WHERE conversation_id = ? AND user_id = ? LIMIT 1").get(conversationId, authUserId);
+    if (!memberRow) {
+      return res.status(403).json({ error: "You are not a member of this conversation." });
+    }
+    const cleanMessageId = typeof messageId === "string" && messageId.trim() ? messageId.trim().slice(0, 128) : null;
+    if (cleanMessageId) {
+      const msgRow = db.prepare(
+        `SELECT m.id FROM messages m
+           LEFT JOIN deleted_messages dm ON m.id = dm.message_id
+           WHERE m.id = ? AND m.conversation_id = ? AND dm.message_id IS NULL
+           LIMIT 1`
+      ).get(cleanMessageId, conversationId);
+      if (!msgRow) {
+        return res.status(404).json({ error: "Message not found in this conversation." });
+      }
+    }
+    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+    db.prepare("UPDATE conversations SET pinned_message_id = ?, updated_at = ? WHERE id = ?").run(
+      cleanMessageId,
+      nowIso,
+      conversationId
+    );
+    return res.json({
+      success: true,
+      conversationId,
+      pinnedMessageId: cleanMessageId
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err?.message || "Failed to update pinned message" });
+  }
+});
 app.post("/api/reports/create", (req, res) => {
   try {
     const { userId, category, description } = req.body || {};
@@ -3318,6 +7218,122 @@ app.post("/api/reports/create", (req, res) => {
     return res.json({ success: true, reportId: id });
   } catch {
     return res.status(500).json({ error: "Failed to submit problem report" });
+  }
+});
+app.post("/api/reports/user", requireAuth, (req, res) => {
+  try {
+    const reporterId = req.authUserId;
+    const {
+      reportId: clientReportId,
+      reportedUserId,
+      reportedUsername,
+      reportedDisplayName,
+      category,
+      details,
+      source,
+      conversationId,
+      familyId,
+      familyName,
+      alsoBlocked,
+      reportedMessageId,
+      reportedMessageContent,
+      reportedMessageMediaUrl
+    } = req.body || {};
+    if (!reportedUserId || typeof reportedUserId !== "string") {
+      return res.status(400).json({ error: "reportedUserId is required." });
+    }
+    if (reportedUserId === reporterId) {
+      return res.status(400).json({ error: "You cannot report your own account." });
+    }
+    if (!category || !VALID_USER_REPORT_CATEGORIES.has(String(category))) {
+      return res.status(400).json({ error: "Please select a valid report category." });
+    }
+    const cleanReportedMsgId = typeof reportedMessageId === "string" && reportedMessageId.trim() ? reportedMessageId.trim().slice(0, 128) : null;
+    const existingPending = cleanReportedMsgId ? db.prepare(
+      `SELECT id, created_at FROM user_reports
+             WHERE reporter_id = ? AND reported_user_id = ? AND status IN ('pending', 'under_review')
+               AND (reported_message_id = ? OR details LIKE ?)
+             LIMIT 1`
+    ).get(reporterId, reportedUserId, cleanReportedMsgId, `%[Reported Message ID: ${cleanReportedMsgId}]%`) : db.prepare(
+      `SELECT id, created_at FROM user_reports
+             WHERE reporter_id = ? AND reported_user_id = ? AND status IN ('pending', 'under_review')
+             LIMIT 1`
+    ).get(reporterId, reportedUserId);
+    if (existingPending && (!clientReportId || existingPending.id !== clientReportId)) {
+      return res.status(409).json({
+        error: cleanReportedMsgId ? "You have already reported this message. Our safety team is reviewing it." : "You already have an open report for this user. Our safety team is reviewing it.",
+        reportId: existingPending.id,
+        duplicate: true
+      });
+    }
+    const safeReportId = typeof clientReportId === "string" && /^[a-zA-Z0-9_-]{1,128}$/.test(clientReportId) ? clientReportId : `urep_${generateUUID().replace(/-/g, "").slice(0, 20)}`;
+    const safeSource = VALID_USER_REPORT_SOURCES.has(String(source)) ? String(source) : "profile";
+    const safeDetails = details ? String(details).trim().slice(0, 1e3) : null;
+    const safeUsername = reportedUsername ? String(reportedUsername).trim().slice(0, 32) : null;
+    const safeDisplayName = reportedDisplayName ? String(reportedDisplayName).trim().slice(0, 80) : null;
+    const safeConvId = conversationId ? String(conversationId).trim().slice(0, 128) : null;
+    const safeFamilyId = typeof familyId === "string" && familyId.trim() ? familyId.trim().slice(0, 128) : null;
+    const safeFamilyName = typeof familyName === "string" && familyName.trim() ? familyName.trim().slice(0, 120) : null;
+    const safeMsgContent = typeof reportedMessageContent === "string" && reportedMessageContent.trim() ? reportedMessageContent.trim().slice(0, 1500) : null;
+    const safeMsgMediaUrl = typeof reportedMessageMediaUrl === "string" && reportedMessageMediaUrl.trim() ? reportedMessageMediaUrl.trim().slice(0, 500) : null;
+    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+    db.prepare(`
+      INSERT OR IGNORE INTO user_reports (
+        id, reporter_id, reported_user_id, reported_username, reported_display_name,
+        category, details, source, conversation_id, family_id, family_name,
+        reported_message_id, reported_message_content, reported_message_media_url,
+        also_blocked, status, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+    `).run(
+      safeReportId,
+      reporterId,
+      reportedUserId,
+      safeUsername,
+      safeDisplayName,
+      String(category),
+      safeDetails,
+      safeSource,
+      safeConvId,
+      safeFamilyId,
+      safeFamilyName,
+      cleanReportedMsgId,
+      safeMsgContent,
+      safeMsgMediaUrl,
+      alsoBlocked ? 1 : 0,
+      nowIso,
+      nowIso
+    );
+    if (safeSource === "family_chat" && safeFamilyId) {
+      const admins = db.prepare("SELECT user_id FROM family_members WHERE family_id = ? AND status = 'active' AND role IN ('owner', 'admin')").all(safeFamilyId);
+      const targetLabel = safeDisplayName || safeUsername || "a member";
+      for (const adm of admins) {
+        if (adm.user_id === reportedUserId) continue;
+        db.prepare(`
+          INSERT INTO notifications (id, user_id, actor_id, type, title, message, reference_id, is_read, created_at)
+          VALUES (?, ?, 'system', 'family_message_report', ?, ?, ?, 0, ?)
+        `).run(
+          generateUUID(),
+          adm.user_id,
+          `Message Reported in ${safeFamilyName || "Family"}`,
+          `A member reported a message from ${targetLabel} (${String(category)}).`,
+          safeFamilyId,
+          nowIso
+        );
+      }
+    }
+    return res.json({ success: true, reportId: safeReportId });
+  } catch (err) {
+    return res.status(500).json({ error: err?.message || "Failed to submit user report" });
+  }
+});
+app.use("/api/families", createFamilyRouter(requireAuth));
+app.get("/api/reports/my-reports", requireAuth, (req, res) => {
+  try {
+    const reporterId = req.authUserId;
+    const rows = db.prepare("SELECT * FROM user_reports WHERE reporter_id = ? ORDER BY created_at DESC LIMIT 50").all(reporterId);
+    return res.json({ reports: rows });
+  } catch {
+    return res.status(500).json({ error: "Failed to load your reports" });
   }
 });
 app.post("/api/b2/upload", async (req, res) => {
@@ -3651,7 +7667,7 @@ async function startServer() {
     const localDist = import_path3.default.resolve(__dirname, "dist");
     const parentDist = import_path3.default.resolve(__dirname, "..", "dist");
     const distPath = import_fs3.default.existsSync(cwdDist) ? cwdDist : import_fs3.default.existsSync(parentDist) ? parentDist : localDist;
-    app.use(import_express.default.static(distPath));
+    app.use(import_express2.default.static(distPath));
     app.get("*", (_req, res) => {
       const indexPath = import_path3.default.join(distPath, "index.html");
       if (import_fs3.default.existsSync(indexPath)) {
@@ -3661,6 +7677,7 @@ async function startServer() {
       }
     });
   }
+  startModerationScheduler(syncProfileCacheAfterModeration);
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`LiveConnect server listening on http://0.0.0.0:${PORT}`);
   });

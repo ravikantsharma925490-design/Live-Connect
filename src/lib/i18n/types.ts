@@ -3,6 +3,7 @@ export type TranslationKeys = {
   'nav.messages': string;
   'nav.search': string;
   'nav.calls': string;
+  'nav.family'?: string;
   'nav.callHistory': string;
   'nav.profile': string;
   'nav.menu': string;
@@ -187,6 +188,7 @@ export const EN_DICT: TranslationKeys = {
   'nav.messages': 'Messages',
   'nav.search': 'Search ID',
   'nav.calls': 'Calls',
+  'nav.family': 'Family',
   'nav.callHistory': 'Call History',
   'nav.profile': 'Profile',
   'nav.menu': 'Menu',
