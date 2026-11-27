@@ -3,6 +3,7 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import fs from 'fs';
+import crypto from 'crypto';
 import { spawn } from 'child_process';
 import nodemailer from 'nodemailer';
 import dns from 'dns';
@@ -261,25 +262,106 @@ function extractBearerToken(req: express.Request): string {
   return authHeader.replace(/^Bearer\s+/i, '').trim();
 }
 
-// Lazy-load Firebase Web API Key for verifying Firebase ID tokens on Express endpoints
-let cachedFirebaseApiKey: string | null | undefined;
-function getFirebaseWebApiKey(): string | null {
-  if (cachedFirebaseApiKey !== undefined) return cachedFirebaseApiKey;
-  try {
-    const cfgPath = path.join(process.cwd(), 'firebase-applet-config.json');
-    if (fs.existsSync(cfgPath)) {
-      const parsed = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
-      cachedFirebaseApiKey = parsed?.apiKey || null;
-      return cachedFirebaseApiKey;
+// Lazy-load Firebase config for verifying Firebase ID tokens on Express endpoints
+let cachedFirebaseConfig: { apiKey: string | null; projectId: string | null } | null = null;
+function getFirebaseConfigInfo(): { apiKey: string | null; projectId: string | null } {
+  if (cachedFirebaseConfig) return cachedFirebaseConfig;
+  const candidates = [
+    path.join(process.cwd(), 'firebase-applet-config.json'),
+    path.resolve(__dirname, 'firebase-applet-config.json'),
+    path.resolve(__dirname, '..', 'firebase-applet-config.json'),
+  ];
+  for (const cfgPath of candidates) {
+    try {
+      if (fs.existsSync(cfgPath)) {
+        const parsed = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
+        cachedFirebaseConfig = {
+          apiKey: parsed?.apiKey || null,
+          projectId: parsed?.projectId || null,
+        };
+        return cachedFirebaseConfig;
+      }
+    } catch {
+      // try next path
     }
-  } catch {
-    // ignore
   }
-  cachedFirebaseApiKey = null;
-  return null;
+  cachedFirebaseConfig = {
+    apiKey: process.env.FIREBASE_WEB_API_KEY || process.env.VITE_FIREBASE_API_KEY || null,
+    projectId: process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID || null,
+  };
+  return cachedFirebaseConfig;
+}
+
+function getFirebaseWebApiKey(): string | null {
+  return getFirebaseConfigInfo().apiKey;
 }
 
 const verifiedFirebaseTokenCache = new Map<string, { uid: string; expiresAt: number }>();
+let googleCertsCache: { certs: Record<string, string>; expiresAt: number } | null = null;
+
+async function getGoogleFirebaseCerts(): Promise<Record<string, string> | null> {
+  if (googleCertsCache && googleCertsCache.expiresAt > Date.now()) {
+    return googleCertsCache.certs;
+  }
+  try {
+    const resp = await fetch(
+      'https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com'
+    );
+    if (!resp.ok) return googleCertsCache?.certs || null;
+    const certs = (await resp.json()) as Record<string, string>;
+    const cc = resp.headers.get('cache-control') || '';
+    const maxAgeMatch = cc.match(/max-age=(\d+)/i);
+    const maxAgeSec = maxAgeMatch ? parseInt(maxAgeMatch[1], 10) : 3600;
+    googleCertsCache = {
+      certs,
+      expiresAt: Date.now() + Math.max(60, maxAgeSec) * 1000,
+    };
+    return certs;
+  } catch {
+    return googleCertsCache?.certs || null;
+  }
+}
+
+function decodeBase64Url(input: string): Buffer {
+  const padded = input.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((input.length + 3) % 4);
+  return Buffer.from(padded, 'base64');
+}
+
+async function verifyFirebaseJwtLocally(token: string, expectedProjectId: string): Promise<string | null> {
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
+  try {
+    const header = JSON.parse(decodeBase64Url(parts[0]).toString('utf8')) as { alg?: string; kid?: string };
+    const payload = JSON.parse(decodeBase64Url(parts[1]).toString('utf8')) as {
+      aud?: string;
+      iss?: string;
+      sub?: string;
+      user_id?: string;
+      exp?: number;
+      iat?: number;
+    };
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (header.alg !== 'RS256' || !header.kid) return null;
+    if (!payload.sub || payload.sub.length > 128) return null;
+    if (payload.aud !== expectedProjectId) return null;
+    if (payload.iss !== `https://securetoken.google.com/${expectedProjectId}`) return null;
+    if (typeof payload.exp !== 'number' || payload.exp <= nowSec - 60) return null;
+
+    const certs = await getGoogleFirebaseCerts();
+    const certPem = certs?.[header.kid];
+    if (!certPem) return null;
+
+    const verifier = crypto.createVerify('RSA-SHA256');
+    verifier.update(`${parts[0]}.${parts[1]}`);
+    verifier.end();
+    const sig = decodeBase64Url(parts[2]);
+    const valid = verifier.verify(certPem, sig);
+    if (!valid) return null;
+    return payload.sub;
+  } catch {
+    return null;
+  }
+}
 
 async function verifyAuthToken(token: string): Promise<string | null> {
   if (!token) return null;
@@ -296,8 +378,17 @@ async function verifyAuthToken(token: string): Promise<string | null> {
     return cached.uid;
   }
 
-  // 3. Verify Firebase JWT via Identity Toolkit accounts:lookup
-  const apiKey = getFirebaseWebApiKey();
+  // 3. Verify Firebase JWT via Google public x509 certificates (works even if Web API key has browser referrer restrictions)
+  const { apiKey, projectId } = getFirebaseConfigInfo();
+  if (token.split('.').length === 3 && projectId) {
+    const localUid = await verifyFirebaseJwtLocally(token, projectId);
+    if (localUid) {
+      verifiedFirebaseTokenCache.set(token, { uid: localUid, expiresAt: Date.now() + 5 * 60_000 });
+      return localUid;
+    }
+  }
+
+  // 4. Fallback: Verify Firebase JWT via Identity Toolkit accounts:lookup
   if (apiKey && token.split('.').length === 3) {
     try {
       const resp = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(apiKey)}`, {
@@ -4591,26 +4682,62 @@ const TRANSIENT_COOLDOWN_MS = 20_000;
 const AUTH_ERROR_COOLDOWN_MS = 10 * 60_000;
 
 let geminiKeySlots: GeminiKeySlot[] | null = null;
+let geminiKeySignature = '';
 let activeGeminiKeyCursor = 0;
+
+function extractTokensFromEnvValue(rawVal: string | undefined, target: string[]) {
+  if (!rawVal || typeof rawVal !== 'string') return;
+  let cleaned = rawVal.trim();
+  if (!cleaned) return;
+
+  // Strip surrounding single/double quotes if pasted in Render/dashboard UI
+  cleaned = cleaned.replace(/^['"]+|['"]+$/g, '').trim();
+  // Strip accidental "ENV_NAME=" prefix if pasted into the value field
+  cleaned = cleaned.replace(/^[A-Za-z0-9_ ]+\s*=\s*/, '').trim();
+  cleaned = cleaned.replace(/^['"]+|['"]+$/g, '').trim();
+  if (!cleaned) return;
+
+  for (const part of cleaned.split(/[\s,;]+/)) {
+    const token = part.replace(/^['"]+|['"]+$/g, '').trim();
+    if (!token || token.length < 16) continue;
+    const lower = token.toLowerCase();
+    if (lower.startsWith('your_') || lower.startsWith('replace_') || lower === 'undefined' || lower === 'null') {
+      continue;
+    }
+    target.push(token);
+  }
+}
 
 function collectGeminiTranslationKeys(): string[] {
   const rawKeys: string[] = [];
 
   for (let i = 1; i <= 20; i++) {
-    const val = process.env[`GEMINI_API_KEY_${i}`]?.trim();
-    if (val) rawKeys.push(val);
+    extractTokensFromEnvValue(process.env[`GEMINI_API_KEY_${i}`], rawKeys);
+    extractTokensFromEnvValue(process.env[`GEMINI_API_KEY${i}`], rawKeys);
+    extractTokensFromEnvValue(process.env[`GEMINI_KEY_${i}`], rawKeys);
+    extractTokensFromEnvValue(process.env[`GEMINI_KEY${i}`], rawKeys);
+    extractTokensFromEnvValue(process.env[`GOOGLE_API_KEY_${i}`], rawKeys);
+    extractTokensFromEnvValue(process.env[`GOOGLE_API_KEY${i}`], rawKeys);
+    extractTokensFromEnvValue(process.env[`VITE_GEMINI_API_KEY_${i}`], rawKeys);
+    extractTokensFromEnvValue(process.env[`VITE_GEMINI_API_KEY${i}`], rawKeys);
   }
 
-  const listEnv = process.env.GEMINI_API_KEYS?.trim();
-  if (listEnv) {
-    for (const part of listEnv.split(/[\s,;]+/)) {
-      const cleaned = part.trim();
-      if (cleaned) rawKeys.push(cleaned);
+  extractTokensFromEnvValue(process.env.GEMINI_API_KEYS, rawKeys);
+  extractTokensFromEnvValue(process.env.GEMINI_KEYS, rawKeys);
+  extractTokensFromEnvValue(process.env.GEMINI_API_KEY, rawKeys);
+  extractTokensFromEnvValue(process.env.GEMINI_KEY, rawKeys);
+  extractTokensFromEnvValue(process.env.GOOGLE_API_KEY, rawKeys);
+  extractTokensFromEnvValue(process.env.VITE_GEMINI_API_KEY, rawKeys);
+
+  // Fallback scan for any case-insensitive Gemini API key env var added on Render
+  for (const [envName, envVal] of Object.entries(process.env)) {
+    if (
+      /gemini.*key/i.test(envName) &&
+      !/firebase|cloudinary|admob|oauth|secret/i.test(envName)
+    ) {
+      extractTokensFromEnvValue(envVal, rawKeys);
     }
   }
-
-  const singleKey = process.env.GEMINI_API_KEY?.trim();
-  if (singleKey) rawKeys.push(singleKey);
 
   const seen = new Set<string>();
   const unique: string[] = [];
@@ -4624,19 +4751,22 @@ function collectGeminiTranslationKeys(): string[] {
 }
 
 function getGeminiKeySlots(): GeminiKeySlot[] {
-  if (geminiKeySlots && geminiKeySlots.length > 0) {
+  const keys = collectGeminiTranslationKeys();
+  const nextSignature = keys.join('|');
+
+  if (geminiKeySlots && geminiKeySlots.length > 0 && geminiKeySignature === nextSignature) {
     return geminiKeySlots;
   }
 
-  const keys = collectGeminiTranslationKeys();
   if (keys.length === 0) {
     const err: any = new Error(
-      'Translation requires a Gemini API key. Please configure it in Settings > Secrets.'
+      'Translation requires a Gemini API key (GEMINI_API_KEY or GEMINI_API_KEY_1..6) in environment variables.'
     );
     err.statusCode = 503;
     throw err;
   }
 
+  geminiKeySignature = nextSignature;
   geminiKeySlots = keys.map((apiKey, idx) => ({
     index: idx,
     label: `Key#${idx + 1}(...${apiKey.slice(-4)})`,
@@ -4652,6 +4782,8 @@ function getGeminiKeySlots(): GeminiKeySlot[] {
     cooldownUntil: 0,
     consecutiveFailures: 0,
   }));
+  activeGeminiKeyCursor = 0;
+  console.log(`[Translation] Loaded ${geminiKeySlots.length} Gemini API key(s) for auto-rotation.`);
 
   return geminiKeySlots;
 }
@@ -4692,16 +4824,28 @@ function classifyGeminiKeyError(err: any): {
     msg.includes('API_KEY_INVALID') ||
     msg.includes('PERMISSION_DENIED') ||
     lower.includes('api key not valid') ||
-    lower.includes('invalid api key');
+    lower.includes('api_key_expired') ||
+    lower.includes('api key expired') ||
+    lower.includes('invalid api key') ||
+    (status === 400 && lower.includes('api key'));
 
   const isTransient =
+    status === 404 ||
+    status === 408 ||
     status === 500 ||
     status === 502 ||
     status === 503 ||
     status === 504 ||
     msg.includes('UNAVAILABLE') ||
+    msg.includes('NOT_FOUND') ||
+    msg.includes('DEADLINE_EXCEEDED') ||
+    lower.includes('high demand') ||
     lower.includes('timeout') ||
-    lower.includes('fetch failed');
+    lower.includes('econnreset') ||
+    lower.includes('enotfound') ||
+    lower.includes('etimedout') ||
+    lower.includes('fetch failed') ||
+    lower.includes('network');
 
   if (isQuota) {
     return {
@@ -4732,12 +4876,75 @@ function classifyGeminiKeyError(err: any): {
   }
 
   return {
-    rotatable: false,
+    rotatable: true,
     isQuota: false,
     isAuth: false,
     status,
-    cooldownMs: 0,
+    cooldownMs: TRANSIENT_COOLDOWN_MS,
   };
+}
+
+async function callGeminiTranslateModel(
+  client: GoogleGenAI,
+  targetDescriptor: string,
+  cleanCode: string,
+  cleanText: string
+) {
+  const prompt = `Target language: ${targetDescriptor} (code: ${cleanCode || 'auto'})\n\nMessage:\n${cleanText}`;
+  const sysInstr =
+    'You are an accurate real-time chat translator supporting all 106+ world languages, Hinglish/romanized text, casual chat slang, and formal speech. Translate the provided chat message naturally into the exact requested target language while preserving emojis, formatting, line breaks, @mentions, and URLs. If the message is already in the target language, return it cleanly as-is. Respond strictly with valid JSON matching the schema.';
+  const schema = {
+    type: Type.OBJECT,
+    properties: {
+      translatedText: {
+        type: Type.STRING,
+        description: 'The translated chat message in the target language.',
+      },
+      detectedLanguage: {
+        type: Type.STRING,
+        description: 'The detected source language name in English.',
+      },
+    },
+    required: ['translatedText', 'detectedLanguage'],
+  };
+
+  try {
+    return await client.models.generateContent({
+      model: 'gemini-4-hydrogen',
+      contents: prompt,
+      config: {
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        systemInstruction: sysInstr,
+        responseMimeType: 'application/json',
+        responseSchema: schema,
+      },
+    });
+  } catch (primaryErr: any) {
+    const pStatus = Number(primaryErr?.statusCode || primaryErr?.status || 500);
+    const pMsg = String(primaryErr?.message || '');
+    const pLower = pMsg.toLowerCase();
+    const shouldTryFallbackModel =
+      pStatus === 503 ||
+      pStatus === 404 ||
+      pMsg.includes('UNAVAILABLE') ||
+      pMsg.includes('NOT_FOUND') ||
+      pLower.includes('high demand') ||
+      pLower.includes('model');
+
+    if (!shouldTryFallbackModel) {
+      throw primaryErr;
+    }
+
+    return await client.models.generateContent({
+      model: 'gemini-3.1-flash-lite',
+      contents: prompt,
+      config: {
+        systemInstruction: sysInstr,
+        responseMimeType: 'application/json',
+        responseSchema: schema,
+      },
+    });
+  }
 }
 
 async function generateTranslationWithRotation(
@@ -4772,43 +4979,18 @@ async function generateTranslationWithRotation(
 
   for (const idx of attemptOrder) {
     const slot = slots[idx];
-    // Skip still-cooling keys unless every single key is in cooldown and wait is tiny
     if (readyIndices.length > 0 && slot.cooldownUntil > Date.now()) {
       continue;
     }
     if (readyIndices.length === 0 && slot.cooldownUntil > Date.now()) {
       const waitMs = slot.cooldownUntil - Date.now();
-      // If earliest key cools down within 2.5s, wait briefly to recycle cleanly; otherwise allow one immediate probe if it's been waiting longest
       if (waitMs > 0 && waitMs <= 2500) {
         await new Promise((r) => setTimeout(r, waitMs));
       }
     }
 
     try {
-      const response = await slot.client.models.generateContent({
-        model: 'gemini-4-hydrogen',
-        contents: `Target language: ${targetDescriptor} (code: ${cleanCode || 'auto'})\n\nMessage:\n${cleanText}`,
-        config: {
-          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-          systemInstruction:
-            'You are an accurate real-time chat translator supporting all 106+ world languages, Hinglish/romanized text, casual chat slang, and formal speech. Translate the provided chat message naturally into the exact requested target language while preserving emojis, formatting, line breaks, @mentions, and URLs. If the message is already in the target language, return it cleanly as-is. Respond strictly with valid JSON matching the schema.',
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              translatedText: {
-                type: Type.STRING,
-                description: 'The translated chat message in the target language.',
-              },
-              detectedLanguage: {
-                type: Type.STRING,
-                description: 'The detected source language name in English.',
-              },
-            },
-            required: ['translatedText', 'detectedLanguage'],
-          },
-        },
-      });
+      const response = await callGeminiTranslateModel(slot.client, targetDescriptor, cleanCode, cleanText);
 
       // Success: stick to this healthy key and reset its failure counters
       slot.cooldownUntil = 0;
@@ -4819,9 +5001,6 @@ async function generateTranslationWithRotation(
     } catch (err: any) {
       lastError = err;
       const info = classifyGeminiKeyError(err);
-      if (!info.rotatable) {
-        throw err;
-      }
 
       slot.consecutiveFailures += 1;
       slot.lastErrorStatus = info.status;
@@ -4829,7 +5008,7 @@ async function generateTranslationWithRotation(
       activeGeminiKeyCursor = (idx + 1) % total;
 
       console.warn(
-        `[Translation Key Rotate] ${slot.label} hit status=${info.status} (quota=${info.isQuota}). Switching to next key & recycling after ${Math.round(info.cooldownMs / 1000)}s.`
+        `[Translation Key Rotate] ${slot.label} hit status=${info.status} (quota=${info.isQuota}, auth=${info.isAuth}): ${String(err?.message || '').slice(0, 180)}. Switching to next key & recycling after ${Math.round(info.cooldownMs / 1000)}s.`
       );
     }
   }
@@ -4881,7 +5060,11 @@ app.post('/api/messages/translate', requireAuth, async (req, res) => {
 
     const response = await generateTranslationWithRotation(targetDescriptor, cleanCode, cleanText);
 
-    const rawJson = (response.text ?? '{}').trim();
+    const rawJson = (response.text ?? '{}')
+      .trim()
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/\s*```$/i, '')
+      .trim();
     let parsed: { translatedText?: string; detectedLanguage?: string } = {};
     try {
       parsed = JSON.parse(rawJson);
@@ -4914,6 +5097,7 @@ app.post('/api/messages/translate', requireAuth, async (req, res) => {
   } catch (err: any) {
     const status = Number(err?.statusCode || err?.status || 500);
     const msg = String(err?.message || 'Failed to translate message');
+    console.warn(`[Translation Error] status=${status} msg=${msg.slice(0, 240)}`);
     if (status === 503) {
       return res.status(503).json({ error: msg });
     }
@@ -4922,9 +5106,9 @@ app.post('/api/messages/translate', requireAuth, async (req, res) => {
         error: 'Translation quota limit reached across all configured keys. Please wait a moment and try again.',
       });
     }
-    if (status === 400 || status === 403 || msg.includes('PERMISSION_DENIED') || msg.includes('API_KEY_INVALID')) {
+    if (status === 400 || status === 401 || status === 403 || msg.includes('PERMISSION_DENIED') || msg.includes('API_KEY_INVALID')) {
       return res.status(502).json({
-        error: 'Translation service API key error. Please check your Gemini API keys.',
+        error: 'Translation API key rejected by Gemini. Verify the API key values (no extra quotes/spaces) in your environment variables.',
       });
     }
     return res.status(500).json({ error: msg });

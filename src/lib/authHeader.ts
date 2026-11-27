@@ -6,10 +6,10 @@ const SESSION_STORAGE_KEY = 'liveconnect_session_token';
  * Returns HTTP Authorization header for the active session
  * (Firebase ID token when signed in via Firebase, or SQLite session token otherwise).
  */
-export async function getAuthHeaders(): Promise<Record<string, string>> {
+export async function getAuthHeaders(forceRefresh = false): Promise<Record<string, string>> {
   try {
     if (auth.currentUser) {
-      const idToken = await auth.currentUser.getIdToken();
+      const idToken = await auth.currentUser.getIdToken(forceRefresh);
       if (idToken) {
         return { Authorization: `Bearer ${idToken}` };
       }

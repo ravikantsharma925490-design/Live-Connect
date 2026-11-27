@@ -111,20 +111,34 @@ export async function translateChatText({
   }
 
   const requestPromise = (async (): Promise<MessageTranslationResult> => {
-    const authHeaders = await getAuthHeaders();
-    const res = await fetch('/api/messages/translate', {
+    const payload = JSON.stringify({
+      text: cleanText,
+      targetLangCode: targetLang.code,
+      targetLangName: targetLang.name,
+      targetNativeName: targetLang.nativeName,
+    });
+
+    let authHeaders = await getAuthHeaders();
+    let res = await fetch('/api/messages/translate', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         ...authHeaders,
       },
-      body: JSON.stringify({
-        text: cleanText,
-        targetLangCode: targetLang.code,
-        targetLangName: targetLang.name,
-        targetNativeName: targetLang.nativeName,
-      }),
+      body: payload,
     });
+
+    if (res.status === 401) {
+      authHeaders = await getAuthHeaders(true);
+      res = await fetch('/api/messages/translate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeaders,
+        },
+        body: payload,
+      });
+    }
 
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
