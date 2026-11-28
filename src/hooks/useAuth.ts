@@ -26,6 +26,7 @@ import {
 } from '@/src/lib/firebase/services';
 import { restGetDocument } from '@/src/lib/firebase/restFallback';
 import { getClientDeviceId } from '@/src/lib/deviceId';
+import { validateTextAgainstBannedWords } from '@/src/lib/bannedWordsCheck';
 
 export const SESSION_STORAGE_KEY = 'liveconnect_session_token';
 export const APPEAL_TOKEN_STORAGE_KEY = 'liveconnect_appeal_token';
@@ -386,6 +387,14 @@ export function useAuth() {
           const banRes = await fetch('/api/auth/check-ban-status', {
             headers: buildAuthHeaders(token),
           });
+          if (banRes.status === 401) {
+            const errBody = await banRes.json().catch(() => null);
+            if (errBody?.code === 'FORCE_LOGOUT') {
+              await firebaseSignOut(auth).catch(() => {});
+              clearAuthState(false);
+              return;
+            }
+          }
           if (banRes.ok) {
             const banData = await banRes.json();
             if (banData?.banned) {
@@ -404,6 +413,17 @@ export function useAuth() {
         } catch {}
 
         const privInfo = await fetchPrivateUserInfoFs(fbUser.uid).catch(() => null);
+        if (privInfo?.forceLogoutAfter) {
+          const tokenRes = await fbUser.getIdTokenResult().catch(() => null);
+          const authMs = tokenRes?.authTime ? new Date(tokenRes.authTime).getTime() : 0;
+          const forceMs = new Date(privInfo.forceLogoutAfter).getTime();
+          if (Number.isFinite(forceMs) && (!authMs || authMs < forceMs)) {
+            await firebaseSignOut(auth).catch(() => {});
+            clearAuthState(false);
+            return;
+          }
+        }
+
         if (privInfo?.bannedUntil && new Date(privInfo.bannedUntil).getTime() > Date.now()) {
           await firebaseSignOut(auth).catch(() => {});
           enterSuspensionState({
@@ -415,7 +435,11 @@ export function useAuth() {
           return;
         }
 
-        const mappedUser = mapFirebaseUserToAuthUser(fbUser, privInfo?.email, privInfo?.phoneNumber);
+        const mappedUser = {
+          ...mapFirebaseUserToAuthUser(fbUser, privInfo?.email, privInfo?.phoneNumber),
+          admin_role: privInfo?.adminRole || 'none',
+          is_verified: Boolean(privInfo?.isVerified),
+        };
         setSession({ access_token: token });
         updateUserState(mappedUser);
 
@@ -432,6 +456,8 @@ export function useAuth() {
             ...publicProf,
             email: privInfo?.email ?? fbUser.email ?? null,
             phone_number: privInfo?.phoneNumber ?? fbUser.phoneNumber ?? null,
+            admin_role: privInfo?.adminRole || 'none',
+            is_verified: Boolean(publicProf.is_verified || privInfo?.isVerified),
           };
           updateProfileState(mergedProf);
           setNeedsOnboarding(false);
@@ -582,9 +608,18 @@ export function useAuth() {
       if (auth.currentUser) {
         try {
           const idToken = await auth.currentUser.getIdToken().catch(() => auth.currentUser?.uid || '');
-          const banRes = await fetch('/api/auth/check-ban-status', {
+          const rawBanRes = await fetch('/api/auth/check-ban-status', {
             headers: buildAuthHeaders(idToken),
-          }).then((r) => (r.ok ? r.json() : null));
+          });
+          if (rawBanRes.status === 401) {
+            const errBody = await rawBanRes.json().catch(() => null);
+            if (errBody?.code === 'FORCE_LOGOUT') {
+              await firebaseSignOut(auth).catch(() => {});
+              clearAuthState(false);
+              return;
+            }
+          }
+          const banRes = rawBanRes.ok ? await rawBanRes.json().catch(() => null) : null;
 
           if (banRes?.banned) {
             await firebaseSignOut(auth).catch(() => {});
@@ -596,6 +631,16 @@ export function useAuth() {
           }
 
           const privInfo = await fetchPrivateUserInfoFs(auth.currentUser.uid).catch(() => null);
+          if (privInfo?.forceLogoutAfter) {
+            const tokenRes = await auth.currentUser.getIdTokenResult().catch(() => null);
+            const authMs = tokenRes?.authTime ? new Date(tokenRes.authTime).getTime() : 0;
+            const forceMs = new Date(privInfo.forceLogoutAfter).getTime();
+            if (Number.isFinite(forceMs) && (!authMs || authMs < forceMs)) {
+              await firebaseSignOut(auth).catch(() => {});
+              clearAuthState(false);
+              return;
+            }
+          }
           if (privInfo?.bannedUntil && new Date(privInfo.bannedUntil).getTime() > Date.now()) {
             await firebaseSignOut(auth).catch(() => {});
             enterSuspensionState({
@@ -822,6 +867,16 @@ export function useAuth() {
   const updateProfile = async (updates: Partial<Profile>) => {
     if (!user) return null;
 
+    const textToValidate = [updates.display_name, updates.username, updates.bio].filter(Boolean).join(' ');
+    if (textToValidate.trim()) {
+      const wordCheck = await validateTextAgainstBannedWords(textToValidate);
+      if (wordCheck.blocked) {
+        const msg = wordCheck.errorMessage || 'Your profile text contains a restricted word.';
+        setAuthError(msg);
+        throw new Error(msg);
+      }
+    }
+
     if (isFirebaseSessionActive(user.id)) {
       try {
         const updatedPublic = await updateUserProfileDocsFs(user.id, profile, updates);
@@ -830,6 +885,8 @@ export function useAuth() {
           email: updates.email !== undefined ? updates.email : profile?.email ?? user.email ?? null,
           phone_number:
             updates.phone_number !== undefined ? updates.phone_number : profile?.phone_number ?? null,
+          is_verified: profile?.is_verified ?? updatedPublic.is_verified,
+          admin_role: profile?.admin_role ?? user.admin_role,
         };
         updateProfileState(mergedProfile);
         return mergedProfile;

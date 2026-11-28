@@ -40,6 +40,7 @@ import {
   formatMessagePreview,
 } from '@/src/lib/utils';
 import { UserAvatar } from '../ui/UserAvatar';
+import { VerifiedBadge } from '../ui/VerifiedBadge';
 import { useMessages } from '@/src/hooks/useMessages';
 import { db, isFirebaseSessionActive } from '@/src/lib/firebase/client';
 import {
@@ -793,10 +794,11 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             }}
             className="min-w-0 cursor-pointer"
           >
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5">
               <h3 className="font-bold text-sm text-neutral-900 dark:text-neutral-100 truncate hover:text-blue-600 transition-colors">
                 {displayName}
               </h3>
+              {otherUser?.is_verified && <VerifiedBadge size="sm" />}
               {!isSelf && isMutual && !isBlocked ? (
                 <span className="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
                   <UserCheck className="w-3 h-3" /> {t('action.mutual', 'Friends (Mutual)')}

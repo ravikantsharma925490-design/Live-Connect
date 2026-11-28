@@ -38,11 +38,46 @@ service cloud.firestore {
       return !(field in data) || data[field] == null || (data[field] is string && data[field].size() <= maxLen);
     }
 
-    function isAdmin() {
+    function isSuperAdmin() {
       return isSignedIn() && (
-        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
-        (request.auth.token.email == 'ravikantsharma925490@gmail.com' && request.auth.token.email_verified == true)
+        (request.auth.token.email == 'ravikantsharma92547@gmail.com' && request.auth.token.email_verified == true) ||
+        (exists(/databases/$(database)/documents/admins/$(request.auth.uid)) &&
+         get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.role == 'super_admin')
       );
+    }
+
+    function isModerator() {
+      return isSignedIn() &&
+             exists(/databases/$(database)/documents/admins/$(request.auth.uid)) &&
+             get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.role == 'moderator';
+    }
+
+    function isSupport() {
+      return isSignedIn() &&
+             exists(/databases/$(database)/documents/admins/$(request.auth.uid)) &&
+             get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.role == 'support';
+    }
+
+    function isAdmin() {
+      return isSuperAdmin() || isModerator();
+    }
+
+    function isSupportOrSuper() {
+      return isSuperAdmin() || isSupport();
+    }
+
+    function isStaff() {
+      return isSuperAdmin() || isModerator() || isSupport();
+    }
+
+    function isModeratorOfficialChatEnabled() {
+      return isSignedIn() &&
+             exists(/databases/$(database)/documents/app_config/settings) &&
+             get(/databases/$(database)/documents/app_config/settings).data.officialChatModeratorsEnabled == true;
+    }
+
+    function canManageOfficialChat() {
+      return isSuperAdmin() || (isModerator() && isModeratorOfficialChatEnabled());
     }
 
     function isBlockedPair(u1, u2) {
@@ -90,7 +125,7 @@ service cloud.firestore {
     // ====================================================================
     function isValidPublicProfile(data, userId) {
       return data.keys().hasAll(['id', 'username', 'displayName', 'isOnline', 'isPublic', 'lastSeen', 'createdAt', 'updatedAt']) &&
-             data.keys().hasOnly(['id', 'username', 'displayName', 'avatarUrl', 'bio', 'gender', 'country', 'isOnline', 'isPublic', 'lastSeen', 'createdAt', 'updatedAt']) &&
+             data.keys().hasOnly(['id', 'username', 'displayName', 'avatarUrl', 'bio', 'gender', 'country', 'isOnline', 'isPublic', 'isVerified', 'lastSeen', 'createdAt', 'updatedAt']) &&
              data.id == userId &&
              isValidId(data.id) &&
              data.username is string && data.username.size() >= 3 && data.username.size() <= 32 && data.username.matches('^[a-z0-9_]+$') &&
@@ -101,6 +136,7 @@ service cloud.firestore {
              isOptionalString(data, 'country', 64) &&
              data.isOnline is bool &&
              data.isPublic is bool && data.isPublic == true &&
+             (!('isVerified' in data) || data.isVerified is bool) &&
              data.lastSeen is timestamp &&
              data.createdAt is timestamp &&
              data.updatedAt is timestamp;
@@ -118,13 +154,15 @@ service cloud.firestore {
     function isValidPrivateUserInfo(data, userId) {
       return data.keys().hasAll(['id', 'role', 'createdAt', 'updatedAt']) &&
              data.keys().hasOnly([
-               'id', 'email', 'phoneNumber', 'role', 'status', 'strikeCount',
+               'id', 'email', 'phoneNumber', 'role', 'adminRole', 'isVerified', 'status', 'strikeCount',
                'banReason', 'ruleBroken', 'banUntil', 'restrictedUntil',
                'scheduledDeletionAt', 'restoredNoticePending', 'bannedUntil',
-               'createdAt', 'updatedAt'
+               'forceLogoutAfter', 'lastActiveAt', 'createdAt', 'updatedAt'
              ]) &&
              data.id == userId && isValidId(data.id) &&
              data.role in ['user', 'moderator', 'admin'] &&
+             (!('adminRole' in data) || data.adminRole in ['none', 'super_admin', 'moderator', 'support']) &&
+             (!('isVerified' in data) || data.isVerified is bool) &&
              (!('status' in data) || data.status in ['active', 'restricted', 'suspended', 'disabled', 'deactivated']) &&
              (!('strikeCount' in data) || (data.strikeCount is int && data.strikeCount >= 0 && data.strikeCount <= 100)) &&
              isOptionalString(data, 'email', 254) &&
@@ -136,6 +174,8 @@ service cloud.firestore {
              isOptionalString(data, 'scheduledDeletionAt', 64) &&
              (!('restoredNoticePending' in data) || data.restoredNoticePending is bool) &&
              isOptionalString(data, 'bannedUntil', 64) &&
+             isOptionalString(data, 'forceLogoutAfter', 64) &&
+             isOptionalString(data, 'lastActiveAt', 64) &&
              data.createdAt is timestamp &&
              data.updatedAt is timestamp;
     }
@@ -322,7 +362,8 @@ service cloud.firestore {
                'account_disabled', 'account_restored', 'appeal_update',
                'family_invite', 'family_message', 'family_mention',
                'family_join_request', 'family_join_approved', 'family_join_rejected',
-               'family_message_report', 'family_deleted'
+               'family_message_report', 'family_deleted',
+               'announcement', 'official_chat', 'support_reply'
              ] &&
              data.title is string && data.title.size() >= 1 && data.title.size() <= 160 &&
              data.message is string && data.message.size() >= 1 && data.message.size() <= 1000 &&
@@ -344,24 +385,25 @@ service cloud.firestore {
 
     function isValidUserReport(data, reportId) {
       return data.keys().hasAll(['id', 'reporterId', 'reportedUserId', 'category', 'source', 'status', 'createdAt', 'updatedAt']) &&
-             data.keys().hasOnly([
-               'id', 'reporterId', 'reportedUserId', 'reportedUsername', 'reportedDisplayName',
-               'category', 'details', 'source', 'conversationId', 'familyId', 'familyName',
-               'reportedMessageId', 'reportedMessageContent', 'reportedMessageMediaUrl',
-               'alsoBlocked', 'status', 'adminId', 'adminNote', 'createdAt', 'updatedAt'
-             ]) &&
-             data.id == reportId && isValidId(data.id) &&
-             isValidId(data.reporterId) && isValidId(data.reportedUserId) &&
-             data.reporterId != data.reportedUserId &&
-             isOptionalString(data, 'reportedUsername', 32) &&
-             isOptionalString(data, 'reportedDisplayName', 80) &&
-             data.category in [
-               'spam', 'harassment', 'hate_speech', 'nudity_sexual',
-               'impersonation', 'scam_fraud', 'violence_threats', 'child_safety',
-               'underage', 'privacy_violation', 'abusive_calls', 'other'
-             ] &&
-             isOptionalString(data, 'details', 1000) &&
-             data.source in ['profile', 'chat', 'search', 'call', 'family_chat'] &&
+              data.keys().hasOnly([
+                'id', 'reporterId', 'reportedUserId', 'reportedUsername', 'reportedDisplayName',
+                'category', 'details', 'source', 'targetType', 'conversationId', 'familyId', 'familyName',
+                'reportedMessageId', 'reportedMessageContent', 'reportedMessageMediaUrl',
+                'alsoBlocked', 'status', 'adminId', 'adminNote', 'createdAt', 'updatedAt'
+              ]) &&
+              data.id == reportId && isValidId(data.id) &&
+              isValidId(data.reporterId) && isValidId(data.reportedUserId) &&
+              data.reporterId != data.reportedUserId &&
+              isOptionalString(data, 'reportedUsername', 32) &&
+              isOptionalString(data, 'reportedDisplayName', 80) &&
+              data.category in [
+                'spam', 'harassment', 'hate_speech', 'nudity_sexual',
+                'impersonation', 'scam_fraud', 'violence_threats', 'child_safety',
+                'underage', 'privacy_violation', 'abusive_calls', 'other'
+              ] &&
+              isOptionalString(data, 'details', 1000) &&
+              data.source in ['profile', 'chat', 'search', 'call', 'family_chat', 'family_profile'] &&
+              (!('targetType' in data) || data.targetType in ['user', 'message', 'family']) &&
              isOptionalString(data, 'conversationId', 128) &&
              isOptionalString(data, 'familyId', 128) &&
              isOptionalString(data, 'familyName', 120) &&
@@ -416,6 +458,63 @@ service cloud.firestore {
              data.createdAt is timestamp;
     }
 
+    function isValidSupportTicket(data, ticketId) {
+      return data.keys().hasAll(['id', 'userId', 'subject', 'message', 'status', 'createdAt', 'updatedAt']) &&
+             data.keys().hasOnly(['id', 'userId', 'category', 'subject', 'message', 'status', 'createdAt', 'updatedAt']) &&
+             data.id == ticketId && isValidId(data.id) &&
+             isValidId(data.userId) &&
+             isOptionalString(data, 'category', 48) &&
+             data.subject is string && data.subject.size() >= 1 && data.subject.size() <= 140 &&
+             data.message is string && data.message.size() >= 1 && data.message.size() <= 3000 &&
+             data.status in ['open', 'closed'] &&
+             data.createdAt is string && data.updatedAt is string;
+    }
+
+    function isValidUserWarning(data, warningId) {
+      return data.keys().hasAll(['id', 'userId', 'adminId', 'reason', 'acknowledged', 'createdAt']) &&
+             data.keys().hasOnly(['id', 'userId', 'adminId', 'reason', 'ruleBroken', 'acknowledged', 'createdAt']) &&
+             data.id == warningId && isValidId(data.id) &&
+             isValidId(data.userId) && isValidId(data.adminId) &&
+             data.reason is string && data.reason.size() >= 1 && data.reason.size() <= 500 &&
+             isOptionalString(data, 'ruleBroken', 128) &&
+             data.acknowledged is bool &&
+             data.createdAt is string;
+    }
+
+    function isValidOfficialMessage(data, messageId) {
+      return data.keys().hasAll(['id', 'text', 'senderId', 'senderRole', 'deliveredCount', 'isDeleted', 'createdAt', 'updatedAt']) &&
+             data.keys().hasOnly([
+               'id', 'text', 'imageUrl', 'senderId', 'senderEmail', 'senderRole',
+               'deliveredCount', 'isDeleted', 'createdAt', 'updatedAt'
+             ]) &&
+             data.id == messageId && isValidId(data.id) &&
+             data.text is string && data.text.size() <= 4000 &&
+             isOptionalString(data, 'imageUrl', 1024) &&
+             isValidId(data.senderId) &&
+             isOptionalString(data, 'senderEmail', 254) &&
+             data.senderRole in ['super_admin', 'moderator'] &&
+             data.deliveredCount is int && data.deliveredCount >= 0 && data.deliveredCount <= 10000000 &&
+             data.isDeleted is bool &&
+             data.createdAt is timestamp &&
+             data.updatedAt is timestamp;
+    }
+
+    function isValidOfficialChatState(data, userId) {
+      return data.keys().hasAll(['userId', 'updatedAt']) &&
+             data.keys().hasOnly(['userId', 'clearedAt', 'lastReadAt', 'updatedAt']) &&
+             data.userId == userId && isValidId(data.userId) &&
+             (!('clearedAt' in data) || data.clearedAt == null || data.clearedAt is timestamp) &&
+             (!('lastReadAt' in data) || data.lastReadAt == null || data.lastReadAt is timestamp) &&
+             data.updatedAt is timestamp;
+    }
+
+    function isValidOfficialDeletedMarker(data, messageId) {
+      return data.keys().hasAll(['messageId', 'deletedAt']) &&
+             data.keys().hasOnly(['messageId', 'deletedAt']) &&
+             data.messageId == messageId && isValidId(data.messageId) &&
+             data.deletedAt is timestamp;
+    }
+
     // ====================================================================
     // COLLECTION RULES
     // ====================================================================
@@ -426,18 +525,20 @@ service cloud.firestore {
       allow list, write: if false;
     }
 
-    // Admin registry (non-enumerable, non-writable by client)
+    // Admin registry (role-scoped, controlled exclusively by Super Admin / backend)
     match /admins/{userId} {
-      allow get: if isOwner(userId) && isValidId(userId);
-      allow list, write: if false;
+      allow get: if (isOwner(userId) || isSuperAdmin()) && isValidId(userId);
+      allow list: if isSuperAdmin();
+      allow create, update, delete: if isSuperAdmin() && isValidId(userId);
     }
 
     // Public non-PII profile directory
     match /public_profiles/{userId} {
       allow get: if isSignedIn() && isValidId(userId);
-      allow list: if isSignedIn() && resource.data.isPublic == true;
+      allow list: if isSignedIn() && (resource.data.isPublic == true || isStaff());
       allow create: if isEmailVerified() && isOwner(userId) && isValidId(userId) &&
                        isValidPublicProfile(incoming(), userId) &&
+                       (!('isVerified' in incoming()) || incoming().isVerified == false) &&
                        incoming().createdAt == request.time &&
                        incoming().updatedAt == request.time;
       allow update: if isEmailVerified() && isValidId(userId) && (
@@ -455,9 +556,14 @@ service cloud.firestore {
                         incoming().id == existing().id &&
                         incoming().createdAt == existing().createdAt &&
                         incoming().updatedAt == request.time &&
-                        incoming().diff(existing()).affectedKeys().hasOnly(['isPublic', 'updatedAt']))
+                        incoming().diff(existing()).affectedKeys().hasOnly(['isPublic', 'updatedAt'])) ||
+                       (isSuperAdmin() &&
+                        incoming().id == existing().id &&
+                        incoming().createdAt == existing().createdAt &&
+                        incoming().updatedAt == request.time &&
+                        incoming().diff(existing()).affectedKeys().hasOnly(['isPublic', 'isVerified', 'updatedAt']))
                      );
-      allow delete: if isOwner(userId) && isValidId(userId);
+      allow delete: if (isOwner(userId) || isSuperAdmin()) && isValidId(userId);
     }
 
     // Unique lowercase username claims
@@ -468,16 +574,18 @@ service cloud.firestore {
                        isValidUsernameClaim(incoming(), usernameLower) &&
                        incoming().createdAt == request.time;
       allow update: if false;
-      allow delete: if isSignedIn() && isValidId(usernameLower) && existing().uid == request.auth.uid;
+      allow delete: if isSignedIn() && isValidId(usernameLower) && (existing().uid == request.auth.uid || isSuperAdmin());
     }
 
     // Strictly isolated private PII & role/ban metadata
     match /users/{userId}/private/{docId} {
-      allow get: if (isOwner(userId) || isAdmin()) && isValidId(userId) && isValidId(docId);
+      allow get: if (isOwner(userId) || isStaff()) && isValidId(userId) && isValidId(docId);
       allow list: if isOwner(userId);
       allow create: if isEmailVerified() && isOwner(userId) && isValidId(userId) && docId == 'info' &&
                        isValidPrivateUserInfo(incoming(), userId) &&
                        incoming().role == 'user' &&
+                       (!('adminRole' in incoming()) || incoming().adminRole == 'none') &&
+                       (!('isVerified' in incoming()) || incoming().isVerified == false) &&
                        incoming().createdAt == request.time &&
                        incoming().updatedAt == request.time;
       allow update: if isEmailVerified() && isValidId(userId) && isValidId(docId) &&
@@ -486,15 +594,21 @@ service cloud.firestore {
                        incoming().createdAt == existing().createdAt &&
                        incoming().updatedAt == request.time && (
                          (isOwner(userId) && incoming().role == existing().role &&
-                          incoming().diff(existing()).affectedKeys().hasOnly(['email', 'phoneNumber', 'restoredNoticePending', 'updatedAt'])) ||
+                          incoming().diff(existing()).affectedKeys().hasOnly(['email', 'phoneNumber', 'restoredNoticePending', 'lastActiveAt', 'updatedAt'])) ||
                          (isAdmin() &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
                             'role', 'status', 'strikeCount', 'banReason', 'ruleBroken',
                             'banUntil', 'restrictedUntil', 'scheduledDeletionAt',
                             'restoredNoticePending', 'bannedUntil', 'updatedAt'
+                          ])) ||
+                         (isSuperAdmin() &&
+                          incoming().diff(existing()).affectedKeys().hasOnly([
+                            'role', 'adminRole', 'isVerified', 'status', 'strikeCount', 'banReason', 'ruleBroken',
+                            'banUntil', 'restrictedUntil', 'scheduledDeletionAt',
+                            'restoredNoticePending', 'bannedUntil', 'forceLogoutAfter', 'updatedAt'
                           ]))
                        );
-      allow delete: if isOwner(userId) && isValidId(userId) && isValidId(docId);
+      allow delete: if (isOwner(userId) || isSuperAdmin()) && isValidId(userId) && isValidId(docId);
     }
 
     // Follow graph
@@ -762,6 +876,7 @@ service cloud.firestore {
       allow create: if isEmailVerified() && isValidId(userId) && isValidId(notificationId) &&
                        isValidNotification(incoming(), userId, notificationId) && (
                          (incoming().actorId == request.auth.uid && !isBlockedPair(request.auth.uid, userId)) ||
+                         isStaff() ||
                          (incoming().type == 'family_message_report' && incoming().actorId == 'system' &&
                           !('actorDisplayName' in incoming()) && !('actorUsername' in incoming()) && !('actorAvatarUrl' in incoming()))
                        ) &&
@@ -775,20 +890,20 @@ service cloud.firestore {
     // Problem & support reports
     match /problem_reports/{reportId} {
       allow get: if isSignedIn() && isValidId(reportId) &&
-                    (existing().userId == request.auth.uid || isAdmin());
-      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+                    (existing().userId == request.auth.uid || isSupportOrSuper());
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isSupportOrSuper());
       allow create: if isEmailVerified() && isValidId(reportId) &&
                        isValidProblemReport(incoming(), reportId) &&
                        incoming().userId == request.auth.uid &&
                        incoming().status == 'submitted' &&
                        incoming().createdAt == request.time;
-      allow update: if isAdmin() && isValidId(reportId) &&
+      allow update: if isSupportOrSuper() && isValidId(reportId) &&
                        isValidProblemReport(incoming(), reportId) &&
                        incoming().diff(existing()).affectedKeys().hasOnly(['status']);
-      allow delete: if isSignedIn() && isValidId(reportId) && existing().userId == request.auth.uid;
+      allow delete: if isSignedIn() && isValidId(reportId) && (existing().userId == request.auth.uid || isSuperAdmin());
     }
 
-    // User ID / profile abuse and safety reports
+    // User ID / profile / family abuse and safety reports
     match /user_reports/{reportId} {
       allow get: if isSignedIn() && isValidId(reportId) &&
                     (existing().reporterId == request.auth.uid || isAdmin());
@@ -801,8 +916,11 @@ service cloud.firestore {
                        !('adminId' in incoming()) &&
                        !('adminNote' in incoming()) &&
                        incoming().createdAt == request.time &&
-                       incoming().updatedAt == request.time &&
-                       exists(/databases/$(database)/documents/public_profiles/$(incoming().reportedUserId));
+                       incoming().updatedAt == request.time && (
+                         exists(/databases/$(database)/documents/public_profiles/$(incoming().reportedUserId)) ||
+                         (incoming().targetType == 'family' && isValidId(incoming().familyId) &&
+                          exists(/databases/$(database)/documents/families/$(incoming().familyId)))
+                       );
       allow update: if isAdmin() && isValidId(reportId) &&
                        isValidUserReport(incoming(), reportId) &&
                        incoming().id == existing().id &&
@@ -930,9 +1048,10 @@ service cloud.firestore {
     match /families/{familyId} {
       allow get: if isSignedIn() && isValidId(familyId) && (
                     isValidFamilyMemberStatus(familyId) ||
+                    isSuperAdmin() ||
                     (existing().inviteLinkEnabled == true)
                   );
-      allow list: if false;
+      allow list: if isSuperAdmin();
       allow create: if isEmailVerified() && isValidId(familyId) &&
                        incoming().id == familyId &&
                        incoming().ownerId == request.auth.uid &&
@@ -940,42 +1059,46 @@ service cloud.firestore {
                        incoming().memberCount == 1 &&
                        incoming().maxMembers == 5000 &&
                        incoming().pinnedMessages is list && incoming().pinnedMessages.size() == 0;
-      allow update: if isEmailVerified() && isValidId(familyId) &&
-                       incoming().id == existing().id &&
-                       incoming().maxMembers == existing().maxMembers &&
-                       incoming().memberCount is int && incoming().memberCount >= 0 && incoming().memberCount <= 5000 &&
-                       incoming().pinnedMessages is list && incoming().pinnedMessages.size() <= 3 && (
-                         // Owner full settings / transfer
-                         isFamilyOwner(familyId) ||
-                         // Admin settings, pins, memberCount, lastMessage (cannot change ownerId)
-                         (isFamilyAdminOrOwner(familyId) &&
-                          incoming().ownerId == existing().ownerId) ||
-                         // Active member updating lastMessage summary on send
-                         (isFamilyMember(familyId) &&
-                          incoming().ownerId == existing().ownerId &&
-                          incoming().name == existing().name &&
-                          incoming().joinApprovalRequired == existing().joinApprovalRequired &&
-                          incoming().onlyAdminsCanSend == existing().onlyAdminsCanSend &&
-                          incoming().inviteLinkEnabled == existing().inviteLinkEnabled &&
-                          incoming().diff(existing()).affectedKeys().hasOnly([
-                            'lastMessageId', 'lastMessageText', 'lastMessageSenderId', 'lastMessageSenderName', 'lastMessageAt', 'updatedAt'
-                          ])) ||
-                         // Joining/Leaving user adjusting memberCount (+/- 1)
-                         (isSignedIn() &&
-                          incoming().ownerId == existing().ownerId &&
-                          incoming().diff(existing()).affectedKeys().hasOnly([
-                            'memberCount', 'lastMessageId', 'lastMessageText', 'lastMessageSenderId', 'lastMessageSenderName', 'lastMessageAt', 'updatedAt'
-                          ]))
-                       );
-      allow delete: if isSignedIn() && isValidId(familyId) && isFamilyOwner(familyId);
+      allow update: if isEmailVerified() && isValidId(familyId) && (
+                       isSuperAdmin() || (
+                         incoming().id == existing().id &&
+                         incoming().maxMembers == existing().maxMembers &&
+                         incoming().memberCount is int && incoming().memberCount >= 0 && incoming().memberCount <= 5000 &&
+                         incoming().pinnedMessages is list && incoming().pinnedMessages.size() <= 3 && (
+                           // Owner full settings / transfer
+                           isFamilyOwner(familyId) ||
+                           // Admin settings, pins, memberCount, lastMessage (cannot change ownerId)
+                           (isFamilyAdminOrOwner(familyId) &&
+                            incoming().ownerId == existing().ownerId) ||
+                           // Active member updating lastMessage summary on send
+                           (isFamilyMember(familyId) &&
+                            incoming().ownerId == existing().ownerId &&
+                            incoming().name == existing().name &&
+                            incoming().joinApprovalRequired == existing().joinApprovalRequired &&
+                            incoming().onlyAdminsCanSend == existing().onlyAdminsCanSend &&
+                            incoming().inviteLinkEnabled == existing().inviteLinkEnabled &&
+                            incoming().diff(existing()).affectedKeys().hasOnly([
+                              'lastMessageId', 'lastMessageText', 'lastMessageSenderId', 'lastMessageSenderName', 'lastMessageAt', 'updatedAt'
+                            ])) ||
+                           // Joining/Leaving user adjusting memberCount (+/- 1)
+                           (isSignedIn() &&
+                            incoming().ownerId == existing().ownerId &&
+                            incoming().diff(existing()).affectedKeys().hasOnly([
+                              'memberCount', 'lastMessageId', 'lastMessageText', 'lastMessageSenderId', 'lastMessageSenderName', 'lastMessageAt', 'updatedAt'
+                            ]))
+                         )
+                       )
+                     );
+      allow delete: if isSignedIn() && isValidId(familyId) && (isFamilyOwner(familyId) || isSuperAdmin());
 
       // Members subcollection (paged + searchable; active members or invitees reading/updating)
       match /members/{memberId} {
         allow get: if isSignedIn() && isValidId(familyId) && isValidId(memberId) &&
-                      (isOwner(memberId) || isFamilyMember(familyId));
+                      (isOwner(memberId) || isFamilyMember(familyId) || isSuperAdmin());
         allow list: if isSignedIn() && isValidId(familyId) && (
                        resource.data.userId == request.auth.uid ||
-                       isFamilyMember(familyId)
+                       isFamilyMember(familyId) ||
+                       isSuperAdmin()
                      );
         allow create: if isEmailVerified() && isValidId(familyId) && isValidId(memberId) &&
                          incoming().userId == memberId && incoming().familyId == familyId &&
@@ -992,6 +1115,8 @@ service cloud.firestore {
         allow update: if isEmailVerified() && isValidId(familyId) && isValidId(memberId) &&
                          incoming().userId == existing().userId &&
                          incoming().familyId == existing().familyId && (
+                           // Super Admin moderation or ownership transfer
+                           isSuperAdmin() ||
                            // Owner can update roles, statuses, relationTag
                            isFamilyOwner(familyId) ||
                            // Admin can update normal member (not Owner, not other Admin)
@@ -1004,15 +1129,17 @@ service cloud.firestore {
                              (existing().role != 'owner' && incoming().role == 'member' && incoming().status in ['active', 'pending', 'left'] && existing().status != 'removed')
                            ))
                          );
-        allow delete: if isSignedIn() && isValidId(familyId) && isValidId(memberId) && isFamilyOwner(familyId);
+        allow delete: if isSignedIn() && isValidId(familyId) && isValidId(memberId) && (isFamilyOwner(familyId) || isSuperAdmin());
       }
 
       // Shared messages subcollection (1 write per message regardless of member count)
       match /messages/{messageId} {
-        allow get: if isSignedIn() && isValidId(familyId) && isValidId(messageId) && isFamilyMember(familyId);
-        allow list: if isSignedIn() && isValidId(familyId) && isFamilyMember(familyId);
+        allow get: if isSignedIn() && isValidId(familyId) && isValidId(messageId) && (isFamilyMember(familyId) || isAdmin());
+        allow list: if isSignedIn() && isValidId(familyId) && (isFamilyMember(familyId) || isAdmin());
         allow create: if isEmailVerified() && isValidId(familyId) && isValidId(messageId) &&
-                         incoming().id == messageId && incoming().familyId == familyId && (
+                         incoming().id == messageId && incoming().familyId == familyId &&
+                         (!('isSuspended' in get(/databases/$(database)/documents/families/$(familyId)).data) ||
+                          get(/databases/$(database)/documents/families/$(familyId)).data.isSuspended != true) && (
                            // Active member sending message (enforcing onlyAdminsCanSend!)
                            (isFamilyMember(familyId) &&
                             incoming().senderId == request.auth.uid &&
@@ -1040,28 +1167,28 @@ service cloud.firestore {
                             incoming().diff(existing()).affectedKeys().hasOnly([
                               'isDeleted', 'isPinned', 'content', 'mediaUrl', 'cloudinaryPublicId', 'b2FileId', 'b2FileName', 'reactions', 'deletedBy', 'deletedByRole', 'updatedAt'
                             ])) ||
-                           // Owner or Admin pins/unpins or soft-deletes any message
-                           (isFamilyAdminOrOwner(familyId) &&
+                           // Family Owner/Admin or Platform Moderator/SuperAdmin deletes/pins any message
+                           ((isFamilyAdminOrOwner(familyId) || isAdmin()) &&
                             incoming().diff(existing()).affectedKeys().hasOnly([
                               'isPinned', 'isDeleted', 'content', 'mediaUrl', 'cloudinaryPublicId', 'b2FileId', 'b2FileName', 'reactions', 'deletedBy', 'deletedByRole', 'updatedAt'
                             ]))
                          );
-        allow delete: if isSignedIn() && isValidId(familyId) && isValidId(messageId) && isFamilyOwner(familyId);
+        allow delete: if isSignedIn() && isValidId(familyId) && isValidId(messageId) && (isFamilyOwner(familyId) || isSuperAdmin());
       }
 
       // Join requests (pending approval)
       match /requests/{userId} {
         allow get: if isSignedIn() && isValidId(familyId) && isValidId(userId) &&
-                      (isOwner(userId) || isFamilyAdminOrOwner(familyId));
+                      (isOwner(userId) || isFamilyAdminOrOwner(familyId) || isSuperAdmin());
         allow list: if isSignedIn() && isValidId(familyId) &&
-                       (resource.data.userId == request.auth.uid || isFamilyAdminOrOwner(familyId));
+                       (resource.data.userId == request.auth.uid || isFamilyAdminOrOwner(familyId) || isSuperAdmin());
         allow create: if isEmailVerified() && isValidId(familyId) && isValidId(userId) &&
                          isOwner(userId) && incoming().userId == userId && incoming().familyId == familyId &&
                          incoming().status == 'pending';
         allow update: if isEmailVerified() && isValidId(familyId) && isValidId(userId) &&
                          (isOwner(userId) || isFamilyAdminOrOwner(familyId));
         allow delete: if isSignedIn() && isValidId(familyId) && isValidId(userId) &&
-                         (isOwner(userId) || isFamilyAdminOrOwner(familyId));
+                         (isOwner(userId) || isFamilyAdminOrOwner(familyId) || isSuperAdmin());
       }
 
       // Typing indicators (Families <= 50)
@@ -1081,8 +1208,110 @@ service cloud.firestore {
         allow create, update: if isEmailVerified() && isValidId(familyId) &&
                                  incoming().userId == request.auth.uid &&
                                  isFamilyMember(familyId);
-        allow delete: if isSignedIn() && isValidId(familyId) && isFamilyOwner(familyId);
+        allow delete: if isSignedIn() && isValidId(familyId) && (isFamilyOwner(familyId) || isSuperAdmin());
       }
+    }
+
+    // ====================================================================
+    // ADMIN PANEL GLOBAL CONFIG, GOVERNANCE, ANNOUNCEMENTS & TICKETS
+    // ====================================================================
+
+    match /app_config/{docId} {
+      allow get: if isSignedIn() && isValidId(docId);
+      allow list: if false;
+      allow create, update, delete: if isSuperAdmin() && isValidId(docId);
+    }
+
+    match /banned_words/{wordId} {
+      allow get, list: if isSignedIn();
+      allow create, update, delete: if isSuperAdmin() && isValidId(wordId);
+    }
+
+    match /announcements/{announcementId} {
+      allow get, list: if isSignedIn();
+      allow create, update, delete: if isSuperAdmin() && isValidId(announcementId);
+    }
+
+    // ====================================================================
+    // OFFICIAL CHAT (Admin-only write/delete; user read + own-side hide)
+    // ====================================================================
+    match /official_messages/{messageId} {
+      allow get: if isSignedIn() && isValidId(messageId);
+      allow list: if isSignedIn();
+      allow create: if canManageOfficialChat() && isValidId(messageId) &&
+                       isValidOfficialMessage(incoming(), messageId);
+      allow update: if canManageOfficialChat() && isValidId(messageId) &&
+                       isValidOfficialMessage(incoming(), messageId) &&
+                       incoming().id == existing().id &&
+                       incoming().createdAt == existing().createdAt;
+      allow delete: if canManageOfficialChat() && isValidId(messageId);
+    }
+
+    match /users/{userId}/official_chat_state/{stateId} {
+      allow get: if isOwner(userId) && isValidId(userId) && stateId == 'state';
+      allow list: if isOwner(userId);
+      allow create, update: if isEmailVerified() && isOwner(userId) && isValidId(userId) &&
+                               stateId == 'state' &&
+                               isValidOfficialChatState(incoming(), userId) &&
+                               incoming().updatedAt == request.time;
+      allow delete: if isOwner(userId) && isValidId(userId) && stateId == 'state';
+    }
+
+    match /users/{userId}/official_deleted_messages/{messageId} {
+      allow get: if isOwner(userId) && isValidId(userId) && isValidId(messageId);
+      allow list: if isOwner(userId);
+      allow create: if isEmailVerified() && isOwner(userId) && isValidId(userId) && isValidId(messageId) &&
+                       isValidOfficialDeletedMarker(incoming(), messageId) &&
+                       incoming().deletedAt == request.time;
+      allow update: if false;
+      allow delete: if isOwner(userId) && isValidId(userId) && isValidId(messageId);
+    }
+
+    match /support_tickets/{ticketId} {
+      allow get: if isSignedIn() && isValidId(ticketId) &&
+                    (existing().userId == request.auth.uid || isSupportOrSuper());
+      allow list: if isSignedIn() &&
+                     (resource.data.userId == request.auth.uid || isSupportOrSuper());
+      allow create: if isEmailVerified() && isValidId(ticketId) &&
+                       isValidSupportTicket(incoming(), ticketId) &&
+                       incoming().userId == request.auth.uid &&
+                       incoming().status == 'open';
+      allow update: if isEmailVerified() && isValidId(ticketId) && (
+                       (isSupportOrSuper() &&
+                        incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])) ||
+                       (isOwner(existing().userId) &&
+                        incoming().diff(existing()).affectedKeys().hasOnly(['updatedAt']))
+                     );
+      allow delete: if isSuperAdmin() && isValidId(ticketId);
+
+      match /replies/{replyId} {
+        allow get: if isSignedIn() && isValidId(ticketId) && isValidId(replyId) && (
+                      get(/databases/$(database)/documents/support_tickets/$(ticketId)).data.userId == request.auth.uid ||
+                      isSupportOrSuper()
+                    );
+        allow list: if isSignedIn() && isValidId(ticketId) && (
+                      get(/databases/$(database)/documents/support_tickets/$(ticketId)).data.userId == request.auth.uid ||
+                      isSupportOrSuper()
+                    );
+        allow create: if isEmailVerified() && isValidId(ticketId) && isValidId(replyId) && (
+                        isSupportOrSuper() ||
+                        (get(/databases/$(database)/documents/support_tickets/$(ticketId)).data.userId == request.auth.uid &&
+                         incoming().senderId == request.auth.uid)
+                      );
+        allow update, delete: if false;
+      }
+    }
+
+    match /user_warnings/{warningId} {
+      allow get: if isSignedIn() && isValidId(warningId) &&
+                    (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() &&
+                     (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isAdmin() && isValidId(warningId) && isValidUserWarning(incoming(), warningId);
+      allow update: if isEmailVerified() && isValidId(warningId) &&
+                       isOwner(existing().userId) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['acknowledged']);
+      allow delete: if isSuperAdmin() && isValidId(warningId);
     }
   }
 }

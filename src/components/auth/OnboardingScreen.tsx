@@ -4,6 +4,7 @@ import { checkUsernameAvailability } from '@/src/hooks/useAuth';
 import { User, CheckCircle2, AlertCircle, Camera, Sparkles, Globe, ChevronDown, Upload, Trash2, Loader2 } from 'lucide-react';
 import { uploadMediaToCloudinary, compressProfileImageIfNeeded } from '@/src/lib/cloudinaryClient';
 import { useLanguage } from '@/src/lib/LanguageContext';
+import { validateTextAgainstBannedWords } from '@/src/lib/bannedWordsCheck';
 
 interface OnboardingScreenProps {
   prefillName?: string;
@@ -186,6 +187,12 @@ export function OnboardingScreen({
 
     setLoading(true);
     try {
+      const wordCheck = await validateTextAgainstBannedWords(`${displayName.trim()} ${cleanUser} ${bio.trim()}`);
+      if (wordCheck.blocked) {
+        setError(wordCheck.errorMessage || 'One of your fields contains a restricted word.');
+        setLoading(false);
+        return;
+      }
       const check = await checkUsernameAvailability(cleanUser);
       if (!check.available) {
         setUsernameError(check.message || 'Username is already taken.');

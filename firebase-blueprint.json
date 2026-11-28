@@ -14,6 +14,7 @@
         "country": { "type": "string", "maxLength": 64 },
         "isOnline": { "type": "boolean" },
         "isPublic": { "type": "boolean" },
+        "isVerified": { "type": "boolean" },
         "lastSeen": { "type": "string", "format": "date-time" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
@@ -40,6 +41,8 @@
         "email": { "type": "string", "maxLength": 254 },
         "phoneNumber": { "type": "string", "maxLength": 32 },
         "role": { "type": "string", "enum": ["user", "moderator", "admin"] },
+        "adminRole": { "type": "string", "enum": ["none", "super_admin", "moderator", "support"] },
+        "isVerified": { "type": "boolean" },
         "status": { "type": "string", "enum": ["active", "restricted", "suspended", "disabled", "deactivated"] },
         "strikeCount": { "type": "number" },
         "banReason": { "type": "string", "maxLength": 500 },
@@ -49,6 +52,8 @@
         "scheduledDeletionAt": { "type": "string", "maxLength": 64 },
         "restoredNoticePending": { "type": "boolean" },
         "bannedUntil": { "type": "string", "maxLength": 64 },
+        "forceLogoutAfter": { "type": "string", "maxLength": 64 },
+        "lastActiveAt": { "type": "string", "maxLength": 64 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -259,7 +264,8 @@
             "account_disabled", "account_restored", "appeal_update",
             "family_invite", "family_message", "family_mention",
             "family_join_request", "family_join_approved", "family_join_rejected",
-            "family_message_report", "family_deleted"
+            "family_message_report", "family_deleted",
+            "announcement", "official_chat", "support_reply"
           ]
         },
         "title": { "type": "string", "minLength": 1, "maxLength": 160 },
@@ -303,7 +309,8 @@
           ]
         },
         "details": { "type": "string", "maxLength": 1000 },
-        "source": { "type": "string", "enum": ["profile", "chat", "search", "call", "family_chat"] },
+        "source": { "type": "string", "enum": ["profile", "chat", "search", "call", "family_chat", "family_profile"] },
+        "targetType": { "type": "string", "enum": ["user", "message", "family"] },
         "conversationId": { "type": "string", "maxLength": 128 },
         "familyId": { "type": "string", "maxLength": 128 },
         "familyName": { "type": "string", "maxLength": 120 },
@@ -391,6 +398,9 @@
         "lastMessageSenderId": { "type": "string", "maxLength": 128 },
         "lastMessageSenderName": { "type": "string", "maxLength": 80 },
         "lastMessageAt": { "type": "string", "format": "date-time" },
+        "isSuspended": { "type": "boolean" },
+        "suspendedReason": { "type": "string", "maxLength": 500 },
+        "suspendedAt": { "type": "string", "maxLength": 64 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -549,6 +559,151 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["userId", "familyId", "displayName", "expiresAt", "updatedAt"]
+    },
+    "AdminRegistryEntry": {
+      "title": "AdminRegistryEntry",
+      "description": "Server/Super-Admin assigned Admin Panel role record.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "role": { "type": "string", "enum": ["super_admin", "moderator", "support"] },
+        "email": { "type": "string", "maxLength": 254 },
+        "assignedBy": { "type": "string", "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "role", "updatedAt"]
+    },
+    "AppConfig": {
+      "title": "AppConfig",
+      "description": "Global maintenance mode, Official Chat moderator access, and warning auto-escalation configuration.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 64 },
+        "maintenanceMode": { "type": "boolean" },
+        "maintenanceMessage": { "type": "string", "maxLength": 500 },
+        "officialChatModeratorsEnabled": { "type": "boolean" },
+        "warningThreshold": { "type": "number" },
+        "warningAutoAction": { "type": "string", "enum": ["suspend", "ban"] },
+        "warningSuspendDays": { "type": "number" },
+        "updatedBy": { "type": "string", "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["maintenanceMode", "maintenanceMessage", "updatedAt"]
+    },
+    "OfficialMessage": {
+      "title": "OfficialMessage",
+      "description": "Official LiveConnect broadcast chat message written only by authorized admins and read by all users.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "text": { "type": "string", "maxLength": 4000 },
+        "imageUrl": { "type": "string", "maxLength": 1024 },
+        "senderId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "senderEmail": { "type": "string", "maxLength": 254 },
+        "senderRole": { "type": "string", "enum": ["super_admin", "moderator"] },
+        "deliveredCount": { "type": "number" },
+        "isDeleted": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "text", "senderId", "senderRole", "deliveredCount", "isDeleted", "createdAt", "updatedAt"]
+    },
+    "OfficialChatUserState": {
+      "title": "OfficialChatUserState",
+      "description": "Per-user read cursor and clear-chat timestamp for the Official LiveConnect chat.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "clearedAt": { "type": "string", "format": "date-time" },
+        "lastReadAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "updatedAt"]
+    },
+    "OfficialDeletedMessageMarker": {
+      "title": "OfficialDeletedMessageMarker",
+      "description": "Per-user marker hiding an individual Official Chat message on that user's side only.",
+      "type": "object",
+      "properties": {
+        "messageId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "deletedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["messageId", "deletedAt"]
+    },
+    "BannedWord": {
+      "title": "BannedWord",
+      "description": "Blocked or flagged word enforced across messages, usernames, and family names.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "word": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "wordLower": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "matchMode": { "type": "string", "enum": ["substring", "exact"] },
+        "action": { "type": "string", "enum": ["block", "flag"] },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "word", "wordLower", "matchMode", "action", "createdAt", "updatedAt"]
+    },
+    "Announcement": {
+      "title": "Announcement",
+      "description": "Legacy broadcast announcements collection.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "createdBy": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "title", "message", "createdBy", "createdAt"]
+    },
+    "SupportTicket": {
+      "title": "SupportTicket",
+      "description": "User-submitted support ticket for complaint, feedback, or technical issue.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "category": { "type": "string", "maxLength": 48 },
+        "subject": { "type": "string", "minLength": 1, "maxLength": 140 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 3000 },
+        "status": { "type": "string", "enum": ["open", "closed"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "subject", "message", "status", "createdAt", "updatedAt"]
+    },
+    "SupportTicketReply": {
+      "title": "SupportTicketReply",
+      "description": "Reply message inside a support ticket thread.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "ticketId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "senderId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "senderRole": { "type": "string", "enum": ["user", "super_admin", "moderator", "support", "admin"] },
+        "senderName": { "type": "string", "maxLength": 80 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "ticketId", "senderId", "senderRole", "message", "createdAt"]
+    },
+    "UserWarning": {
+      "title": "UserWarning",
+      "description": "Formal safety warning issued to a user with acknowledgement flag.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "adminId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "ruleBroken": { "type": "string", "maxLength": 128 },
+        "acknowledged": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "adminId", "reason", "acknowledged", "createdAt"]
     }
   },
   "firestore": {
@@ -663,6 +818,46 @@
     "/users/{userId}/family_invites/{inviteId}": {
       "schema": { "$ref": "#/entities/FamilyInvite" },
       "description": "Owner-scoped incoming Family Group invitations."
+    },
+    "/admins/{userId}": {
+      "schema": { "$ref": "#/entities/AdminRegistryEntry" },
+      "description": "Server/Super-Admin controlled admin panel role registry."
+    },
+    "/app_config/{docId}": {
+      "schema": { "$ref": "#/entities/AppConfig" },
+      "description": "Global application configuration including maintenance mode and warning escalation thresholds."
+    },
+    "/banned_words/{wordId}": {
+      "schema": { "$ref": "#/entities/BannedWord" },
+      "description": "List of banned or flagged words enforced on messages and names."
+    },
+    "/official_messages/{messageId}": {
+      "schema": { "$ref": "#/entities/OfficialMessage" },
+      "description": "Official LiveConnect chat messages written only by admins and read by all signed-in users."
+    },
+    "/users/{userId}/official_chat_state/{stateId}": {
+      "schema": { "$ref": "#/entities/OfficialChatUserState" },
+      "description": "Per-user read/cleared state for the Official LiveConnect chat."
+    },
+    "/users/{userId}/official_deleted_messages/{messageId}": {
+      "schema": { "$ref": "#/entities/OfficialDeletedMessageMarker" },
+      "description": "Per-user hidden/deleted markers for individual Official Chat messages."
+    },
+    "/announcements/{announcementId}": {
+      "schema": { "$ref": "#/entities/Announcement" },
+      "description": "Legacy announcements collection."
+    },
+    "/support_tickets/{ticketId}": {
+      "schema": { "$ref": "#/entities/SupportTicket" },
+      "description": "User support tickets managed by Support and Super Admin."
+    },
+    "/support_tickets/{ticketId}/replies/{replyId}": {
+      "schema": { "$ref": "#/entities/SupportTicketReply" },
+      "description": "Reply messages on support tickets."
+    },
+    "/user_warnings/{warningId}": {
+      "schema": { "$ref": "#/entities/UserWarning" },
+      "description": "In-app warnings issued to users by moderators or Super Admin."
     }
   }
 }

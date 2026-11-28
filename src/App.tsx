@@ -8,6 +8,7 @@ import { useCallHistory } from '@/src/hooks/useCallHistory';
 import { useSocialRelations } from '@/src/hooks/useSocialRelations';
 import { useNotifications } from '@/src/hooks/useNotifications';
 import { useFamilies } from '@/src/hooks/useFamilies';
+import { useOfficialChat, OFFICIAL_CHAT_ID } from '@/src/hooks/useOfficialChat';
 import { AuthPage } from '@/src/components/auth/AuthPage';
 import { BottomNav, TabType } from '@/src/components/navigation/BottomNav';
 import { SidebarNav } from '@/src/components/navigation/SidebarNav';
@@ -37,8 +38,11 @@ import { OnboardingScreen } from '@/src/components/auth/OnboardingScreen';
 import { BannedScreen } from '@/src/components/auth/BannedScreen';
 import { AccountStatusModal } from '@/src/components/moderation/AccountStatusModal';
 import { AccountRestoredModal } from '@/src/components/moderation/AccountRestoredModal';
-import { AdminModerationPanel } from '@/src/components/moderation/AdminModerationPanel';
 import { ReportUserModal } from '@/src/components/moderation/ReportUserModal';
+import { UnderMaintenanceScreen } from '@/src/components/moderation/UnderMaintenanceScreen';
+import { WarningsBannerModal } from '@/src/components/moderation/WarningsBannerModal';
+import { AdminRoot } from '@/src/components/admin/AdminRoot';
+import { fetchAppConfigSnapshot, AppConfigSnapshot } from '@/src/lib/bannedWordsCheck';
 import { isFirebaseSessionActive } from '@/src/lib/firebase/client';
 import { sendMessageToFirestoreFs } from '@/src/lib/firebase/services';
 import { getAuthHeaders } from '@/src/lib/authHeader';
@@ -49,6 +53,18 @@ import { Profile, Message, UserReportSource } from '@/src/types';
 let launchSplashCompleted = false;
 
 export default function App() {
+  const isAdminPath =
+    typeof window !== 'undefined' &&
+    (window.location.pathname === '/admin' || window.location.pathname.startsWith('/admin/'));
+
+  if (isAdminPath) {
+    return <AdminRoot />;
+  }
+
+  return <LiveConnectApp />;
+}
+
+function LiveConnectApp() {
   const {
     user,
     profile,
@@ -69,14 +85,31 @@ export default function App() {
     refreshProfile,
   } = useAuth();
 
-  const isModeratorOrAdmin =
-    user?.role === 'admin' ||
-    user?.role === 'moderator' ||
-    profile?.role === 'admin' ||
-    profile?.role === 'moderator';
-
   const readyUserId =
     !authLoading && !profileCheckPending && user && profile && !needsOnboarding ? user.id : undefined;
+
+  const [appConfig, setAppConfig] = useState<AppConfigSnapshot | null>(null);
+
+  const refreshAppConfig = useCallback(async () => {
+    const snap = await fetchAppConfigSnapshot(Boolean(readyUserId));
+    if (!snap) return;
+    if (snap.forceLogout && readyUserId) {
+      await signOut();
+      return;
+    }
+    setAppConfig(snap);
+  }, [readyUserId, signOut]);
+
+  useEffect(() => {
+    void refreshAppConfig();
+    const timer = setInterval(() => void refreshAppConfig(), 45_000);
+    const onFocus = () => void refreshAppConfig();
+    window.addEventListener('focus', onFocus);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [refreshAppConfig]);
 
   const { isUserOnline, getUserLastSeen } = usePresence(readyUserId);
 
@@ -152,6 +185,8 @@ export default function App() {
     markConversationAsRead,
   } = useConversations(readyUserId, activeTab, readyProfile);
 
+  const officialChat = useOfficialChat(readyUserId);
+
   const {
     incomingCall,
     activeCallState,
@@ -188,7 +223,6 @@ export default function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isBlockedModalOpen, setIsBlockedModalOpen] = useState(false);
   const [isAccountStatusOpen, setIsAccountStatusOpen] = useState(false);
-  const [isAdminPanelOpen, setIsAdminPanelOpen] = useState(false);
   const [viewingProfile, setViewingProfile] = useState<Profile | null>(null);
   const [reportingTarget, setReportingTarget] = useState<{
     user: Profile;
@@ -204,11 +238,24 @@ export default function App() {
 
   useEffect(() => {
     if (!activeConversationId) return;
+    if (activeConversationId === OFFICIAL_CHAT_ID) {
+      if (!officialChat.loading && !officialChat.isVisible) {
+        setActiveConversationId(null);
+      }
+      return;
+    }
     const activeConv = conversations.find((c) => c.id === activeConversationId);
     if (activeConv?.other_member?.id && socialRelations.isBlocked(activeConv.other_member.id)) {
       setActiveConversationId(null);
     }
-  }, [activeConversationId, conversations, socialRelations.isBlocked, setActiveConversationId]);
+  }, [
+    activeConversationId,
+    conversations,
+    socialRelations.isBlocked,
+    setActiveConversationId,
+    officialChat.loading,
+    officialChat.isVisible,
+  ]);
 
   const filteredSearchUsers = useCallback(
     async (queryText: string) => {
@@ -236,7 +283,7 @@ export default function App() {
 
   // Calculate total unread messages count (active open chat messages are only excluded if currently viewing messages tab)
   const totalUnreadCount = useMemo(() => {
-    return visibleConversations.reduce((acc, c) => {
+    const dmUnread = visibleConversations.reduce((acc, c) => {
       const isActivelyViewingThisChat =
         typeof document !== 'undefined' &&
         !document.hidden &&
@@ -246,7 +293,24 @@ export default function App() {
       if (isActivelyViewingThisChat) return acc;
       return acc + (c.unread_count || 0);
     }, 0);
-  }, [visibleConversations, activeConversationId, activeTab]);
+
+    const isActivelyViewingOfficial =
+      typeof document !== 'undefined' &&
+      !document.hidden &&
+      activeTab === 'messages' &&
+      activeConversationId === OFFICIAL_CHAT_ID;
+
+    const officialUnread =
+      officialChat.isVisible && !isActivelyViewingOfficial ? officialChat.unreadCount : 0;
+
+    return dmUnread + officialUnread;
+  }, [
+    visibleConversations,
+    activeConversationId,
+    activeTab,
+    officialChat.isVisible,
+    officialChat.unreadCount,
+  ]);
 
   const adjustedFamilyBadgeCount = useMemo(() => {
     if (!activeFamilyId || activeTab !== 'family') return rawFamilyBadgeCount;
@@ -402,6 +466,22 @@ export default function App() {
     }
   }
 
+  // Maintenance mode gate for non-admin users
+  const isStaffMember =
+    (appConfig?.adminRole && appConfig.adminRole !== 'none') ||
+    (profile?.admin_role && profile.admin_role !== 'none') ||
+    (user?.admin_role && user.admin_role !== 'none');
+
+  if (appConfig?.maintenanceMode && !isStaffMember) {
+    return (
+      <UnderMaintenanceScreen
+        message={appConfig.maintenanceMessage}
+        onRetry={refreshAppConfig}
+        onSignOut={user ? signOut : undefined}
+      />
+    );
+  }
+
   // Unauthenticated view (Support public standalone view of Terms & Privacy for App Store / Play Store Review)
   if (!user || (!profile && !needsOnboarding)) {
     if (typeof window !== 'undefined') {
@@ -513,6 +593,16 @@ export default function App() {
             activeConversationId={activeConversationId}
             loading={convLoading}
             currentUser={profile}
+            officialChat={{
+              messages: officialChat.messages,
+              lastMessage: officialChat.lastMessage,
+              unreadCount: officialChat.unreadCount,
+              isVisible: officialChat.isVisible,
+              loading: officialChat.loading,
+              onMarkAsRead: officialChat.markAsRead,
+              onDeleteMessageForMe: officialChat.deleteMessageForMe,
+              onClearChatForMe: officialChat.clearChatForMe,
+            }}
             onSelectConversation={(id) => setActiveConversationId(id)}
             onOpenSearch={() => setIsSearchOpen(true)}
             onOpenForwardModal={(m) => setForwardingMessage(m)}
@@ -630,7 +720,6 @@ export default function App() {
             }}
             onOpenSettingsModal={() => setIsSettingsOpen(true)}
             onOpenAccountStatus={() => setIsAccountStatusOpen(true)}
-            onOpenAdminPanel={isModeratorOrAdmin ? () => setIsAdminPanelOpen(true) : undefined}
             onOpenNotifications={() => setIsNotificationOpen(true)}
             unreadNotificationsCount={unreadNotificationsCount}
             onSignOut={signOut}
@@ -724,6 +813,11 @@ export default function App() {
           if (convId) {
             setActiveConversationId(convId);
           }
+        }}
+        onOpenOfficialChat={() => {
+          setIsNotificationOpen(false);
+          handleTabChange('messages');
+          setActiveConversationId(OFFICIAL_CHAT_ID);
         }}
         onOpenFamily={(familyId) => {
           setIsNotificationOpen(false);
@@ -873,7 +967,6 @@ export default function App() {
         blockedCount={socialRelations.blockedByMeSet.size}
         onOpenBlockedUsers={() => setIsBlockedModalOpen(true)}
         onOpenAccountStatus={() => setIsAccountStatusOpen(true)}
-        onOpenAdminPanel={isModeratorOrAdmin ? () => setIsAdminPanelOpen(true) : undefined}
       />
 
       <BlockedUsersModal
@@ -890,12 +983,10 @@ export default function App() {
         onSignOut={signOut}
       />
 
-      {isModeratorOrAdmin && (
-        <AdminModerationPanel
-          isOpen={isAdminPanelOpen}
-          onClose={() => setIsAdminPanelOpen(false)}
-        />
-      )}
+      <WarningsBannerModal
+        warnings={appConfig?.unreadWarnings || []}
+        onAcknowledged={refreshAppConfig}
+      />
 
       <AccountRestoredModal
         isOpen={restoredNoticePending}

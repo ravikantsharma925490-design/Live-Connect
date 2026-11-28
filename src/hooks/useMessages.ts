@@ -29,6 +29,7 @@ import {
   markMessagesAsReadFs,
 } from '@/src/lib/firebase/services';
 import { getAuthHeaders } from '@/src/lib/authHeader';
+import { validateTextAgainstBannedWords, reportTelemetry } from '@/src/lib/bannedWordsCheck';
 
 export type ClientMessage = Message & {
   client_id?: string;
@@ -980,6 +981,14 @@ export function useMessages(
 
       setError(null);
 
+      if (isFirebaseSessionActive(currentUserId)) {
+        const wordCheck = await validateTextAgainstBannedWords(trimmed);
+        if (wordCheck.blocked) {
+          setError(wordCheck.errorMessage || 'This message contains a restricted word and cannot be sent.');
+          return false;
+        }
+      }
+
       let processedContent = trimmed;
 
       if (processedContent.includes('data:image') || processedContent.includes('data:audio')) {
@@ -1091,6 +1100,7 @@ export function useMessages(
             )
           );
 
+          void reportTelemetry('dm_sent', conversationId);
           return true;
         } catch (err: any) {
           updateMessagesState((prev) => prev.filter((m) => m.id !== tempId && m.client_id !== tempId));

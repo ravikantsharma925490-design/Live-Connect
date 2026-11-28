@@ -424,7 +424,126 @@ db.exec(`
     updated_at TEXT NOT NULL,
     PRIMARY KEY (family_id, user_id)
   );
+  CREATE TABLE IF NOT EXISTS admin_sessions (
+    token TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    admin_role TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_activity_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_admin_sessions_user ON admin_sessions(user_id);
+
+  CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_by TEXT,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS banned_words (
+    id TEXT PRIMARY KEY,
+    word TEXT NOT NULL,
+    word_lower TEXT UNIQUE NOT NULL,
+    match_mode TEXT NOT NULL DEFAULT 'substring',
+    action TEXT NOT NULL DEFAULT 'block',
+    created_by TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_banned_words_lower ON banned_words(word_lower);
+
+  CREATE TABLE IF NOT EXISTS announcements (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    message TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    created_by_email TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_announcements_created ON announcements(created_at);
+
+  CREATE TABLE IF NOT EXISTS official_messages (
+    id TEXT PRIMARY KEY,
+    text TEXT NOT NULL DEFAULT '',
+    image_url TEXT,
+    sender_id TEXT NOT NULL,
+    sender_email TEXT,
+    sender_role TEXT NOT NULL DEFAULT 'super_admin',
+    delivered_count INTEGER NOT NULL DEFAULT 0,
+    is_deleted INTEGER NOT NULL DEFAULT 0,
+    deleted_by TEXT,
+    deleted_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_official_messages_created ON official_messages(created_at);
+
+  CREATE TABLE IF NOT EXISTS official_chat_user_state (
+    user_id TEXT PRIMARY KEY,
+    cleared_at TEXT,
+    last_read_at TEXT,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS official_chat_user_deleted (
+    user_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    deleted_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, message_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS support_tickets (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    user_email TEXT,
+    username TEXT,
+    display_name TEXT,
+    category TEXT NOT NULL DEFAULT 'general',
+    subject TEXT NOT NULL,
+    message TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_tickets_user ON support_tickets(user_id, created_at);
+  CREATE INDEX IF NOT EXISTS idx_tickets_status ON support_tickets(status, updated_at);
+
+  CREATE TABLE IF NOT EXISTS support_ticket_replies (
+    id TEXT PRIMARY KEY,
+    ticket_id TEXT NOT NULL,
+    sender_id TEXT NOT NULL,
+    sender_role TEXT NOT NULL DEFAULT 'user',
+    sender_name TEXT NOT NULL DEFAULT 'Support',
+    message TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_ticket_replies_ticket ON support_ticket_replies(ticket_id, created_at);
+
+  CREATE TABLE IF NOT EXISTS user_warnings (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    admin_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    rule_broken TEXT NOT NULL DEFAULT 'community_guidelines',
+    acknowledged INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_user_warnings_user ON user_warnings(user_id, created_at);
+
+  CREATE TABLE IF NOT EXISTS activity_events (
+    id TEXT PRIMARY KEY,
+    event_type TEXT NOT NULL,
+    user_id TEXT,
+    family_id TEXT,
+    call_type TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_activity_events_type_created ON activity_events(event_type, created_at);
 `);
+
+export const SUPER_ADMIN_EMAIL = 'ravikantsharma92547@gmail.com';
+export type AdminPanelRole = 'none' | 'super_admin' | 'moderator' | 'support';
 
 // Safe idempotent column migrations for existing SQLite databases
 function ensureColumn(tableName: string, columnName: string, definition: string) {
@@ -445,6 +564,20 @@ ensureColumn('users', 'restored_at', 'TEXT');
 ensureColumn('users', 'restored_notice_pending', 'INTEGER DEFAULT 0');
 ensureColumn('users', 'role', "TEXT NOT NULL DEFAULT 'user'");
 ensureColumn('users', 'last_device_id', 'TEXT');
+ensureColumn('users', 'admin_role', "TEXT NOT NULL DEFAULT 'none'");
+ensureColumn('users', 'is_verified', 'INTEGER NOT NULL DEFAULT 0');
+ensureColumn('users', 'force_logout_after', 'TEXT');
+ensureColumn('users', 'last_active_at', 'TEXT');
+ensureColumn('users', 'pin_hash', 'TEXT');
+ensureColumn('users', 'pin_failed_attempts', 'INTEGER NOT NULL DEFAULT 0');
+ensureColumn('users', 'pin_locked_until', 'TEXT');
+
+ensureColumn('profiles', 'is_verified', 'INTEGER NOT NULL DEFAULT 0');
+
+ensureColumn('families', 'is_suspended', 'INTEGER NOT NULL DEFAULT 0');
+ensureColumn('families', 'suspended_reason', 'TEXT');
+ensureColumn('families', 'suspended_at', 'TEXT');
+ensureColumn('families', 'suspended_by', 'TEXT');
 
 ensureColumn('sessions', 'token_scope', "TEXT NOT NULL DEFAULT 'full'");
 ensureColumn('sessions', 'device_id', 'TEXT');
@@ -454,14 +587,34 @@ ensureColumn('user_reports', 'family_name', 'TEXT');
 ensureColumn('user_reports', 'reported_message_id', 'TEXT');
 ensureColumn('user_reports', 'reported_message_content', 'TEXT');
 ensureColumn('user_reports', 'reported_message_media_url', 'TEXT');
+ensureColumn('user_reports', 'target_type', "TEXT NOT NULL DEFAULT 'user'");
 
 db.exec(`
   CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
   CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
+  CREATE INDEX IF NOT EXISTS idx_users_admin_role ON users(admin_role);
   UPDATE users SET status = 'suspended', ban_until = COALESCE(ban_until, banned_until)
     WHERE banned_until IS NOT NULL AND banned_until != '' AND status = 'active';
-  UPDATE users SET role = 'admin' WHERE LOWER(email) = 'ravikantsharma925490@gmail.com';
+  UPDATE users SET role = 'admin', admin_role = 'super_admin'
+    WHERE LOWER(email) = 'ravikantsharma92547@gmail.com';
 `);
+
+// Seed default app_settings if missing
+const initSettingStmt = db.prepare(
+  'INSERT OR IGNORE INTO app_settings (key, value, updated_by, updated_at) VALUES (?, ?, ?, ?)'
+);
+const initNow = new Date().toISOString();
+initSettingStmt.run('maintenance_mode', 'false', 'system', initNow);
+initSettingStmt.run(
+  'maintenance_message',
+  'LiveConnect is currently undergoing scheduled maintenance. Please check back shortly.',
+  'system',
+  initNow
+);
+initSettingStmt.run('warning_threshold', '3', 'system', initNow);
+initSettingStmt.run('warning_auto_action', 'suspend', 'system', initNow);
+initSettingStmt.run('warning_suspend_days', '7', 'system', initNow);
+initSettingStmt.run('official_chat_moderators_enabled', 'false', 'system', initNow);
 
 export interface DbUserRow {
   id: string;
@@ -481,6 +634,13 @@ export interface DbUserRow {
   restored_at: string | null;
   restored_notice_pending: number;
   role: string;
+  admin_role: string;
+  is_verified: number;
+  force_logout_after: string | null;
+  last_active_at: string | null;
+  pin_hash: string | null;
+  pin_failed_attempts: number;
+  pin_locked_until: string | null;
   last_device_id: string | null;
   created_at: string;
   updated_at: string;
@@ -499,6 +659,7 @@ export interface DbProfileRow {
   cloudinary_public_id: string | null;
   b2_file_id: string | null;
   b2_file_name: string | null;
+  is_verified: number;
   is_online: number;
   last_seen: string;
   created_at: string;
@@ -532,6 +693,19 @@ export function verifyPassword(password: string, storedHash: string | null | und
   }
 }
 
+export function resolveEffectiveAdminRole(row?: Partial<DbUserRow> | null): AdminPanelRole {
+  if (!row) return 'none';
+  if (String(row.email || '').trim().toLowerCase() === SUPER_ADMIN_EMAIL) {
+    return 'super_admin';
+  }
+  const ar = String(row.admin_role || '').toLowerCase();
+  if (ar === 'super_admin' || ar === 'moderator' || ar === 'support') {
+    return ar as AdminPanelRole;
+  }
+  if (row.role === 'moderator') return 'moderator';
+  return 'none';
+}
+
 export function isAccountHiddenStatus(status?: string | null): boolean {
   return status === 'suspended' || status === 'disabled' || status === 'deactivated';
 }
@@ -545,6 +719,7 @@ export function formatAuthUser(row: DbUserRow) {
       metadata = {};
     }
   }
+  const adminRole = resolveEffectiveAdminRole(row);
   return {
     id: row.id,
     email: row.email,
@@ -561,7 +736,9 @@ export function formatAuthUser(row: DbUserRow) {
     scheduled_deletion_at: row.scheduled_deletion_at || null,
     restored_at: row.restored_at || null,
     restored_notice_pending: Boolean(row.restored_notice_pending),
-    role: (row.role || 'user') as 'user' | 'moderator' | 'admin',
+    role: (adminRole === 'super_admin' ? 'admin' : row.role || 'user') as 'user' | 'moderator' | 'admin',
+    admin_role: adminRole,
+    is_verified: Boolean(row.is_verified),
     created_at: row.created_at,
   };
 }
@@ -569,9 +746,17 @@ export function formatAuthUser(row: DbUserRow) {
 export function formatProfile(row: DbProfileRow | undefined | null) {
   if (!row) return null;
   const userRow = db
-    .prepare('SELECT status, strike_count, role FROM users WHERE id = ? LIMIT 1')
-    .get(row.id) as { status?: string; strike_count?: number; role?: string } | undefined;
+    .prepare('SELECT email, status, strike_count, role, admin_role, is_verified FROM users WHERE id = ? LIMIT 1')
+    .get(row.id) as {
+      email?: string;
+      status?: string;
+      strike_count?: number;
+      role?: string;
+      admin_role?: string;
+      is_verified?: number;
+    } | undefined;
 
+  const adminRole = resolveEffectiveAdminRole(userRow);
   return {
     id: row.id,
     username: row.username,
@@ -587,7 +772,9 @@ export function formatProfile(row: DbProfileRow | undefined | null) {
     b2_file_name: row.b2_file_name || undefined,
     status: (userRow?.status || 'active') as 'active' | 'restricted' | 'suspended' | 'disabled' | 'deactivated',
     strike_count: Number(userRow?.strike_count || 0),
-    role: (userRow?.role || 'user') as 'user' | 'moderator' | 'admin',
+    role: (adminRole === 'super_admin' ? 'admin' : userRow?.role || 'user') as 'user' | 'moderator' | 'admin',
+    admin_role: adminRole,
+    is_verified: Boolean(userRow?.is_verified || row.is_verified),
     is_online: isAccountHiddenStatus(userRow?.status) ? false : Boolean(row.is_online),
     last_seen: row.last_seen,
     created_at: row.created_at,
@@ -630,8 +817,10 @@ export function revokeAllSessionsForUser(userId: string) {
 export function getUserBySessionToken(token: string) {
   if (!token) return null;
   const sess = db
-    .prepare('SELECT token, user_id, expires_at, token_scope FROM sessions WHERE token = ?')
-    .get(token) as { token: string; user_id: string; expires_at: string; token_scope?: string } | undefined;
+    .prepare('SELECT token, user_id, expires_at, created_at, token_scope FROM sessions WHERE token = ?')
+    .get(token) as
+    | { token: string; user_id: string; expires_at: string; created_at?: string; token_scope?: string }
+    | undefined;
   if (!sess) return null;
   if (new Date(sess.expires_at).getTime() <= Date.now()) {
     db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
@@ -645,6 +834,7 @@ export function getUserBySessionToken(token: string) {
     session: {
       access_token: sess.token,
       expires_at: sess.expires_at,
+      created_at: sess.created_at || undefined,
       token_scope: (sess.token_scope || 'full') as 'full' | 'appeal_only',
     },
     userRow,
@@ -930,9 +1120,15 @@ export function deleteAccountCompletely(userId: string, preserveBannedIdentifier
   }
 
   db.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId);
+  db.prepare('DELETE FROM admin_sessions WHERE user_id = ?').run(userId);
+  db.prepare('DELETE FROM user_warnings WHERE user_id = ?').run(userId);
+  db.prepare('DELETE FROM support_ticket_replies WHERE sender_id = ?').run(userId);
+  db.prepare('DELETE FROM support_tickets WHERE user_id = ?').run(userId);
   db.prepare('DELETE FROM follows WHERE follower_id = ? OR following_id = ?').run(userId, userId);
   db.prepare('DELETE FROM blocked_users WHERE blocker_id = ? OR blocked_id = ?').run(userId, userId);
   db.prepare('DELETE FROM notifications WHERE user_id = ? OR actor_id = ?').run(userId, userId);
+  db.prepare('DELETE FROM official_chat_user_state WHERE user_id = ?').run(userId);
+  db.prepare('DELETE FROM official_chat_user_deleted WHERE user_id = ?').run(userId);
   db.prepare('DELETE FROM calls WHERE caller_id = ? OR callee_id = ?').run(userId, userId);
   db.prepare('DELETE FROM deleted_calls WHERE user_id = ?').run(userId);
   db.prepare('DELETE FROM message_reads WHERE user_id = ?').run(userId);
@@ -946,4 +1142,86 @@ export function deleteAccountCompletely(userId: string, preserveBannedIdentifier
   }
   db.prepare('DELETE FROM profiles WHERE id = ?').run(userId);
   db.prepare('DELETE FROM users WHERE id = ?').run(userId);
+}
+
+// ---------- App Settings, Banned Words & Analytics Helpers ----------
+
+export function getAppSetting(key: string, fallback = ''): string {
+  const row = db.prepare('SELECT value FROM app_settings WHERE key = ? LIMIT 1').get(key) as
+    | { value: string }
+    | undefined;
+  return row ? row.value : fallback;
+}
+
+export function setAppSetting(key: string, value: string, updatedBy: string) {
+  db.prepare(
+    'INSERT OR REPLACE INTO app_settings (key, value, updated_by, updated_at) VALUES (?, ?, ?, ?)'
+  ).run(key, String(value), updatedBy, new Date().toISOString());
+}
+
+export function listBannedWords() {
+  return db
+    .prepare('SELECT id, word, word_lower, match_mode, action, created_by, created_at, updated_at FROM banned_words ORDER BY word_lower ASC')
+    .all() as Array<{
+      id: string;
+      word: string;
+      word_lower: string;
+      match_mode: 'substring' | 'exact';
+      action: 'block' | 'flag';
+      created_by: string | null;
+      created_at: string;
+      updated_at: string;
+    }>;
+}
+
+export function findMatchedBannedWords(text: string): Array<{ id: string; word: string; action: 'block' | 'flag' }> {
+  const clean = String(text || '').trim().toLowerCase();
+  if (!clean) return [];
+  const words = listBannedWords();
+  const matched: Array<{ id: string; word: string; action: 'block' | 'flag' }> = [];
+  for (const w of words) {
+    const term = w.word_lower;
+    if (!term) continue;
+    if (w.match_mode === 'exact') {
+      const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(`(^|[^a-z0-9_])${escaped}($|[^a-z0-9_])`, 'i');
+      if (regex.test(clean)) {
+        matched.push({ id: w.id, word: w.word, action: w.action });
+      }
+    } else if (clean.includes(term)) {
+      matched.push({ id: w.id, word: w.word, action: w.action });
+    }
+  }
+  return matched;
+}
+
+export function recordActivityEvent(
+  eventTypeOrPayload:
+    | string
+    | { eventType: string; userId?: string | null; familyId?: string | null; callType?: string | null },
+  userId?: string | null,
+  familyId?: string | null,
+  callType?: string | null
+) {
+  try {
+    const resolvedType =
+      typeof eventTypeOrPayload === 'string' ? eventTypeOrPayload : eventTypeOrPayload.eventType;
+    const resolvedUserId =
+      typeof eventTypeOrPayload === 'string' ? userId ?? null : eventTypeOrPayload.userId ?? null;
+    const resolvedFamilyId =
+      typeof eventTypeOrPayload === 'string' ? familyId ?? null : eventTypeOrPayload.familyId ?? null;
+    const resolvedCallType =
+      typeof eventTypeOrPayload === 'string' ? callType ?? null : eventTypeOrPayload.callType ?? null;
+    if (!resolvedType) return;
+    db.prepare(
+      'INSERT INTO activity_events (id, event_type, user_id, family_id, call_type, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+    ).run(
+      generateId(),
+      resolvedType,
+      resolvedUserId,
+      resolvedFamilyId,
+      resolvedCallType,
+      new Date().toISOString()
+    );
+  } catch {}
 }

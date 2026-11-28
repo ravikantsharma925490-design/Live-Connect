@@ -37,7 +37,8 @@ export const PushBanner: React.FC = () => {
       >
         {/* Icon / Avatar */}
         <div className="relative shrink-0">
-          {currentNotification.icon && currentNotification.icon.startsWith('http') ? (
+          {currentNotification.icon &&
+          (currentNotification.icon.startsWith('http') || currentNotification.icon.startsWith('/')) ? (
             <img
               src={currentNotification.icon}
               alt=""

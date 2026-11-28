@@ -14,11 +14,13 @@ import {
   UserX,
   Globe,
   ShieldCheck,
-  ShieldAlert,
+  LifeBuoy,
 } from 'lucide-react';
 import { Profile } from '@/src/types';
 import { cn, getAvatarColor, getInitials, formatJoinedYear } from '@/src/lib/utils';
 import { UserAvatar } from '../ui/UserAvatar';
+import { VerifiedBadge } from '../ui/VerifiedBadge';
+import { SupportTicketsModal } from '../support/SupportTicketsModal';
 import { useLanguage } from '@/src/lib/LanguageContext';
 import { HelpCenter } from '../profile/HelpCenter';
 import { COUNTRIES, GENDER_OPTIONS } from '../profile/ProfileModal';
@@ -34,7 +36,6 @@ interface ProfileTabProps {
   onEditProfile: () => void;
   onOpenSettingsModal: () => void;
   onOpenAccountStatus?: () => void;
-  onOpenAdminPanel?: () => void;
   onOpenNotifications?: () => void;
   unreadNotificationsCount?: number;
   onSignOut: () => void;
@@ -55,7 +56,6 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
   onEditProfile,
   onOpenSettingsModal,
   onOpenAccountStatus,
-  onOpenAdminPanel,
   onOpenNotifications,
   unreadNotificationsCount = 0,
   onSignOut,
@@ -75,6 +75,7 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
   // Modal open states
   const [isNotifModalOpen, setIsNotifModalOpen] = useState(false);
   const [isBlockedModalOpen, setIsBlockedModalOpen] = useState(false);
+  const [isSupportTicketsOpen, setIsSupportTicketsOpen] = useState(false);
   const [showFollowsModal, setShowFollowsModal] = useState(false);
   const [followsListInitialTab, setFollowsListInitialTab] = useState<'followers' | 'following'>('followers');
 
@@ -195,8 +196,9 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
               {/* User Bio Details */}
               <div className="min-w-0 flex-1 space-y-1.5">
                 <div className="flex flex-col sm:flex-row sm:items-center gap-1.5">
-                  <h3 className="text-xl font-extrabold text-neutral-900 dark:text-neutral-100 truncate">
-                    {currentUser.display_name}
+                  <h3 className="text-xl font-extrabold text-neutral-900 dark:text-neutral-100 truncate inline-flex items-center justify-center sm:justify-start gap-1.5">
+                    <span className="truncate">{currentUser.display_name}</span>
+                    {currentUser.is_verified && <VerifiedBadge size="md" />}
                   </h3>
                   <span className="text-xs font-mono font-medium text-neutral-500 bg-neutral-100 dark:bg-neutral-800 px-2.5 py-0.5 rounded-full self-center sm:self-auto">
                     @{currentUser.username}
@@ -414,25 +416,26 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
               </button>
             )}
 
-            {/* 4c. Admin / Moderator Moderation Console */}
-            {onOpenAdminPanel && (
-              <button
-                onClick={onOpenAdminPanel}
-                className="w-full p-4 md:px-6 flex items-center justify-between hover:bg-neutral-50/50 dark:hover:bg-neutral-800/40 transition-colors text-start group cursor-pointer"
-              >
-                <div className="flex items-center gap-3.5">
-                  <div className="p-2.5 rounded-2xl bg-indigo-500/10 text-indigo-600 dark:text-indigo-400">
-                    <ShieldAlert className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <h5 className="text-sm font-bold text-neutral-900 dark:text-neutral-100 group-hover:text-indigo-600 transition-colors">
-                      {t('title.adminConsole', 'Trust & Safety Admin Console')}
-                    </h5>
-                  </div>
+            {/* 4c. Support & Tickets */}
+            <button
+              onClick={() => setIsSupportTicketsOpen(true)}
+              className="w-full p-4 md:px-6 flex items-center justify-between hover:bg-neutral-50/50 dark:hover:bg-neutral-800/40 transition-colors text-start group cursor-pointer"
+            >
+              <div className="flex items-center gap-3.5">
+                <div className="p-2.5 rounded-2xl bg-indigo-500/10 text-indigo-600 dark:text-indigo-400">
+                  <LifeBuoy className="w-5 h-5" />
                 </div>
-                <ChevronRight className="w-4 h-4 text-neutral-400 group-hover:translate-x-0.5 rtl:rotate-180 transition-transform" />
-              </button>
-            )}
+                <div>
+                  <h5 className="text-sm font-bold text-neutral-900 dark:text-neutral-100 group-hover:text-indigo-600 transition-colors">
+                    Support Tickets
+                  </h5>
+                  <p className="text-xs text-neutral-500">
+                    Submit problems or feedback and view admin replies
+                  </p>
+                </div>
+              </div>
+              <ChevronRight className="w-4 h-4 text-neutral-400 group-hover:translate-x-0.5 rtl:rotate-180 transition-transform" />
+            </button>
 
             {/* 5. Blocked Accounts / Users */}
             <button
@@ -544,6 +547,12 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
           }
         }}
         currentUserId={currentUser.id}
+      />
+
+      {/* Support Tickets Modal */}
+      <SupportTicketsModal
+        isOpen={isSupportTicketsOpen}
+        onClose={() => setIsSupportTicketsOpen(false)}
       />
 
       {/* Follows List Modal */}

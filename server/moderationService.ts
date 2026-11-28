@@ -10,6 +10,8 @@ import {
   clearBannedIdentifiersForUser,
   deleteAccountCompletely,
   handleOwnerDepartureFromFamilies,
+  getAppSetting,
+  resolveEffectiveAdminRole,
   DbUserRow,
 } from './db';
 
@@ -434,9 +436,10 @@ export async function executeModerationAction(params: {
     });
   }
 
-  // Edge case: Admins cannot moderate/ban other admins
-  if (target.role === 'admin') {
-    throw Object.assign(new Error('Admins cannot warn, restrict, suspend, or ban other admin accounts.'), {
+  // Edge case: Admins cannot moderate/ban Super Admin or Admins
+  const targetAdminRole = resolveEffectiveAdminRole(target);
+  if (target.role === 'admin' || targetAdminRole === 'super_admin') {
+    throw Object.assign(new Error('Admins cannot warn, restrict, suspend, or ban admin accounts.'), {
       statusCode: 403,
     });
   }
@@ -448,8 +451,17 @@ export async function executeModerationAction(params: {
   const now = Date.now();
   const nowIso = new Date(now).toISOString();
 
-  // Determine effective moderation action using Instagram-like Strike System + Serious Violation Escalation
+  const existingWarningsCountRow = db
+    .prepare('SELECT COUNT(*) as cnt FROM user_warnings WHERE user_id = ?')
+    .get(target.id) as { cnt: number };
+  const currentWarningsCount = Number(existingWarningsCountRow?.cnt || 0);
+  const warningThreshold = Math.max(1, Number(getAppSetting('warning_threshold', '3')) || 3);
+  const warningAutoAction = getAppSetting('warning_auto_action', 'suspend') === 'ban' ? 'ban' : 'suspend';
+  const warningSuspendDays = Math.max(1, Number(getAppSetting('warning_suspend_days', '7')) || 7);
+
+  // Determine effective moderation action using Instagram-like Strike System + Configurable Warning Auto-Escalation
   let resolvedAction: 'warn' | 'restrict' | 'suspend' | 'ban';
+  let warningAutoEscalated = false;
   if (SERIOUS_VIOLATION_RULES.has(ruleBroken)) {
     resolvedAction = 'ban';
   } else if (action === 'auto_strike') {
@@ -459,6 +471,13 @@ export async function executeModerationAction(params: {
     else resolvedAction = 'ban';
   } else if (action === 'permanent_ban') {
     resolvedAction = 'ban';
+  } else if (action === 'warn') {
+    if (currentWarningsCount + 1 >= warningThreshold) {
+      resolvedAction = warningAutoAction;
+      warningAutoEscalated = true;
+    } else {
+      resolvedAction = 'warn';
+    }
   } else {
     resolvedAction = action;
   }
@@ -484,7 +503,8 @@ export async function executeModerationAction(params: {
   } else if (resolvedAction === 'suspend') {
     statusApplied = 'suspended';
     severity = 'suspension';
-    durationDays = Math.min(30, Math.max(1, Number(params.durationDays || 7)));
+    const fallbackDays = warningAutoEscalated ? warningSuspendDays : 7;
+    durationDays = Math.min(365, Math.max(1, Number(params.durationDays || fallbackDays)));
     banUntil = new Date(now + durationDays * 24 * 60 * 60 * 1000).toISOString();
     templateKind = 'suspend';
   } else {
@@ -501,6 +521,12 @@ export async function executeModerationAction(params: {
   db.exec('BEGIN');
   try {
     db.prepare('UPDATE bans SET is_active = 0 WHERE user_id = ? AND is_active = 1').run(target.id);
+
+    if (action === 'warn' || resolvedAction === 'warn') {
+      db.prepare(
+        'INSERT INTO user_warnings (id, user_id, admin_id, reason, rule_broken, acknowledged, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)'
+      ).run(generateId(), target.id, adminId, reason, ruleBroken, nowIso);
+    }
 
     db.prepare(`
       UPDATE users SET
@@ -539,7 +565,7 @@ export async function executeModerationAction(params: {
       adminId,
       resolvedAction,
       statusApplied,
-      reason,
+      warningAutoEscalated ? `${reason} (Auto-escalated after ${warningThreshold} warnings)` : reason,
       ruleBroken,
       severity,
       nextStrikeCount,
@@ -551,7 +577,6 @@ export async function executeModerationAction(params: {
     );
 
     if (statusApplied === 'suspended' || statusApplied === 'disabled') {
-      // Immediately revoke ALL active session tokens across all devices
       revokeAllSessionsForUser(target.id);
       db.prepare('UPDATE profiles SET is_online = 0, last_seen = ?, updated_at = ? WHERE id = ?').run(
         nowIso,
@@ -572,11 +597,14 @@ export async function executeModerationAction(params: {
     writeAuditLog({
       adminId,
       targetUserId: target.id,
-      action: resolvedAction,
+      action: warningAutoEscalated ? `warn_auto_${resolvedAction}` : resolvedAction,
       reason,
       details: {
         ruleBroken,
         strikeNumber: nextStrikeCount,
+        warningCount: action === 'warn' ? currentWarningsCount + 1 : currentWarningsCount,
+        warningThreshold,
+        warningAutoEscalated,
         statusApplied,
         durationDays,
         banUntil: banUntil || restrictedUntil,
@@ -597,14 +625,13 @@ export async function executeModerationAction(params: {
     displayName: prof?.display_name || target.email.split('@')[0],
     username: prof?.username || target.email.split('@')[0],
     email: target.email,
-    reason,
+    reason: warningAutoEscalated ? `${reason} (Reached ${warningThreshold} warnings threshold)` : reason,
     ruleBroken,
     strikeCount: nextStrikeCount,
     banUntil: banUntil || restrictedUntil,
     scheduledDeletionAt,
   });
 
-  // Notify ONLY the target user (zero push notifications or emails sent to followers)
   insertTargetUserSystemNotification(target.id, adminId, template, banId);
   const emailSent = await sendModerationEmail(target.email, template);
 

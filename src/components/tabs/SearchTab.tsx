@@ -14,6 +14,7 @@ import { Profile, CallType, UserRelationStatus } from '@/src/types';
 import { cn, getAvatarColor, getInitials } from '@/src/lib/utils';
 import { COUNTRIES, GENDER_OPTIONS } from '../profile/ProfileModal';
 import { FollowButton, FollowStatus } from '../profile/FollowButton';
+import { VerifiedBadge } from '../ui/VerifiedBadge';
 import { useLanguage } from '@/src/lib/LanguageContext';
 
 interface SearchTabProps {
@@ -228,9 +229,10 @@ export const SearchTab: React.FC<SearchTabProps> = ({
                             <div className="flex items-center gap-1.5 flex-wrap">
                               <h4
                                 onClick={() => onViewProfile(user)}
-                                className="font-bold text-sm text-neutral-900 dark:text-neutral-100 truncate hover:text-blue-600 dark:hover:text-blue-400 cursor-pointer"
+                                className="font-bold text-sm text-neutral-900 dark:text-neutral-100 truncate hover:text-blue-600 dark:hover:text-blue-400 cursor-pointer flex items-center gap-1"
                               >
-                                {user.display_name}
+                                <span className="truncate">{user.display_name}</span>
+                                {user.is_verified && <VerifiedBadge size="sm" />}
                               </h4>
                               {/* Blocked Badge */}
                               {!isSelf && rel?.isBlocked && (

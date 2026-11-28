@@ -12,6 +12,7 @@ interface FamilyReportModalProps {
   currentUser: Profile | null;
   family: Family | null;
   message: FamilyMessage | null;
+  targetType?: 'message' | 'family';
   onClose: () => void;
 }
 
@@ -20,6 +21,7 @@ export const FamilyReportModal: React.FC<FamilyReportModalProps> = ({
   currentUser,
   family,
   message,
+  targetType,
   onClose,
 }) => {
   const { t } = useLanguage();
@@ -29,7 +31,8 @@ export const FamilyReportModal: React.FC<FamilyReportModalProps> = ({
   const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  if (!isOpen || !currentUser || !family || !message) return null;
+  const isFamilyReport = targetType === 'family' || !message;
+  if (!isOpen || !currentUser || !family || (!isFamilyReport && !message)) return null;
 
   const selectedLabel =
     FAMILY_REPORT_OPTIONS.find((opt) => opt.id === selectedCategory)?.label || selectedCategory;
@@ -40,41 +43,58 @@ export const FamilyReportModal: React.FC<FamilyReportModalProps> = ({
     setError(null);
 
     try {
-      const targetProfile: Profile = {
-        id: message.senderId,
-        username: message.senderUsername || 'member',
-        display_name: message.senderName,
-        avatar_url: message.senderAvatar || null,
-        bio: '',
-        is_online: false,
-        last_seen: message.createdAt,
-        created_at: message.createdAt,
-        updated_at: message.updatedAt,
-      };
+      const targetProfile: Profile = message
+        ? {
+            id: message.senderId,
+            username: message.senderUsername || 'member',
+            display_name: message.senderName,
+            avatar_url: message.senderAvatar || null,
+            bio: '',
+            is_online: false,
+            last_seen: message.createdAt,
+            created_at: message.createdAt,
+            updated_at: message.updatedAt,
+          }
+        : {
+            id: family.ownerId,
+            username: 'family_group',
+            display_name: family.name,
+            avatar_url: family.photoUrl || null,
+            bio: '',
+            is_online: false,
+            last_seen: family.updatedAt,
+            created_at: family.createdAt,
+            updated_at: family.updatedAt,
+          };
 
       await submitUserReport({
         reporterId: currentUser.id,
         targetUser: targetProfile,
         category: selectedCategory,
         details: details.trim(),
-        source: 'family_chat',
+        source: isFamilyReport ? 'family_profile' : 'family_chat',
+        targetType: isFamilyReport ? 'family' : 'message',
         conversationId: family.id,
         familyId: family.id,
         familyName: family.name,
-        reportedMessage: {
-          id: message.id,
-          content: message.content,
-          createdAt: message.createdAt,
-          mediaUrl: message.mediaUrl || null,
-        },
+        reportedMessage: message
+          ? {
+              id: message.id,
+              content: message.content,
+              createdAt: message.createdAt,
+              mediaUrl: message.mediaUrl || null,
+            }
+          : null,
       });
 
-      await notifyFamilyAdminsOfReportFs({
-        reporterId: currentUser.id,
-        family,
-        reportedUserName: message.senderName,
-        category: selectedLabel,
-      });
+      if (!isFamilyReport && message) {
+        await notifyFamilyAdminsOfReportFs({
+          reporterId: currentUser.id,
+          family,
+          reportedUserName: message.senderName,
+          category: selectedLabel,
+        });
+      }
 
       setSubmitted(true);
       setTimeout(() => {
@@ -99,10 +119,12 @@ export const FamilyReportModal: React.FC<FamilyReportModalProps> = ({
             </div>
             <div>
               <h3 className="font-bold text-base text-neutral-900 dark:text-neutral-100">
-                Report Family Message
+                {isFamilyReport ? 'Report Family Group' : 'Report Family Message'}
               </h3>
               <p className="text-[11px] text-neutral-500">
-                From {message.senderName} in {family.name}
+                {isFamilyReport
+                  ? `${family.name} • App Moderation Review`
+                  : `From ${message?.senderName} in ${family.name}`}
               </p>
             </div>
           </div>
@@ -122,7 +144,9 @@ export const FamilyReportModal: React.FC<FamilyReportModalProps> = ({
               Report Submitted
             </h4>
             <p className="text-xs text-neutral-500">
-              Your Family Owner/Admins and app moderation team have been notified anonymously.
+              {isFamilyReport
+                ? 'LiveConnect moderation has received your Family report.'
+                : 'Your Family Owner/Admins and app moderation team have been notified anonymously.'}
             </p>
           </div>
         ) : (
@@ -134,9 +158,11 @@ export const FamilyReportModal: React.FC<FamilyReportModalProps> = ({
             )}
 
             {/* Message snapshot preview */}
-            <div className="p-3 rounded-2xl bg-neutral-100 dark:bg-neutral-800/70 border border-neutral-200 dark:border-neutral-700/70 text-xs text-neutral-700 dark:text-neutral-300 line-clamp-3">
-              {message.content}
-            </div>
+            {!isFamilyReport && message && (
+              <div className="p-3 rounded-2xl bg-neutral-100 dark:bg-neutral-800/70 border border-neutral-200 dark:border-neutral-700/70 text-xs text-neutral-700 dark:text-neutral-300 line-clamp-3">
+                {message.content}
+              </div>
+            )}
 
             <div className="space-y-1.5">
               <label className="block text-xs font-bold text-neutral-700 dark:text-neutral-300">

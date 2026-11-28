@@ -73,6 +73,7 @@ export function useNotifications(currentUserId?: string, isBlocked?: (userId: st
               notificationService.sendNotification({
                 title: notif.title || 'LiveConnect Notification',
                 body: notif.message || 'You have a new update',
+                icon: notif.type === 'official_chat' ? '/icon.svg' : notif.actor?.avatar_url || '/icon.svg',
                 tag: `notif-${notif.id}`,
               });
             }
@@ -145,6 +146,7 @@ export function useNotifications(currentUserId?: string, isBlocked?: (userId: st
                 notificationService.sendNotification({
                   title: notif.title || 'LiveConnect Notification',
                   body: notif.message || 'You have a new update',
+                  icon: notif.type === 'official_chat' ? '/icon.svg' : notif.actor?.avatar_url || '/icon.svg',
                   tag: `notif-${notif.id}`,
                 });
               }

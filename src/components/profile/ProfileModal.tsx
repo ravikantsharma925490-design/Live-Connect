@@ -37,6 +37,8 @@ import {
   compressProfileImageIfNeeded,
 } from '@/src/lib/cloudinaryClient';
 import { UserAvatar } from '@/src/components/ui/UserAvatar';
+import { VerifiedBadge } from '@/src/components/ui/VerifiedBadge';
+import { validateTextAgainstBannedWords } from '@/src/lib/bannedWordsCheck';
 import { useLanguage } from '@/src/lib/LanguageContext';
 
 interface ProfileModalProps {
@@ -333,6 +335,15 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
     setErrorMessage(null);
 
     try {
+      const wordCheck = await validateTextAgainstBannedWords(
+        `${displayName.trim()} ${cleanUsername} ${bio.trim()}`
+      );
+      if (wordCheck.blocked) {
+        setErrorMessage(wordCheck.errorMessage || 'Your profile text contains a restricted word.');
+        setSaving(false);
+        return;
+      }
+
       const safeAvatarUrl =
         avatarUrl && !avatarUrl.startsWith('blob:')
           ? avatarUrl
@@ -496,8 +507,9 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
               />
             </div>
 
-            <h4 className="font-bold text-lg text-neutral-900 dark:text-neutral-100 text-center flex items-center gap-2">
+            <h4 className="font-bold text-lg text-neutral-900 dark:text-neutral-100 text-center flex items-center justify-center gap-1.5">
               <span>{isEditingSelf ? (displayName || t('auth.fullName', 'Display Name')) : targetUser.display_name}</span>
+              {targetUser.is_verified && <VerifiedBadge size="md" />}
             </h4>
             <div className="flex items-center gap-2 justify-center">
               <p className="text-xs text-neutral-500 dark:text-neutral-400 font-mono">

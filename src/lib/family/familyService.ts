@@ -31,6 +31,7 @@ import {
   restGetDocument,
 } from '@/src/lib/firebase/restFallback';
 import { generateUUID } from '@/src/lib/utils';
+import { validateTextAgainstBannedWords, reportTelemetry } from '@/src/lib/bannedWordsCheck';
 import {
   computeMutedUntilIso,
   FAMILY_LARGE_THRESHOLD,
@@ -113,6 +114,8 @@ function mapFsFamily(id: string, d: any, pendingRequestsCount?: number): Family 
     lastMessageSenderName: d.lastMessageSenderName || null,
     lastMessageAt: d.lastMessageAt ? tsToIso(d.lastMessageAt) : null,
     pendingRequestsCount,
+    isSuspended: Boolean(d.isSuspended),
+    suspendedReason: d.suspendedReason || null,
     createdAt: tsToIso(d.createdAt),
     updatedAt: tsToIso(d.updatedAt),
   };
@@ -359,6 +362,10 @@ export async function createFamily(
 
   const cleanName = params.name.trim().slice(0, 80);
   if (!cleanName) throw new Error('Family name is required.');
+  const wordCheck = await validateTextAgainstBannedWords(cleanName);
+  if (wordCheck.blocked) {
+    throw new Error(wordCheck.errorMessage || 'Family name contains a restricted word.');
+  }
   const familyId = `fam_${generateUUID().replace(/-/g, '').slice(0, 20)}`;
   const inviteCode = makeCode(10);
   const sysMsgId = `fmsg_${generateUUID().replace(/-/g, '').slice(0, 20)}`;
@@ -783,6 +790,10 @@ export async function updateFamilySettings(
     if (typeof updates.name === 'string' && updates.name.trim()) {
       const clean = updates.name.trim().slice(0, 80);
       if (clean !== current.name) {
+        const wordCheck = await validateTextAgainstBannedWords(clean);
+        if (wordCheck.blocked) {
+          throw new Error(wordCheck.errorMessage || 'Family name contains a restricted word.');
+        }
         payload.name = clean;
         sysMessages.push(`${actorName} renamed the Family to "${clean}"`);
       }
@@ -1763,10 +1774,20 @@ export async function sendFamilyMessage(params: {
     return res.message;
   }
 
+  if (params.family.isSuspended) {
+    throw new Error(params.family.suspendedReason || 'This Family has been suspended by an administrator.');
+  }
+
   const msgId = `fmsg_${generateUUID().replace(/-/g, '').slice(0, 20)}`;
   const msgType = params.type || 'text';
   const senderName = params.user.display_name || params.user.username || 'Member';
   const finalContent = msgType === 'safe_checkin' ? params.content || "I'm safe" : params.content.trim().slice(0, 4000);
+  if (msgType === 'text' && finalContent) {
+    const wordCheck = await validateTextAgainstBannedWords(finalContent);
+    if (wordCheck.blocked) {
+      throw new Error(wordCheck.errorMessage || 'This message contains a restricted word and cannot be sent.');
+    }
+  }
   const validMentions = Array.from(
     new Set((params.mentions || []).filter((id) => id && id !== 'everyone' && id !== params.user.id))
   ).slice(0, 20);
@@ -1829,6 +1850,8 @@ export async function sendFamilyMessage(params: {
       lastMessageAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     }).catch(() => {});
+
+    void reportTelemetry('family_msg_sent', params.family.id);
 
     // Notify @mentioned members directly (notifies even if they muted)
     await Promise.all(

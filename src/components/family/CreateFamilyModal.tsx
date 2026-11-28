@@ -5,6 +5,7 @@ import { uploadMediaToServer } from '@/src/lib/mediaUpload';
 import { FAMILY_RELATION_PRESETS } from '@/src/lib/family/constants';
 import { useLanguage } from '@/src/lib/LanguageContext';
 import { cn } from '@/src/lib/utils';
+import { validateTextAgainstBannedWords } from '@/src/lib/bannedWordsCheck';
 
 interface CreateFamilyModalProps {
   isOpen: boolean;
@@ -88,6 +89,12 @@ export const CreateFamilyModal: React.FC<CreateFamilyModalProps> = ({
     setSubmitting(true);
     setError(null);
     try {
+      const wordCheck = await validateTextAgainstBannedWords(cleanName);
+      if (wordCheck.blocked) {
+        setError(wordCheck.errorMessage || 'Family name contains a restricted word.');
+        setSubmitting(false);
+        return;
+      }
       await onCreate({
         name: cleanName,
         photoUrl,

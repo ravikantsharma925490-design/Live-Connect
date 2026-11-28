@@ -55,6 +55,7 @@ export function publicProfileDocToProfile(data: Record<string, any>, fallbackId?
     bio: data.bio ?? null,
     gender: data.gender ?? null,
     country: data.country ?? null,
+    is_verified: Boolean(data.isVerified ?? data.is_verified),
     is_online: Boolean(data.isOnline),
     last_seen: tsToIso(data.lastSeen),
     created_at: tsToIso(data.createdAt),
@@ -217,6 +218,9 @@ export async function fetchPrivateUserInfoFs(userId: string): Promise<{
   email?: string | null;
   phoneNumber?: string | null;
   role: 'user' | 'admin';
+  adminRole: 'none' | 'super_admin' | 'moderator' | 'support';
+  isVerified: boolean;
+  forceLogoutAfter?: string | null;
   bannedUntil?: string | null;
 } | null> {
   if (!userId || !isValidFirestoreId(userId)) return null;
@@ -225,10 +229,17 @@ export async function fetchPrivateUserInfoFs(userId: string): Promise<{
     const res = await getDocDataWithRestFallback(path, 'users', userId, 'private', 'info');
     if (!res.exists || !res.data) return null;
     const d = res.data;
+    const adminRole =
+      d.adminRole === 'super_admin' || d.adminRole === 'moderator' || d.adminRole === 'support'
+        ? d.adminRole
+        : 'none';
     return {
       email: d.email ?? null,
       phoneNumber: d.phoneNumber ?? null,
       role: d.role === 'admin' ? 'admin' : 'user',
+      adminRole,
+      isVerified: Boolean(d.isVerified),
+      forceLogoutAfter: d.forceLogoutAfter ?? null,
       bannedUntil: d.bannedUntil ?? null,
     };
   } catch (err) {
@@ -1630,7 +1641,7 @@ export async function submitUserReportFs(params: {
   reportedDisplayName?: string | null;
   category: string;
   details?: string | null;
-  source: 'profile' | 'chat' | 'search' | 'call' | 'family_chat';
+  source: 'profile' | 'chat' | 'search' | 'call' | 'family_chat' | 'family_profile';
   conversationId?: string | null;
   familyId?: string | null;
   familyName?: string | null;

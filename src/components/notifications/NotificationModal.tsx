@@ -12,6 +12,9 @@ import {
   CheckCheck,
   Flag,
   AtSign,
+  Megaphone,
+  LifeBuoy,
+  BadgeCheck,
 } from 'lucide-react';
 import { AppNotification, Profile } from '@/src/types';
 import { cn, getAvatarColor, getInitials } from '@/src/lib/utils';
@@ -27,6 +30,7 @@ interface NotificationModalProps {
   onDeleteNotification: (id: string) => void;
   onSelectUser?: (user: Profile) => void;
   onOpenChat?: (userId: string, profile?: Profile) => void;
+  onOpenOfficialChat?: () => void;
   onOpenFamily?: (familyId?: string) => void;
   onRespondFamilyInvite?: (inviteId: string, action: 'accept' | 'decline') => Promise<any>;
 }
@@ -41,6 +45,7 @@ export const NotificationModal: React.FC<NotificationModalProps> = ({
   onDeleteNotification,
   onSelectUser,
   onOpenChat,
+  onOpenOfficialChat,
   onOpenFamily,
   onRespondFamilyInvite,
 }) => {
@@ -67,6 +72,12 @@ export const NotificationModal: React.FC<NotificationModalProps> = ({
         return <CheckCircle className="w-4 h-4 text-emerald-500" />;
       case 'family_message_report':
         return <Flag className="w-4 h-4 text-amber-500" />;
+      case 'announcement':
+        return <Megaphone className="w-4 h-4 text-blue-600" />;
+      case 'official_chat':
+        return <BadgeCheck className="w-4 h-4 text-sky-500" />;
+      case 'support_reply':
+        return <LifeBuoy className="w-4 h-4 text-emerald-500" />;
       default:
         return <Bell className="w-4 h-4 text-neutral-400" />;
     }
@@ -167,7 +178,13 @@ export const NotificationModal: React.FC<NotificationModalProps> = ({
                 >
                   {/* Actor Avatar or Icon */}
                   <div className="relative shrink-0">
-                    {actor?.avatar_url ? (
+                    {notif.type === 'official_chat' ? (
+                      <img
+                        src="/icon.svg"
+                        alt="LiveConnect"
+                        className="w-10 h-10 rounded-2xl object-cover border border-neutral-200 dark:border-neutral-700 bg-neutral-900"
+                      />
+                    ) : actor?.avatar_url ? (
                       <img
                         src={actor.avatar_url}
                         alt="Actor"
@@ -284,7 +301,27 @@ export const NotificationModal: React.FC<NotificationModalProps> = ({
                           </button>
                         )}
 
-                      {actor && notif.actor_id !== 'system' && onSelectUser && !notif.type.startsWith('family_') && (
+                      {notif.type === 'official_chat' && onOpenOfficialChat && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onOpenOfficialChat();
+                            onMarkAsRead(notif.id);
+                            onClose();
+                          }}
+                          className="px-2.5 py-1 text-[11px] font-bold rounded-xl bg-blue-600 hover:bg-blue-700 text-white transition-colors cursor-pointer"
+                        >
+                          Open Chat
+                        </button>
+                      )}
+
+                      {actor &&
+                        notif.actor_id !== 'system' &&
+                        notif.actor_id !== 'official_liveconnect' &&
+                        notif.type !== 'official_chat' &&
+                        onSelectUser &&
+                        !notif.type.startsWith('family_') && (
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
@@ -298,7 +335,12 @@ export const NotificationModal: React.FC<NotificationModalProps> = ({
                         </button>
                       )}
 
-                      {actor && notif.actor_id !== 'system' && onOpenChat && !notif.type.startsWith('family_') && (
+                      {actor &&
+                        notif.actor_id !== 'system' &&
+                        notif.actor_id !== 'official_liveconnect' &&
+                        notif.type !== 'official_chat' &&
+                        onOpenChat &&
+                        !notif.type.startsWith('family_') && (
                         <button
                           onClick={(e) => {
                             e.stopPropagation();

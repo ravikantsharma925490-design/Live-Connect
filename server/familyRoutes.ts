@@ -5,6 +5,8 @@ import {
   generateId,
   findUserById,
   getProfileById,
+  findMatchedBannedWords,
+  recordActivityEvent,
   DbUserRow,
 } from './db';
 import { deleteAssetFromCloudinary } from './cloudinaryService';
@@ -73,6 +75,8 @@ function formatFamilyRow(row: any, includePendingCount = false) {
     lastMessageSenderName: row.last_message_sender_name || null,
     lastMessageAt: row.last_message_at || null,
     pendingRequestsCount,
+    isSuspended: Boolean(row.is_suspended),
+    suspendedReason: row.suspended_reason || null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -331,6 +335,10 @@ export function createFamilyRouter(requireAuth: express.RequestHandler) {
       if (!cleanName) {
         return res.status(400).json({ error: 'Family name is required.' });
       }
+      const matchedNameWords = findMatchedBannedWords(cleanName).filter((w) => w.action === 'block');
+      if (matchedNameWords.length > 0) {
+        return res.status(400).json({ error: 'Family name contains a restricted word.' });
+      }
       const cleanPhoto = typeof photoUrl === 'string' && photoUrl.trim() ? photoUrl.trim().slice(0, 500) : null;
       const cleanRelation = typeof relationTag === 'string' && relationTag.trim() ? relationTag.trim().slice(0, 32) : null;
       const approvalFlag = joinApprovalRequired === undefined ? 1 : joinApprovalRequired ? 1 : 0;
@@ -469,6 +477,12 @@ export function createFamilyRouter(requireAuth: express.RequestHandler) {
 
       if (!fam) {
         return res.status(404).json({ error: 'This invite link is invalid, reset, or disabled.' });
+      }
+      if (fam.is_suspended) {
+        return res.status(403).json({
+          error: fam.suspended_reason ? `This Family is suspended: ${fam.suspended_reason}` : 'This Family has been suspended by an administrator.',
+          code: 'FAMILY_SUSPENDED',
+        });
       }
 
       const existing = getActiveMembership(fam.id, userId);
@@ -744,6 +758,9 @@ export function createFamilyRouter(requireAuth: express.RequestHandler) {
       }
       const fam = db.prepare('SELECT * FROM families WHERE id = ?').get(familyId) as any;
       if (!fam) return res.status(404).json({ error: 'Family not found.' });
+      if (fam.is_suspended) {
+        return res.status(403).json({ error: 'This Family is suspended and cannot be edited.' });
+      }
 
       const { name, photoUrl, joinApprovalRequired, onlyAdminsCanSend } = req.body || {};
       const actor = getProfileById(userId);
@@ -757,6 +774,10 @@ export function createFamilyRouter(requireAuth: express.RequestHandler) {
 
       if (typeof name === 'string' && name.trim()) {
         const clean = name.trim().slice(0, 80);
+        const blockedNameWords = findMatchedBannedWords(clean).filter((w) => w.action === 'block');
+        if (blockedNameWords.length > 0) {
+          return res.status(400).json({ error: 'Family name contains a restricted word.' });
+        }
         if (clean !== fam.name) {
           nextName = clean;
           insertSystemMessage(familyId, `${actorName} renamed the Family to "${clean}"`);
@@ -1638,6 +1659,12 @@ export function createFamilyRouter(requireAuth: express.RequestHandler) {
 
       const fam = db.prepare('SELECT * FROM families WHERE id = ?').get(familyId) as any;
       if (!fam) return res.status(404).json({ error: 'Family not found.' });
+      if (fam.is_suspended) {
+        return res.status(403).json({
+          error: fam.suspended_reason ? `This Family is suspended: ${fam.suspended_reason}` : 'This Family is currently suspended by an administrator.',
+          code: 'FAMILY_SUSPENDED',
+        });
+      }
 
       const mem = getActiveMembership(familyId, userId);
       if (!mem || mem.status !== 'active') {
@@ -1664,6 +1691,13 @@ export function createFamilyRouter(requireAuth: express.RequestHandler) {
       const cleanContent = typeof content === 'string' ? content.trim().slice(0, 4000) : '';
       if (!cleanContent && msgType === 'text') {
         return res.status(400).json({ error: 'Message content cannot be empty.' });
+      }
+
+      if (msgType === 'text') {
+        const blockedWords = findMatchedBannedWords(cleanContent).filter((w) => w.action === 'block');
+        if (blockedWords.length > 0) {
+          return res.status(400).json({ error: 'Message contains a restricted word and could not be sent.' });
+        }
       }
 
       const finalContent =
@@ -1788,6 +1822,7 @@ export function createFamilyRouter(requireAuth: express.RequestHandler) {
       }
 
       const inserted = db.prepare('SELECT * FROM family_messages WHERE id = ?').get(msgId);
+      recordActivityEvent({ eventType: 'family_msg_sent', userId, familyId });
       return res.json({ message: formatMessageRow(inserted) });
     } catch (err: any) {
       return res.status(500).json({ error: err?.message || 'Failed to send message' });

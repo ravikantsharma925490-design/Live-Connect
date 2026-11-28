@@ -20,6 +20,7 @@ export type CallStatus =
 
 export type AccountStatus = 'active' | 'restricted' | 'suspended' | 'disabled' | 'deactivated';
 export type UserRole = 'user' | 'moderator' | 'admin';
+export type AdminRoleType = 'none' | 'super_admin' | 'moderator' | 'support';
 export type AppealStatus = 'pending' | 'approved' | 'rejected';
 export type ModerationActionType = 'warn' | 'restrict' | 'suspend' | 'ban' | 'restore' | 'deactivate' | 'auto_restore';
 
@@ -111,6 +112,9 @@ export interface AuthUser {
   restored_at?: string | null;
   restored_notice_pending?: boolean;
   role?: UserRole;
+  admin_role?: AdminRoleType;
+  is_verified?: boolean;
+  force_logout_after?: string | null;
   created_at?: string;
 }
 
@@ -136,6 +140,10 @@ export interface Profile {
   status?: AccountStatus;
   strike_count?: number;
   role?: UserRole;
+  admin_role?: AdminRoleType;
+  is_verified?: boolean;
+  force_logout_after?: string | null;
+  last_active_at?: string | null;
   is_online: boolean;
   last_seen: string;
   created_at: string;
@@ -228,7 +236,10 @@ export type NotificationType =
   | 'family_join_approved'
   | 'family_join_rejected'
   | 'family_message_report'
-  | 'family_deleted';
+  | 'family_deleted'
+  | 'announcement'
+  | 'official_chat'
+  | 'support_reply';
 
 export interface AppNotification {
   id: string;
@@ -304,7 +315,7 @@ export type UserReportCategory =
 
 export type UserReportStatus = 'pending' | 'under_review' | 'resolved' | 'dismissed';
 
-export type UserReportSource = 'profile' | 'chat' | 'search' | 'call' | 'family_chat';
+export type UserReportSource = 'profile' | 'chat' | 'search' | 'call' | 'family_chat' | 'family_profile';
 
 export interface ReportedMessageContext {
   id: string;
@@ -388,6 +399,8 @@ export interface Family {
   lastMessageSenderName?: string | null;
   lastMessageAt?: string | null;
   pendingRequestsCount?: number;
+  isSuspended?: boolean;
+  suspendedReason?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -485,6 +498,18 @@ export interface FamilyInvite {
   status: 'pending' | 'accepted' | 'declined';
   createdAt: string;
   respondedAt?: string | null;
+}
+
+export interface OfficialMessage {
+  id: string;
+  text: string;
+  imageUrl?: string | null;
+  senderId: string;
+  senderEmail?: string | null;
+  senderRole: 'super_admin' | 'moderator';
+  deliveredCount: number;
+  createdAt: string;
+  updatedAt: string;
 }
 
 

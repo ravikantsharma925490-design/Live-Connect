@@ -88,6 +88,7 @@ export const FamilyChatWindow: React.FC<FamilyChatWindowProps> = ({
   const [infoOpen, setInfoOpen] = useState(false);
   const [replyingTo, setReplyingTo] = useState<FamilyMessage | null>(null);
   const [reportingMsg, setReportingMsg] = useState<FamilyMessage | null>(null);
+  const [reportingFamily, setReportingFamily] = useState(false);
   const [viewingImage, setViewingImage] = useState<{ url: string; caption?: string } | null>(null);
   const [activePinIndex, setActivePinIndex] = useState(0);
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -699,7 +700,9 @@ export const FamilyChatWindow: React.FC<FamilyChatWindowProps> = ({
                 onFamilyListChanged();
               }}
               lockMessage={
-                family?.onlyAdminsCanSend && membership?.role === 'member'
+                family?.isSuspended
+                  ? family.suspendedReason || 'This Family has been suspended by an administrator.'
+                  : family?.onlyAdminsCanSend && membership?.role === 'member'
                   ? 'Only Admins and the Owner can send messages in this Family.'
                   : null
               }
@@ -728,15 +731,20 @@ export const FamilyChatWindow: React.FC<FamilyChatWindowProps> = ({
           onFamilyListChanged();
           onBack();
         }}
+        onReportFamily={() => setReportingFamily(true)}
       />
 
-      {/* Anonymous Family Message Report Modal */}
+      {/* Anonymous Family Message or Group Report Modal */}
       <FamilyReportModal
-        isOpen={Boolean(reportingMsg)}
+        isOpen={Boolean(reportingMsg) || reportingFamily}
         currentUser={currentUser}
         family={family}
-        message={reportingMsg}
-        onClose={() => setReportingMsg(null)}
+        message={reportingFamily ? null : reportingMsg}
+        targetType={reportingFamily ? 'family' : 'message'}
+        onClose={() => {
+          setReportingMsg(null);
+          setReportingFamily(false);
+        }}
       />
 
       {/* Seen By Details Modal */}

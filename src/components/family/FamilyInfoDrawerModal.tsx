@@ -28,6 +28,7 @@ import {
   RotateCcw,
   CheckCheck,
   Ban,
+  Flag,
 } from 'lucide-react';
 import { DocumentSnapshot } from 'firebase/firestore';
 import {
@@ -82,6 +83,7 @@ interface FamilyInfoDrawerModalProps {
   onClose: () => void;
   onRefresh: () => Promise<void> | void;
   onLeftOrDeleted: () => void;
+  onReportFamily?: () => void;
 }
 
 type DrawerSubView = 'main' | 'invite' | 'requests' | 'removed' | 'share-dm' | 'transfer' | 'delete';
@@ -97,6 +99,7 @@ export const FamilyInfoDrawerModal: React.FC<FamilyInfoDrawerModalProps> = ({
   onClose,
   onRefresh,
   onLeftOrDeleted,
+  onReportFamily,
 }) => {
   const [subView, setSubView] = useState<DrawerSubView>('main');
   const [editingName, setEditingName] = useState(false);
@@ -1580,6 +1583,20 @@ export const FamilyInfoDrawerModal: React.FC<FamilyInfoDrawerModalProps> = ({
                   >
                     <Eraser className="w-4 h-4 text-neutral-500" />
                     <span>Clear Chat (for me only)</span>
+                  </button>
+                )}
+
+                {onReportFamily && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onClose();
+                      onReportFamily();
+                    }}
+                    className="w-full p-2.5 rounded-2xl bg-amber-50 dark:bg-amber-950/30 hover:bg-amber-100 dark:hover:bg-amber-950/50 text-xs font-semibold text-amber-700 dark:text-amber-300 flex items-center gap-2 cursor-pointer"
+                  >
+                    <Flag className="w-4 h-4" />
+                    <span>Report Family</span>
                   </button>
                 )}
 

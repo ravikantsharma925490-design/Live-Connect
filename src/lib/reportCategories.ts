@@ -117,6 +117,7 @@ export async function submitUserReport(params: {
   category: UserReportCategory;
   details?: string;
   source: UserReportSource;
+  targetType?: 'user' | 'message' | 'family';
   conversationId?: string | null;
   familyId?: string | null;
   familyName?: string | null;
@@ -135,6 +136,10 @@ export async function submitUserReport(params: {
   }
   const cleanDetails = combinedDetails.trim().slice(0, 1000) || undefined;
 
+  const resolvedTargetType =
+    params.targetType ||
+    (params.reportedMessage ? 'message' : params.source === 'family_profile' ? 'family' : 'user');
+
   const headers = await getAuthHeaders();
   const res = await fetch('/api/reports/user', {
     method: 'POST',
@@ -150,6 +155,7 @@ export async function submitUserReport(params: {
       category: params.category,
       details: cleanDetails,
       source: params.source,
+      targetType: resolvedTargetType,
       conversationId: params.conversationId || null,
       familyId: params.familyId || null,
       familyName: params.familyName || null,

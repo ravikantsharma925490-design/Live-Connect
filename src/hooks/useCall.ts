@@ -30,6 +30,7 @@ import {
   sanitizeOptionalStr,
 } from '@/src/lib/firebase/client';
 import { fetchPublicProfileFs, fetchRelationStatusFs } from '@/src/lib/firebase/services';
+import { reportTelemetry } from '@/src/lib/bannedWordsCheck';
 
 function createFallbackProfile(id: string, name = 'Caller'): Profile {
   return {
@@ -1008,6 +1009,8 @@ export function useCall(currentUser?: Profile | null) {
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         });
+
+        void reportTelemetry('call_created', callId);
 
         // Dispatch incoming call notification
         const notifId = `nc_${generateUUID().replace(/-/g, '').slice(0, 20)}`;
